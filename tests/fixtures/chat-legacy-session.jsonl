@@ -1,0 +1,4 @@
+{"id":"legacy-thread-0001","timestamp":"2025-08-24T10:45:58.916Z","instructions":"Generic legacy fixture.","git":{"repository_url":"https://example.invalid/example/project.git"}}
+{"record_type":"state"}
+{"type":"message","id":null,"role":"user","content":[{"type":"input_text","text":"Rebuild this project context."}]}
+{"type":"message","id":null,"role":"assistant","content":[{"type":"output_text","text":"The project context was reviewed."}]}
