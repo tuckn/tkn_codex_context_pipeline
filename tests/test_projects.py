@@ -4,6 +4,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from tkn_codex_context.app_state import (
     CodexAppProject,
     CodexAppState,
@@ -27,22 +29,27 @@ def app_project(project_id: str, name: str, roots: list[Path]) -> CodexAppProjec
 def test_sync_binds_multi_root_and_preserves_unknown_fields(tmp_path: Path) -> None:
     primary = tmp_path / "primary"
     secondary = tmp_path / "secondary"
-    context_root = tmp_path / "context"
-    registry = context_root / "state/index.jsonl"
+    data_root = tmp_path / "pipeline" / "data"
+    state_root = tmp_path / "pipeline" / "state"
+    registry = data_root / "project-registry.jsonl"
     registry.parent.mkdir(parents=True)
     existing = {
-        "projectId": "existing",
+        "schemaVersion": 2,
+        "identityKind": "codexAppLocalProject",
+        "projectId": "source-1",
         "title": "Old",
         "currentRoot": str(primary),
-        "projectContextPath": str(context_root / "state/existing"),
+        "projectDataPath": str(data_root / "projects/existing"),
+        "projectStatePath": str(state_root / "projects/existing"),
         "status": "active",
         "customField": {"keep": True},
     }
     registry.write_text(json.dumps(existing) + "\n", encoding="utf-8")
     config = AppConfig(
         codex_home=tmp_path / "codex",
-        context_store_root=context_root,
-        pipeline_root=tmp_path / "pipeline",
+        data_root=data_root,
+        state_root=state_root,
+        cache_root=tmp_path / "cache",
     )
     source = app_project("source-1", "Project", [primary, secondary])
     state = CodexAppState(
@@ -54,65 +61,66 @@ def test_sync_binds_multi_root_and_preserves_unknown_fields(tmp_path: Path) -> N
     before = registry.read_bytes()
     records, report = sync_projects(config, state, dry_run=True)
     assert registry.read_bytes() == before
-    assert report["projects"][0]["method"] == "root"
+    assert report["projects"][0]["method"] == "project-id"
     assert records[0]["customField"] == {"keep": True}
 
     projects = runtime_projects(records, state)
     assert projects[0].active_roots == (primary.absolute(), secondary.absolute())
     assert projects[0].assigned_thread_ids == frozenset({"thread-1"})
     assert projects[0].projectless_thread_ids == frozenset({"thread-2"})
+    assert projects[0].project_id == "source-1"
+    assert projects[0].sessions_path == data_root / "projects/source-1/sessions"
+    assert projects[0].state_path == state_root / "projects/source-1/chat-refresh-state.json"
 
 
-def test_ambiguous_name_stays_pending(tmp_path: Path) -> None:
-    context_root = tmp_path / "context"
-    registry = context_root / "state/index.jsonl"
-    registry.parent.mkdir(parents=True)
-    records = [
-        {
-            "projectId": value,
-            "title": "Same",
-            "currentRoot": str(tmp_path / value),
-            "projectContextPath": str(context_root / "state" / value),
-            "status": "active",
-        }
-        for value in ("one", "two")
-    ]
-    registry.write_text("".join(json.dumps(item) + "\n" for item in records), encoding="utf-8")
+def test_same_name_and_root_remain_distinct_projects(tmp_path: Path) -> None:
+    data_root = tmp_path / "pipeline" / "data"
+    state_root = tmp_path / "pipeline" / "state"
     config = AppConfig(
         codex_home=tmp_path / "codex",
-        context_store_root=context_root,
-        pipeline_root=tmp_path / "pipeline",
+        data_root=data_root,
+        state_root=state_root,
+        cache_root=tmp_path / "cache",
     )
+    shared = tmp_path / "shared"
     state = CodexAppState(
-        projects=(app_project("source", "Same", [tmp_path / "new"]),),
+        projects=(
+            app_project("source-one", "Same", [shared]),
+            app_project("source-two", "Same", [shared]),
+        ),
         assignments={},
         projectless_thread_ids=frozenset(),
     )
-    _records, report = sync_projects(config, state, dry_run=True)
-    assert report["pendingCount"] == 1
-    assert report["boundCount"] == 0
+    records, report = sync_projects(config, state, dry_run=True)
+    assert {item["projectId"] for item in records} == {"source-one", "source-two"}
+    assert report["pendingCount"] == 0
+    assert report["boundCount"] == 2
 
 
 def test_replaced_active_root_becomes_historical_alias(tmp_path: Path) -> None:
     old = tmp_path / "old"
     new = tmp_path / "new"
-    context_root = tmp_path / "context"
-    registry = context_root / "state/index.jsonl"
+    data_root = tmp_path / "pipeline" / "data"
+    state_root = tmp_path / "pipeline" / "state"
+    registry = data_root / "project-registry.jsonl"
     registry.parent.mkdir(parents=True)
     record = {
-        "projectId": "existing",
+        "schemaVersion": 2,
+        "identityKind": "codexAppLocalProject",
+        "projectId": "source",
         "title": "Project",
         "currentRoot": str(old),
-        "projectContextPath": str(context_root / "state/existing"),
+        "projectDataPath": str(data_root / "projects/existing"),
+        "projectStatePath": str(state_root / "projects/existing"),
         "status": "active",
-        "sourceBindings": [{"kind": "codexAppLocalProject", "sourceProjectId": "source"}],
         "roots": [{"path": str(old), "role": "primary", "status": "active"}],
     }
     registry.write_text(json.dumps(record) + "\n", encoding="utf-8")
     config = AppConfig(
         codex_home=tmp_path / "codex",
-        context_store_root=context_root,
-        pipeline_root=tmp_path / "pipeline",
+        data_root=data_root,
+        state_root=state_root,
+        cache_root=tmp_path / "cache",
     )
     state = CodexAppState(
         projects=(app_project("source", "Project", [new]),),
@@ -126,6 +134,113 @@ def test_replaced_active_root_becomes_historical_alias(tmp_path: Path) -> None:
         {"path": str(new.absolute()), "role": "primary", "status": "active"},
         {"path": str(old), "role": "alias", "status": "historical"},
     ]
+    assert records[0]["projectId"] == "source"
+    assert records[0]["title"] == "Project"
+
+
+def test_same_id_survives_drive_and_name_change(tmp_path: Path) -> None:
+    old = Path(r"C:\path\to\project")
+    new = Path(r"D:\path\to\project")
+    config = AppConfig(
+        codex_home=tmp_path / "codex",
+        data_root=tmp_path / "pipeline/data",
+        state_root=tmp_path / "pipeline/state",
+        cache_root=tmp_path / "cache",
+    )
+    record = {
+        "schemaVersion": 2,
+        "identityKind": "codexAppLocalProject",
+        "projectId": "source",
+        "title": "Old Name",
+        "currentRoot": str(old),
+        "projectDataPath": str(config.projects_data_root / "source"),
+        "projectStatePath": str(config.projects_state_root / "source"),
+        "sessionsPath": str(config.projects_data_root / "source/sessions"),
+        "status": "active",
+        "roots": [{"path": str(old), "role": "primary", "status": "active"}],
+    }
+    config.registry_path.parent.mkdir(parents=True)
+    config.registry_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    state = CodexAppState(
+        projects=(app_project("source", "New Name", [new]),),
+        assignments={},
+        projectless_thread_ids=frozenset(),
+    )
+
+    records, report = sync_projects(config, state, dry_run=True)
+
+    assert report["projects"][0]["method"] == "project-id"
+    assert records[0]["projectId"] == "source"
+    assert records[0]["title"] == "New Name"
+    assert records[0]["currentRoot"] == str(new.absolute())
+    assert records[0]["projectDataPath"] == str(config.projects_data_root / "source")
+    assert {"path": str(old), "role": "alias", "status": "historical"} in records[0]["roots"]
+
+
+def test_missing_app_project_becomes_inactive_and_can_reactivate(tmp_path: Path) -> None:
+    config = AppConfig(
+        codex_home=tmp_path / "codex",
+        data_root=tmp_path / "pipeline/data",
+        state_root=tmp_path / "pipeline/state",
+        cache_root=tmp_path / "cache",
+    )
+    record = {
+        "schemaVersion": 2,
+        "identityKind": "codexAppLocalProject",
+        "projectId": "source",
+        "title": "Old",
+        "currentRoot": str(tmp_path / "old"),
+        "projectDataPath": str(config.projects_data_root / "source"),
+        "projectStatePath": str(config.projects_state_root / "source"),
+        "sessionsPath": str(config.projects_data_root / "source/sessions"),
+        "status": "active",
+        "roots": [],
+    }
+    config.registry_path.parent.mkdir(parents=True)
+    config.registry_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    empty_state = CodexAppState(projects=(), assignments={}, projectless_thread_ids=frozenset())
+
+    inactive, _report = sync_projects(config, empty_state, dry_run=True)
+
+    assert inactive[0]["status"] == "inactive"
+    returning = CodexAppState(
+        projects=(app_project("source", "Renamed", [tmp_path / "new"]),),
+        assignments={},
+        projectless_thread_ids=frozenset(),
+    )
+    active, _report = sync_projects(config, returning, dry_run=True)
+    assert active[0]["status"] == "active"
+    assert active[0]["title"] == "Renamed"
+
+
+def test_sync_rejects_old_registry_schema(tmp_path: Path) -> None:
+    config = AppConfig(
+        codex_home=tmp_path / "codex",
+        data_root=tmp_path / "pipeline" / "data",
+        state_root=tmp_path / "pipeline" / "state",
+        cache_root=tmp_path / "cache",
+    )
+    config.registry_path.parent.mkdir(parents=True)
+    config.registry_path.write_text(
+        json.dumps(
+            {
+                "projectId": "legacy",
+                "title": "Project",
+                "currentRoot": str(tmp_path / "repo"),
+                "status": "active",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    state = CodexAppState(
+        projects=(app_project("source", "Project", [tmp_path / "repo"]),),
+        assignments={},
+        projectless_thread_ids=frozenset(),
+    )
+
+    with pytest.raises(PipelineError, match="init --force"):
+        sync_projects(config, state, dry_run=True)
 
 
 def test_app_state_reader_fails_closed_on_key_id_mismatch(tmp_path: Path) -> None:

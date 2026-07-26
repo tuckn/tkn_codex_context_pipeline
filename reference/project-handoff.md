@@ -53,7 +53,7 @@ CLI:     tkn-codex-context
 Implemented commands:
 
 ```text
-config init
+init [--force]
 config show
 projects sync
 session-notes run
@@ -84,7 +84,9 @@ tests/
 
 Responsibilities:
 
-- `config.py`: strict layered YAML configuration and `installed_at` watermark
+- `config.py`: strict layered YAML configuration and the `installed_at`
+  normal-run boundary
+- `initialization.py`: safe first initialization and transactional force reset
 - `app_state.py`: fail-closed adapter for Codex app local Project state
 - `projects.py`: binding Codex app Projects to durable context `projectId`s
 - `chat_logs.py`: read-only JSONL parsing and canonical event generation
@@ -98,7 +100,7 @@ Responsibilities:
 Configuration precedence is:
 
 1. built-in defaults
-2. `~/.tkn/codex-context-pipeline/config.yaml`
+2. `~/.tkn/codex_context_pipeline/config.yaml`
 3. `./.tkn/config.yaml`
 4. an explicitly supplied `--config`
 5. CLI options
@@ -107,8 +109,9 @@ Main defaults:
 
 ```yaml
 codex_home: ~/.codex
-context_store_root: ~/.tkn/codex-context
-pipeline_root: ~/.tkn/codex-context-pipeline
+data_root: ~/.tkn/codex_context_pipeline/data
+state_root: ~/.tkn/codex_context_pipeline/state
+cache_root: ~/.cache/codex_context_pipeline
 provider: codex
 model: gpt-5.6-sol
 reasoning_effort: high
@@ -117,28 +120,29 @@ runtime_minutes: 230
 model_timeout_seconds: 1800
 ```
 
-`config init` records the current time as `installed_at`. Normal runs process
-only chats at or after this watermark. Older chats require explicit backfill or
-rebuild.
+`init` creates the configuration and Project registry, records the current
+time as `installed_at`, and creates empty Project storage. Normal runs process
+only chats created or updated at or after this time. Older chats require
+explicit backfill or rebuild. `init --force` preserves configuration values,
+refreshes `installed_at`, and transactionally replaces data, state, and cache.
+
+The canonical Project registry is `data/project-registry.jsonl`. Session Notes
+are stored under `data/projects/<projectId>/sessions/`; per-Project refresh
+checkpoints are stored under
+`state/projects/<projectId>/chat-refresh-state.json`. Run reports are stored
+under `state/reports/`. Resumable work is stored under the cache root.
+Execution-only model files use Python's standard temporary directory (`%TMP%`
+on Windows and normally `/tmp` on Linux).
 
 Do not commit a real `.tkn/config.yaml`. Only
 `.tkn/config.example.yaml` is intended for version control.
 
 ## Project binding
 
-The existing context-store `projectId` remains authoritative.
-
-Codex app Project binding order:
-
-1. saved source binding
-2. unique exact match between an existing `currentRoot` and an app `rootPaths`
-   entry
-3. unique case-insensitive exact Project-name match
-4. deterministic creation of a new context Project
-5. collisions remain pending and generate no notes
-
-A new deterministic `projectId` uses the app Project creation date, a name
-slug, and a shortened SHA-256 hash of the source Project ID.
+The Codex app internal ID in `local-projects` is the authoritative
+`projectId`, registry key, directory name, and CLI selector. Project names and
+roots are mutable metadata and never establish identity. Two sidebar Projects
+remain distinct even when they share a name or root.
 
 Registry updates preserve unknown fields and use atomic replacement.
 
@@ -296,16 +300,16 @@ The build output and local virtual environment are ignored.
 
 ## Recommended next steps
 
-First initialize the real configuration and repeat the safety checks:
+First inspect and initialize the real configuration and Project storage:
 
 ```powershell
-uv run tkn-codex-context config init
-uv run tkn-codex-context projects sync --dry-run
+uv run tkn-codex-context init --dry-run
+uv run tkn-codex-context init
 uv run tkn-codex-context session-notes run --dry-run
 ```
 
-Review the nine proposed new context Projects and the 14 ambiguous historical
-threads before applying broad backfill.
+Review Project IDs and ambiguous historical threads before applying broad
+backfill.
 
 After approval:
 
@@ -330,10 +334,11 @@ Project binding.
 
 - `.codex-global-state.json` and Codex JSONL are private internal formats, not
   public compatibility contracts. The adapter intentionally fails closed.
-- Root matching is intentionally exact and conservative. Nested active roots
-  can make old, unassigned threads ambiguous.
+- Project identity uses only the Codex app internal ID. Cwd fallback compares
+  both original and resolved roots; nested active roots can still make old,
+  unassigned threads ambiguous.
 - A missing real config is allowed only for dry-run, where the current time is
-  used as an in-memory watermark. A write run requires `config init`.
+  used as an in-memory normal-run boundary. A write run requires `init`.
 - The initial release does not distill decisions or working/global context.
 - Removing or changing the existing Plugin and configuring Task Scheduler are
   separate tasks.

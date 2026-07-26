@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -20,9 +21,19 @@ class CodexAppProject(BaseModel):
     created_at: datetime = Field(alias="createdAt")
     updated_at: datetime | None = Field(default=None, alias="updatedAt")
 
-    @field_validator("id", "name")
+    @field_validator("id")
     @classmethod
-    def nonempty(cls, value: str) -> str:
+    def safe_id(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be empty")
+        stripped = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", stripped):
+            raise ValueError("must be a safe path segment")
+        return stripped
+
+    @field_validator("name")
+    @classmethod
+    def nonempty_name(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("must not be empty")
         return value.strip()

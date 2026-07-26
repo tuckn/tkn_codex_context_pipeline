@@ -22,6 +22,17 @@ from .session_notes import (
 )
 
 CONFIG_SCHEMA_VERSION = 1
+APP_DIRECTORY_NAME = "codex_context_pipeline"
+
+
+def default_app_root() -> Path:
+    return Path.home() / ".tkn" / APP_DIRECTORY_NAME
+
+
+def default_user_cache_root() -> Path:
+    configured = os.getenv("XDG_CACHE_HOME")
+    base = Path(configured).expanduser() if configured else Path.home() / ".cache"
+    return base / APP_DIRECTORY_NAME
 
 
 class AppConfig(BaseModel):
@@ -32,8 +43,9 @@ class AppConfig(BaseModel):
     schema_version: Literal[1] = 1
     installed_at: datetime | None = None
     codex_home: Path = Field(default_factory=lambda: Path.home() / ".codex")
-    context_store_root: Path = Field(default_factory=lambda: Path.home() / ".tkn" / "codex-context")
-    pipeline_root: Path = Field(default_factory=lambda: Path.home() / ".tkn" / "codex-context-pipeline")
+    data_root: Path = Field(default_factory=lambda: default_app_root() / "data")
+    state_root: Path = Field(default_factory=lambda: default_app_root() / "state")
+    cache_root: Path = Field(default_factory=default_user_cache_root)
     provider: Literal["codex"] = "codex"
     codex_executable: str = "codex"
     model: str = DEFAULT_MODEL
@@ -67,21 +79,25 @@ class AppConfig(BaseModel):
 
     @property
     def registry_path(self) -> Path:
-        return self.context_store_root / "state" / "index.jsonl"
+        return self.data_root / "project-registry.jsonl"
 
     @property
-    def cache_root(self) -> Path:
-        return self.pipeline_root / "cache"
+    def projects_data_root(self) -> Path:
+        return self.data_root / "projects"
+
+    @property
+    def projects_state_root(self) -> Path:
+        return self.state_root / "projects"
 
     @property
     def reports_root(self) -> Path:
-        return self.pipeline_root / "reports"
+        return self.state_root / "reports"
 
     def session_pipeline_config(self, *, allow_missing_watermark: bool = False) -> PipelineConfig:
         installed_at = self.installed_at
         if installed_at is None:
             if not allow_missing_watermark:
-                raise PipelineError("installed_at is missing; run `config init` first")
+                raise PipelineError("installed_at is missing; run `tkn-codex-context init` first")
             installed_at = datetime.now().astimezone()
         return PipelineConfig(
             installed_at=installed_at.astimezone().isoformat(timespec="seconds"),
@@ -97,7 +113,7 @@ class AppConfig(BaseModel):
 
 
 def global_config_path() -> Path:
-    return Path.home() / ".tkn" / "codex-context-pipeline" / "config.yaml"
+    return default_app_root() / "config.yaml"
 
 
 def project_config_path(cwd: Path | None = None) -> Path:
@@ -118,7 +134,7 @@ def _read_layer(path: Path) -> dict[str, Any]:
 
 def _resolve_paths(value: dict[str, Any], base: Path) -> dict[str, Any]:
     result = dict(value)
-    for key in ("codex_home", "context_store_root", "pipeline_root"):
+    for key in ("codex_home", "data_root", "state_root", "cache_root"):
         raw = result.get(key)
         if raw is None:
             continue
@@ -153,8 +169,9 @@ def load_app_config(
     return config.model_copy(
         update={
             "codex_home": config.codex_home.expanduser().absolute(),
-            "context_store_root": config.context_store_root.expanduser().absolute(),
-            "pipeline_root": config.pipeline_root.expanduser().absolute(),
+            "data_root": config.data_root.expanduser().absolute(),
+            "state_root": config.state_root.expanduser().absolute(),
+            "cache_root": config.cache_root.expanduser().absolute(),
         }
     )
 
@@ -167,16 +184,47 @@ def config_document(config: AppConfig) -> dict[str, Any]:
     return value
 
 
-def init_config(path: Path | None = None, *, dry_run: bool = False) -> tuple[AppConfig, Path]:
+def initialization_config(
+    path: Path | None = None,
+    *,
+    overrides: dict[str, Any] | None = None,
+) -> tuple[AppConfig, Path, tuple[str, ...]]:
+    """Load the target config for init, tolerating only retired init-owned keys."""
+
     target = (path or global_config_path()).expanduser().absolute()
-    if target.exists():
-        raise PipelineError(f"config already exists: {target}")
-    config = AppConfig(installed_at=datetime.now().astimezone())
-    if not dry_run:
-        text = yaml.safe_dump(
-            config_document(config),
-            allow_unicode=True,
-            sort_keys=False,
-        )
-        atomic_write_text(target, text)
-    return config, target
+    raw: dict[str, Any] = {}
+    removed: list[str] = []
+    if target.is_file():
+        raw = _read_layer(target)
+        for key in ("context_store_root",):
+            if key in raw:
+                raw.pop(key)
+                removed.append(key)
+        raw = _resolve_paths(raw, target.parent)
+    raw.update(_resolve_paths(overrides or {}, Path.cwd().absolute()))
+    raw["installed_at"] = datetime.now().astimezone()
+    try:
+        config = AppConfig.model_validate(raw)
+    except Exception as exc:
+        raise PipelineError(f"invalid configuration: {exc}") from exc
+    return (
+        config.model_copy(
+            update={
+                "codex_home": config.codex_home.expanduser().absolute(),
+                "data_root": config.data_root.expanduser().absolute(),
+                "state_root": config.state_root.expanduser().absolute(),
+                "cache_root": config.cache_root.expanduser().absolute(),
+            }
+        ),
+        target,
+        tuple(removed),
+    )
+
+
+def write_config(config: AppConfig, target: Path) -> None:
+    text = yaml.safe_dump(
+        config_document(config),
+        allow_unicode=True,
+        sort_keys=False,
+    )
+    atomic_write_text(target, text)

@@ -155,13 +155,11 @@ def validate_distilled_to_ref(value: str) -> str:
         raise SystemExit(f"Refusing absolute distilledTo path: {value}")
     allowed_home_refs = (
         "~/.tkn/codex-context/",
-        "~/.codex-context/",  # Legacy refs may be preserved while finalizing migrated sessions.
         "~/.codex-working/",
     )
     if ref == "~" or (ref.startswith("~/") and not ref.startswith(allowed_home_refs)):
         raise SystemExit(
-            "Only ~/.tkn/codex-context, legacy ~/.codex-context, or explicit ~/.codex-working "
-            "paths are allowed "
+            "Only ~/.tkn/codex-context or explicit ~/.codex-working paths are allowed "
             f"for home-relative distilledTo refs: {value}"
         )
     if ref == ".." or ref.startswith("../") or "/../" in ref:

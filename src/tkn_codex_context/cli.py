@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from .app_state import load_codex_app_state
-from .config import config_document, init_config, load_app_config
+from .config import config_document, load_app_config
+from .initialization import initialize_application
 from .projects import runtime_projects, sync_projects
 from .session_notes import (
     CodexSummarizer,
@@ -53,10 +54,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_runtime_options(parser)
     commands = parser.add_subparsers(dest="command", required=True)
 
+    init = commands.add_parser("init", help="Initialize or cleanly rebuild pipeline storage")
+    init.add_argument("--dry-run", action="store_true")
+    init.add_argument("--force", action="store_true")
+
     config = commands.add_parser("config", help="Manage pipeline configuration")
     config_commands = config.add_subparsers(dest="config_command", required=True)
-    init = config_commands.add_parser("init", help="Create the global YAML config")
-    init.add_argument("--dry-run", action="store_true")
     config_commands.add_parser("show", help="Show resolved configuration")
 
     projects = commands.add_parser("projects", help="Manage Project bindings")
@@ -136,18 +139,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     _configure_logging(args)
     try:
+        if args.command == "init":
+            report = initialize_application(
+                args.config,
+                overrides=_overrides(args),
+                force=args.force,
+                dry_run=args.dry_run,
+            )
+            _emit({"command": "init", **report})
+            return 0
+
         if args.command == "config":
-            if args.config_command == "init":
-                config, path = init_config(args.config, dry_run=args.dry_run)
-                _emit(
-                    {
-                        "command": "config init",
-                        "dryRun": args.dry_run,
-                        "path": str(path),
-                        "config": config_document(config),
-                    }
-                )
-                return 0
             resolved = load_app_config(
                 explicit_path=args.config,
                 overrides=_overrides(args),

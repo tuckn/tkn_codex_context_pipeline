@@ -20,11 +20,11 @@ def test_precedence_and_relative_paths(tmp_path: Path, monkeypatch: pytest.Monke
     explicit = tmp_path / "explicit" / "config.yaml"
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     write_yaml(
-        home / ".tkn/codex-context-pipeline/config.yaml",
+        home / ".tkn/codex_context_pipeline/config.yaml",
         {"idle_minutes": 10, "model": "global"},
     )
     write_yaml(cwd / ".tkn/config.yaml", {"idle_minutes": 20, "model": "local"})
-    write_yaml(explicit, {"idle_minutes": 25, "pipeline_root": "runtime"})
+    write_yaml(explicit, {"idle_minutes": 25, "state_root": "state"})
 
     config = load_app_config(
         explicit_path=explicit,
@@ -34,7 +34,10 @@ def test_precedence_and_relative_paths(tmp_path: Path, monkeypatch: pytest.Monke
 
     assert config.idle_minutes == 40
     assert config.model == "local"
-    assert config.pipeline_root == (explicit.parent / "runtime").absolute()
+    assert config.state_root == (explicit.parent / "state").absolute()
+    assert config.registry_path == config.data_root / "project-registry.jsonl"
+    assert config.projects_data_root == config.data_root / "projects"
+    assert config.projects_state_root == config.state_root / "projects"
 
 
 def test_unknown_key_is_rejected(tmp_path: Path) -> None:

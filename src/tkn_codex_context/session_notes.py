@@ -112,6 +112,7 @@ class Project:
     assigned_thread_ids: frozenset[str] = frozenset()
     foreign_assigned_thread_ids: frozenset[str] = frozenset()
     projectless_thread_ids: frozenset[str] = frozenset()
+    state_directory: Path | None = None
 
     @property
     def sessions_path(self) -> Path:
@@ -119,7 +120,7 @@ class Project:
 
     @property
     def state_path(self) -> Path:
-        return self.context_path / STATE_FILENAME
+        return (self.state_directory or self.context_path) / STATE_FILENAME
 
 
 @dataclass(frozen=True)
@@ -171,21 +172,21 @@ def now_iso() -> str:
 
 
 def default_store_root() -> Path:
-    return Path.home() / ".tkn" / "codex-context"
+    return Path.home() / ".tkn" / "codex_context_pipeline"
 
 
 def default_config_path() -> Path:
-    return default_store_root() / "config" / CONFIG_FILENAME
+    return default_store_root() / "config.yaml"
 
 
 def default_registry_path() -> Path:
-    return default_store_root() / "state" / "index.jsonl"
+    return default_store_root() / "data" / "project-registry.jsonl"
 
 
 def default_cache_root() -> Path:
     override = os.environ.get("XDG_CACHE_HOME")
     base = Path(override).expanduser() if override else Path.home() / ".cache"
-    return base / "net.tuckn" / "codex-context" / "session-note-pipeline"
+    return base / "codex_context_pipeline"
 
 
 def parse_datetime(value: str) -> datetime:
@@ -201,7 +202,7 @@ def parse_datetime(value: str) -> datetime:
 
 def atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temporary = path.parent / f".tmp-{uuid.uuid4().hex[:12]}"
     try:
         temporary.write_text(text, encoding="utf-8", newline="\n")
         os.replace(temporary, path)
@@ -318,8 +319,9 @@ def load_active_projects(registry_path: Path | None = None) -> list[Project]:
                 continue
             project_id = str(value.get("projectId") or "")
             current_root = str(value.get("currentRoot") or "")
-            context_path = str(value.get("projectContextPath") or "")
-            if not project_id or not current_root or not context_path:
+            data_path = str(value.get("projectDataPath") or "")
+            state_path = str(value.get("projectStatePath") or "")
+            if not project_id or not current_root or not data_path or not state_path:
                 raise PipelineError(f"active registry record at line {line_number} is incomplete")
             if project_id in seen:
                 raise PipelineError(f"duplicate active projectId in registry: {project_id}")
@@ -329,7 +331,8 @@ def load_active_projects(registry_path: Path | None = None) -> list[Project]:
                     project_id=project_id,
                     title=str(value.get("title") or project_id),
                     current_root=Path(current_root).expanduser().absolute(),
-                    context_path=Path(context_path).expanduser().absolute(),
+                    context_path=Path(data_path).expanduser().absolute(),
+                    state_directory=Path(state_path).expanduser().absolute(),
                 )
             )
     return sorted(projects, key=lambda item: item.project_id)
@@ -421,6 +424,17 @@ def update_refresh_state(
     atomic_write_json(project.state_path, state)
 
 
+def path_variants(value: str | Path) -> tuple[str, ...]:
+    path = Path(value).expanduser().absolute()
+    values: list[str] = []
+    values.append(str(path))
+    try:
+        values.append(str(path.resolve(strict=False)))
+    except OSError:
+        pass
+    return tuple(dict.fromkeys(values))
+
+
 def project_roots(project: Project) -> tuple[str, ...]:
     values: list[str] = []
     for root in (
@@ -428,11 +442,7 @@ def project_roots(project: Project) -> tuple[str, ...]:
         *project.active_roots,
         *project.historical_roots,
     ):
-        values.append(str(root))
-        try:
-            values.append(str(root.resolve(strict=False)))
-        except OSError:
-            pass
+        values.extend(path_variants(root))
     return tuple(dict.fromkeys(values))
 
 
@@ -449,7 +459,11 @@ def project_with_state_roots(
 
 
 def event_matches_project(event: ChatEvent, project: Project) -> bool:
-    return any(path_is_within(event.cwd, root) for root in project_roots(project))
+    return any(
+        path_is_within(cwd, root)
+        for cwd in path_variants(event.cwd)
+        for root in project_roots(project)
+    )
 
 
 def events_for_project(

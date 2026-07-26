@@ -11,13 +11,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from tkn_codex_context.chat_logs import read_session_events
+from tkn_codex_context.chat_logs import ChatEvent, read_session_events
 from tkn_codex_context.session_notes import (
     Candidate,
     CodexSummarizer,
     PipelineConfig,
     Project,
     chunk_events,
+    event_matches_project,
     execute_pipeline,
     execute_rebuild,
     load_config,
@@ -167,7 +168,15 @@ class SessionNotePipelineTests(unittest.TestCase):
         self.sessions = self.root / "codex-sessions"
         self.sessions.mkdir()
         self.cache = self.root / "cache"
-        self.project = Project("project-1", "Project 1", self.repo, self.context)
+        self.project = Project(
+            "project-1",
+            "Project 1",
+            self.repo,
+            self.context,
+            state_directory=self.root / "state" / "projects" / "project-1",
+        )
+        assert self.project.state_directory is not None
+        self.project.state_directory.mkdir(parents=True)
         self.config = PipelineConfig(
             installed_at="2026-01-01T00:00:00+00:00",
             sessions_root=self.sessions,
@@ -275,6 +284,33 @@ class SessionNotePipelineTests(unittest.TestCase):
             {item.thread_id for item in candidates},
         )
         self.assertEqual(1, counts["assigned"])
+
+    def test_cwd_fallback_compares_resolved_symlink_path(self) -> None:
+        target = self.root / "target"
+        target.mkdir()
+        alias = self.root / "alias"
+        event = ChatEvent(
+            id="event-1",
+            kind="user_message",
+            actor="user",
+            name="",
+            text="work",
+            timestamp="2026-01-01T00:00:00+00:00",
+            turn_id="turn-1",
+            cwd=str(alias / "nested"),
+        )
+        project = Project("project-1", "Project 1", target, self.context)
+        original_resolve = Path.resolve
+
+        def resolve_alias(path: Path, strict: bool = False) -> Path:
+            try:
+                relative = path.relative_to(alias)
+            except ValueError:
+                return original_resolve(path, strict=strict)
+            return target / relative
+
+        with patch.object(Path, "resolve", new=resolve_alias):
+            self.assertTrue(event_matches_project(event, project))
 
     def test_projectless_and_ambiguous_threads_are_excluded(self) -> None:
         nested = self.repo / "nested"
