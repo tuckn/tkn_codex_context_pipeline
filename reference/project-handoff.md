@@ -55,8 +55,8 @@ Implemented commands:
 ```text
 init [--force]
 config show
-projects sync
-session-notes run
+projects fetch
+session-notes pull
 session-notes backfill --project-id <id>
 session-notes backfill --all
 session-notes rebuild --project-id <id> [--force]
@@ -305,17 +305,19 @@ First inspect and initialize the real configuration and Project storage:
 ```powershell
 uv run tkn-codex-context init --dry-run
 uv run tkn-codex-context init
-uv run tkn-codex-context session-notes run --dry-run
+uv run tkn-codex-context projects list
+uv run tkn-codex-context session-notes pull --dry-run
 ```
 
+Use `projects list --json` when the full registered root metadata is needed.
 Review Project IDs and ambiguous historical threads before applying broad
 backfill.
 
 After approval:
 
 ```powershell
-uv run tkn-codex-context projects sync
-uv run tkn-codex-context session-notes run
+uv run tkn-codex-context projects fetch
+uv run tkn-codex-context session-notes pull
 ```
 
 Historical processing should start with a small Project-scoped batch:
@@ -338,7 +340,7 @@ Project binding.
   both original and resolved roots; nested active roots can still make old,
   unassigned threads ambiguous.
 - A missing real config is allowed only for dry-run, where the current time is
-  used as an in-memory normal-run boundary. A write run requires `init`.
+  used as an in-memory normal-pull boundary. A write pull requires `init`.
 - The initial release does not distill decisions or working/global context.
 - Removing or changing the existing Plugin and configuring Task Scheduler are
   separate tasks.

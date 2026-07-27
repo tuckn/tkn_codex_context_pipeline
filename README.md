@@ -6,6 +6,12 @@ It never writes markers, configuration, or context into a Project folder.
 
 Japanese documentation: [README_ja.md](README_ja.md)
 
+## Requirements
+
+- Python 3.11 or newer
+- [uv](https://docs.astral.sh/uv/)
+- `codex` on `PATH` for summary generation
+
 ## Installation
 
 Install Python 3.11 or later and uv, then install the CLI from the repository
@@ -29,7 +35,7 @@ tkn-codex-context config show
 `init` creates the global configuration and Project registry, then creates an
 empty `sessions/` directory for each Project in the Codex app sidebar. It does
 not generate Session Notes. The command records the current time as
-`installed_at`. A normal run
+`installed_at`. A normal pull
 automatically processes only chats created or updated at or after that time.
 Older chats require an explicit `backfill` or `rebuild`.
 
@@ -41,6 +47,18 @@ force initialization. Model, path, and runtime settings are preserved;
 tkn-codex-context init --force --dry-run
 tkn-codex-context init --force
 ```
+
+List the registered Projects when you need to map a Project name or current
+root back to its internal ID:
+
+```powershell
+tkn-codex-context projects list
+tkn-codex-context projects list --json
+```
+
+The default output is a human-readable table containing status, name, internal
+Project ID, and current root. `--json` also includes the registered root
+metadata for scripts and more detailed inspection.
 
 The application separates its own files by purpose:
 
@@ -82,22 +100,113 @@ Relative paths in a YAML layer are resolved relative to that YAML file.
 
 ## Normal operation
 
-After initialization, synchronize added or changed Codex app Projects. Dry-run
-does not change the registry, notes, refresh state, cache, or reports:
+### Fetch Project metadata
+
+After initialization, fetch added or changed Project metadata from the Codex
+app. This is a one-way update from the Codex app into the local registry.
+Dry-run does not change the registry or Project directories:
 
 ```powershell
-tkn-codex-context projects sync --dry-run
-tkn-codex-context session-notes run --dry-run
+tkn-codex-context projects fetch --dry-run
 ```
 
 Then apply:
 
 ```powershell
-tkn-codex-context projects sync
-tkn-codex-context session-notes run
+tkn-codex-context projects fetch
 ```
 
-Normal runs process chats that have been idle for at least 30 minutes.
+### Reading Project fetch results
+
+`projectFetch.projects` in `projects fetch` and `session-notes pull` contains
+the following fields for each Project currently present in the Codex app:
+
+| Field | Meaning |
+| --- | --- |
+| `sourceProjectId` | Internal Project ID read from the Codex app |
+| `projectId` | Project ID used by the registry and storage folder; it is always identical to `sourceProjectId` in the current design |
+| `name` | Current Project name shown by the Codex app |
+| `status` | Whether this fetch associated the Codex app Project with a registry record |
+| `method` | How the registry record was selected |
+| `roots` | Currently active Codex app roots; the first is Primary and the remainder are Secondary |
+
+`projectFetch.projects[*].status` currently has one possible value:
+
+- `bound`: the Codex app internal ID was associated with a registry
+  `projectId`. This is used both when reusing an existing record and when
+  creating a new record.
+
+A Project missing from the Codex app does not appear in
+`projectFetch.projects`. Use `projects list` to inspect all saved Projects.
+Its `status` values mean:
+
+- `active`: a Project with the same internal ID existed in the Codex app at
+  the most recent fetch.
+- `inactive`: the Project is no longer present in the Codex app. Its registry
+  record, Session Notes, and state are retained. The same ID becomes `active`
+  again if it returns.
+- `unknown`: a nonstandard registry record has no status. Records created by
+  normal `init` or `projects fetch` do not use this value.
+
+`method` has these possible values:
+
+- `project-id`: an existing registry record with the same internal Project ID
+  was found, and its name and root metadata were refreshed.
+- `new`: no record had the same internal Project ID, so a new registry record
+  was created. With `--dry-run`, this means the record is planned but has not
+  been written.
+
+In `projects list --json`, `roots[*].status` is `active` for a current root and
+`historical` for a previous root retained as an attribution alias.
+
+### Generate Session Notes
+
+`session-notes pull` pulls Codex chats eligible for normal processing and
+creates or updates Session Notes. It automatically fetches Project metadata
+before scanning, so its output contains both `projectFetch` and `report`.
+
+Inspect the selection with dry-run first. Dry-run does not call the generative
+AI and does not change the registry, Session Notes, refresh state, cache, or
+run reports.
+
+```powershell
+tkn-codex-context session-notes pull --dry-run
+```
+
+The main `report` fields mean:
+
+| Field | Meaning |
+| --- | --- |
+| `reportPath` | Saved run report; `null` in dry-run because no report is written |
+| `mode` | `daily` for a normal pull or `backfill` for explicit historical processing |
+| `scan.files` | Number of Codex JSONL files read |
+| `scan.eligible` | Number of create or update candidates after fingerprint checks |
+| `scan.unchanged` | Previously processed sources whose source and generation conditions are unchanged |
+| `scan.staleGenerator` | Sources unchanged but selected for regeneration because generation conditions changed |
+| `scan.ignoredFiles` | Files excluded by the date window, idle requirement, internal-chat filters, or attribution checks |
+| `selectedCount` | Number of Session Notes planned for creation or update after applying `--limit` |
+| `selected` | Projects, threads, and sources selected by dry-run |
+| `processed` | Session Notes successfully created or updated by a non-dry-run pull; always empty in dry-run |
+| `failed` | Threads that failed during a non-dry-run pull |
+| `deferred` | Threads postponed because the runtime limit was reached |
+
+If dry-run reports `selectedCount: 0` and `selected: []`, no Session Note is
+planned for creation or update. `reportPath: null` and `processed: []` are
+normal dry-run behavior and do not indicate an error.
+
+`scan.ignoredFiles` is the total number of excluded files; the later,
+specialized counters are not a complete breakdown. Files rejected early by
+the date window or idle requirement increment only `ignoredFiles`. It is
+therefore not an error when `ignoredFiles` equals `scan.files` while the other
+exclusion counters remain zero.
+
+After review, generate the notes:
+
+```powershell
+tkn-codex-context session-notes pull
+```
+
+Normal pulls process chats that have been idle for at least 30 minutes.
 Historical processing is explicit:
 
 ```powershell
@@ -108,8 +217,10 @@ tkn-codex-context session-notes rebuild --project-id <projectId> --force
 tkn-codex-context validate <session-note.md>
 ```
 
-Every command emits a structured JSON result. `--verbose` adds progress logs;
-`--quiet` limits logs while preserving JSON output.
+Commands emit structured JSON results except for the human-readable default of
+`projects list`; use `projects list --json` when machine-readable output is
+needed. `--verbose` adds progress logs, and `--quiet` limits logs while
+preserving command output.
 
 ## Scope
 

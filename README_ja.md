@@ -4,6 +4,12 @@ Codex appのProject状態と`~/.codex/sessions`を読み、chatを再利用可�
 Session Note v2へ変換する、独立したローカルデータパイプラインです。
 Project folderにはmarker・設定・contextを一切書きません。
 
+## 必要なもの
+
+- Python 3.11以上
+- [uv](https://docs.astral.sh/uv/)
+- summary生成時に`PATH`から実行できる`codex`
+
 ## インストール
 
 Python 3.11以上とuvを用意し、このrepositoryのrootでCLIをインストールします。
@@ -36,6 +42,16 @@ chatは、明示的な`backfill`または`rebuild`で処理します。
 tkn-codex-context init --force --dry-run
 tkn-codex-context init --force
 ```
+
+Project名や現在のrootから内部IDを確認する場合は、登録済みProjectを一覧表示します。
+
+```powershell
+tkn-codex-context projects list
+tkn-codex-context projects list --json
+```
+
+標準出力は、状態、Project名、内部Project ID、現在のrootを含む人向けの表です。
+`--json`では、script利用や詳細確認のために登録済みroot metadataも出力します。
 
 アプリ自身のファイルは、用途別に次の場所へ保存します。
 
@@ -76,22 +92,106 @@ commitするのは`.tkn/config.example.yaml`だけです。実設定をcommitし
 
 ## 通常実行
 
-初期化後にCodex app Projectが追加・変更された場合は同期します。dry-runでは
-registry、note、refresh state、cache、reportのいずれも変更しません。
+### Project metadataを取得する
+
+初期化後にCodex app Projectが追加・変更された場合は、Codex appからProject
+metadataを取得します。これはCodex appからlocal registryへの一方向の更新です。
+dry-runではregistryやProject directoryを変更しません。
 
 ```powershell
-tkn-codex-context projects sync --dry-run
-tkn-codex-context session-notes run --dry-run
+tkn-codex-context projects fetch --dry-run
 ```
 
 確認後に反映します。
 
 ```powershell
-tkn-codex-context projects sync
-tkn-codex-context session-notes run
+tkn-codex-context projects fetch
 ```
 
-通常runは30分以上idleのchatだけを処理します。過去分は明示的に実行します。
+### Project fetch結果の読み方
+
+`projects fetch`および`session-notes pull`の`projectFetch.projects`には、
+現在Codex appに存在するProjectごとに次の情報が出力されます。
+
+| field | 意味 |
+| --- | --- |
+| `sourceProjectId` | Codex appから読み取った内部Project ID |
+| `projectId` | registryと保存先folderで使用するProject ID。現在の仕様では`sourceProjectId`と常に同じ |
+| `name` | Codex appに表示されている現在のProject名 |
+| `status` | 今回のfetchでCodex app Projectとregistry recordを対応付けられたか |
+| `method` | どの方法でregistry recordを決定したか |
+| `roots` | Codex appに現在登録されている有効なroot。先頭がPrimary、以降がSecondary |
+
+`projectFetch.projects[*].status`が現在取り得る値は次のとおりです。
+
+- `bound`: Codex appの内部IDとregistryの`projectId`を対応付けられた状態。
+  既存recordを再利用した場合と、新規recordを作成した場合の両方で使用します。
+
+Codex appから消えたProjectは`projectFetch.projects`には含まれません。保存済み
+Projectも含めた状態は`projects list`で確認します。こちらの`status`は次の意味です。
+
+- `active`: 直近のfetch時点で、同じ内部IDのProjectがCodex appに存在する。
+- `inactive`: Codex appからProjectが消えている。registry、Session Note、stateは
+  削除されず、同じIDが戻れば次回fetchで`active`へ戻る。
+- `unknown`: registry recordにstatusがない非標準状態。通常の`init`または
+  `projects fetch`が作成したrecordでは発生しない。
+
+`method`が取り得る値は次のとおりです。
+
+- `project-id`: 同じ内部Project IDの既存registry recordを見つけ、そのrecordの
+  名前とroot metadataを更新した。
+- `new`: 同じ内部Project IDのrecordがなく、新しいregistry recordを作成した。
+  `--dry-run`の場合は作成予定であり、まだ書き込んでいない。
+
+`projects list --json`の`roots[*].status`では、現在のrootを`active`、以前のrootを
+帰属判定用に保持したaliasを`historical`と表示します。
+
+### Session Noteを生成する
+
+`session-notes pull`は、通常処理の対象となるCodex chatを取り込み、Session Noteを
+作成または更新します。実行前にProject metadataのfetchも自動的に行うため、
+出力には`projectFetch`と`report`の両方が含まれます。
+
+最初にdry-runで対象を確認します。dry-runは生成AIを呼び出さず、registry、
+Session Note、refresh state、cache、run reportのいずれも変更しません。
+
+```powershell
+tkn-codex-context session-notes pull --dry-run
+```
+
+`report`の主なfieldは次の意味です。
+
+| field | 意味 |
+| --- | --- |
+| `reportPath` | 保存したrun report。dry-runでは保存しないため`null` |
+| `mode` | `daily`は通常のpull、`backfill`は過去chatの明示処理 |
+| `scan.files` | 読み取ったCodex JSONL file数 |
+| `scan.eligible` | fingerprint確認後に作成・更新候補となった件数 |
+| `scan.unchanged` | 前回処理時からsourceと生成条件が変わらず、再生成しない件数 |
+| `scan.staleGenerator` | sourceは同じでも生成条件が変わり、再生成候補となった件数 |
+| `scan.ignoredFiles` | 日時範囲、idle条件、内部chat、帰属判定などの条件で対象外になったfile数 |
+| `selectedCount` | `--limit`適用後、今回作成・更新する予定のSession Note件数 |
+| `selected` | dry-runで選択されたProject、thread、sourceの一覧 |
+| `processed` | 通常実行で作成・更新に成功したSession Note。dry-runでは常に空 |
+| `failed` | 通常実行で処理に失敗したthread |
+| `deferred` | runtime上限により次回へ延期したthread |
+
+dry-runで`selectedCount: 0`かつ`selected: []`なら、今回作成・更新する
+Session Noteはありません。`reportPath: null`と`processed: []`はdry-runの
+通常動作であり、それ自体はエラーを意味しません。
+
+`scan.ignoredFiles`は対象外fileの合計であり、後続の個別counterは完全な内訳では
+ありません。日時範囲またはidle条件で早期に除外されたfileは、
+`ignoredFiles`だけが増えます。そのため`ignoredFiles`が全file数と同じで、
+他の除外counterが0でもエラーではありません。
+
+確認後に生成します。
+
+```powershell
+tkn-codex-context session-notes pull
+```
+
+通常のpullは30分以上idleのchatだけを処理します。過去分は明示的に実行します。
 
 ```powershell
 tkn-codex-context session-notes backfill --project-id <projectId> --dry-run
@@ -101,8 +201,9 @@ tkn-codex-context session-notes rebuild --project-id <projectId> --force
 tkn-codex-context validate <session-note.md>
 ```
 
-全コマンドはJSON結果を出力します。`--verbose`は進捗ログを追加し、
-`--quiet`はJSONを維持したままログを抑えます。
+`projects list`の既定出力を除き、各コマンドはJSON結果を出力します。
+機械可読な一覧には`projects list --json`を使います。`--verbose`は進捗ログを
+追加し、`--quiet`はコマンド出力を維持したままログを抑えます。
 
 ## 対象範囲
 
@@ -133,7 +234,7 @@ threadは、Codex appの明示assignment、全active rootに対する一意なcw
 
 生成にはephemeral・read-only sandbox・structured outputのCodex CLIを使います。
 source/generator fingerprintが同じthreadはモデルを呼ばずno-opにします。noteと
-refresh stateは検証後にatomic反映し、通常runとrebuildの中断済み生成物は再開に
+refresh stateは検証後にatomic反映し、通常のpullとrebuildの中断済み生成物は再開に
 利用します。
 
 ## 開発

@@ -13,7 +13,7 @@ from tkn_codex_context.app_state import (
     load_codex_app_state,
 )
 from tkn_codex_context.config import AppConfig
-from tkn_codex_context.projects import runtime_projects, sync_projects
+from tkn_codex_context.projects import fetch_projects, list_registered_projects, runtime_projects
 from tkn_codex_context.session_notes import PipelineError
 
 
@@ -26,7 +26,7 @@ def app_project(project_id: str, name: str, roots: list[Path]) -> CodexAppProjec
     )
 
 
-def test_sync_binds_multi_root_and_preserves_unknown_fields(tmp_path: Path) -> None:
+def test_fetch_binds_multi_root_and_preserves_unknown_fields(tmp_path: Path) -> None:
     primary = tmp_path / "primary"
     secondary = tmp_path / "secondary"
     data_root = tmp_path / "pipeline" / "data"
@@ -59,7 +59,7 @@ def test_sync_binds_multi_root_and_preserves_unknown_fields(tmp_path: Path) -> N
     )
 
     before = registry.read_bytes()
-    records, report = sync_projects(config, state, dry_run=True)
+    records, report = fetch_projects(config, state, dry_run=True)
     assert registry.read_bytes() == before
     assert report["projects"][0]["method"] == "project-id"
     assert records[0]["customField"] == {"keep": True}
@@ -91,7 +91,7 @@ def test_same_name_and_root_remain_distinct_projects(tmp_path: Path) -> None:
         assignments={},
         projectless_thread_ids=frozenset(),
     )
-    records, report = sync_projects(config, state, dry_run=True)
+    records, report = fetch_projects(config, state, dry_run=True)
     assert {item["projectId"] for item in records} == {"source-one", "source-two"}
     assert report["pendingCount"] == 0
     assert report["boundCount"] == 2
@@ -128,7 +128,7 @@ def test_replaced_active_root_becomes_historical_alias(tmp_path: Path) -> None:
         projectless_thread_ids=frozenset(),
     )
 
-    records, _report = sync_projects(config, state, dry_run=True)
+    records, _report = fetch_projects(config, state, dry_run=True)
 
     assert records[0]["roots"] == [
         {"path": str(new.absolute()), "role": "primary", "status": "active"},
@@ -167,7 +167,7 @@ def test_same_id_survives_drive_and_name_change(tmp_path: Path) -> None:
         projectless_thread_ids=frozenset(),
     )
 
-    records, report = sync_projects(config, state, dry_run=True)
+    records, report = fetch_projects(config, state, dry_run=True)
 
     assert report["projects"][0]["method"] == "project-id"
     assert records[0]["projectId"] == "source"
@@ -200,7 +200,7 @@ def test_missing_app_project_becomes_inactive_and_can_reactivate(tmp_path: Path)
     config.registry_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
     empty_state = CodexAppState(projects=(), assignments={}, projectless_thread_ids=frozenset())
 
-    inactive, _report = sync_projects(config, empty_state, dry_run=True)
+    inactive, _report = fetch_projects(config, empty_state, dry_run=True)
 
     assert inactive[0]["status"] == "inactive"
     returning = CodexAppState(
@@ -208,12 +208,12 @@ def test_missing_app_project_becomes_inactive_and_can_reactivate(tmp_path: Path)
         assignments={},
         projectless_thread_ids=frozenset(),
     )
-    active, _report = sync_projects(config, returning, dry_run=True)
+    active, _report = fetch_projects(config, returning, dry_run=True)
     assert active[0]["status"] == "active"
     assert active[0]["title"] == "Renamed"
 
 
-def test_sync_rejects_old_registry_schema(tmp_path: Path) -> None:
+def test_fetch_rejects_old_registry_schema(tmp_path: Path) -> None:
     config = AppConfig(
         codex_home=tmp_path / "codex",
         data_root=tmp_path / "pipeline" / "data",
@@ -240,7 +240,9 @@ def test_sync_rejects_old_registry_schema(tmp_path: Path) -> None:
     )
 
     with pytest.raises(PipelineError, match="init --force"):
-        sync_projects(config, state, dry_run=True)
+        fetch_projects(config, state, dry_run=True)
+    with pytest.raises(PipelineError, match="init --force"):
+        list_registered_projects(config.registry_path)
 
 
 def test_app_state_reader_fails_closed_on_key_id_mismatch(tmp_path: Path) -> None:

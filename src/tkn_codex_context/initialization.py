@@ -105,7 +105,7 @@ def initialize_application(
         "resetTargets": [str(path) for path in reset_targets],
         "existingTargets": existing,
         "config": config_document(config),
-        "projectSync": project_report,
+        "projectFetch": project_report,
     }
     if dry_run:
         return report
@@ -121,7 +121,7 @@ def initialize_application(
         for directory in reset_targets:
             directory.mkdir(parents=True, exist_ok=True)
         _records, applied_project_report = create_fresh_projects(config, app_state, dry_run=False)
-        report["projectSync"] = applied_project_report
+        report["projectFetch"] = applied_project_report
         write_config(config, target)
         config_written = True
     except Exception:

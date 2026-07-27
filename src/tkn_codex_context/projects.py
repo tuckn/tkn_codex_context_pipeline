@@ -114,6 +114,39 @@ def _validate_registry_schema(records: Iterable[dict[str, Any]]) -> None:
         )
 
 
+def list_registered_projects(path: Path) -> list[dict[str, Any]]:
+    """Return registered Projects in a stable, reader-facing order."""
+
+    records = read_registry(path)
+    _validate_registry_schema(records)
+    projects: list[dict[str, Any]] = [
+        {
+            "projectId": str(record["projectId"]),
+            "name": str(record.get("title") or record["projectId"]),
+            "status": str(record.get("status") or "unknown"),
+            "currentRoot": str(record.get("currentRoot") or ""),
+            "roots": [
+                {
+                    "path": str(root.get("path") or ""),
+                    "role": str(root.get("role") or ""),
+                    "status": str(root.get("status") or ""),
+                }
+                for root in _root_entries(record)
+                if root.get("path")
+            ],
+        }
+        for record in records
+    ]
+    return sorted(
+        projects,
+        key=lambda item: (
+            item["status"] != "active",
+            item["name"].casefold(),
+            item["projectId"],
+        ),
+    )
+
+
 def _update_record(record: dict[str, Any], project: CodexAppProject, config: AppConfig) -> None:
     record["schemaVersion"] = REGISTRY_SCHEMA_VERSION
     record["identityKind"] = IDENTITY_KIND
@@ -183,7 +216,7 @@ def create_fresh_projects(
     }
 
 
-def sync_projects(
+def fetch_projects(
     config: AppConfig,
     app_state: CodexAppState,
     *,

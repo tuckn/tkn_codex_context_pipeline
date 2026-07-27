@@ -67,7 +67,7 @@ def test_force_dry_run_and_apply_preserve_settings_and_remove_old_storage(tmp_pa
     assert config_path.read_bytes() == before
     assert all((root / "old.txt").is_file() for root in (data_root, state_root, cache_root))
     assert preview["removedConfigKeys"] == ["context_store_root"]
-    assert preview["projectSync"]["projects"][0]["projectId"] == "local-project"
+    assert preview["projectFetch"]["projects"][0]["projectId"] == "local-project"
 
     initialize_application(config_path, overrides=None, force=True, dry_run=False)
 

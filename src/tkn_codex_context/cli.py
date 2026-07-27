@@ -13,7 +13,7 @@ from typing import Any
 from .app_state import load_codex_app_state
 from .config import config_document, load_app_config
 from .initialization import initialize_application
-from .projects import runtime_projects, sync_projects
+from .projects import fetch_projects, list_registered_projects, runtime_projects
 from .session_notes import (
     CodexSummarizer,
     PipelineError,
@@ -64,14 +64,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     projects = commands.add_parser("projects", help="Manage Project bindings")
     project_commands = projects.add_subparsers(dest="projects_command", required=True)
-    sync = project_commands.add_parser("sync", help="Synchronize Codex app Projects")
-    sync.add_argument("--dry-run", action="store_true")
+    project_list = project_commands.add_parser("list", help="List registered Projects")
+    project_list.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    fetch = project_commands.add_parser("fetch", help="Fetch Projects from the Codex app")
+    fetch.add_argument("--dry-run", action="store_true")
 
     notes = commands.add_parser("session-notes", help="Generate Session Note v2 artifacts")
     note_commands = notes.add_subparsers(dest="notes_command", required=True)
-    run = note_commands.add_parser("run", help="Process post-install idle chats")
-    run.add_argument("--dry-run", action="store_true")
-    run.add_argument("--limit", type=int)
+    pull = note_commands.add_parser(
+        "pull",
+        help="Pull post-install idle chats into Session Notes",
+    )
+    pull.add_argument("--dry-run", action="store_true")
+    pull.add_argument("--limit", type=int)
 
     backfill = note_commands.add_parser("backfill", help="Process older chats")
     selector = backfill.add_mutually_exclusive_group(required=True)
@@ -111,6 +116,43 @@ def _emit(value: dict[str, Any]) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2))
 
 
+def _table_text(value: Any) -> str:
+    return " ".join(str(value).split()) or "-"
+
+
+def _emit_project_table(projects: list[dict[str, Any]]) -> None:
+    if not projects:
+        print("No registered Projects.")
+        return
+    headers = ("STATUS", "NAME", "PROJECT ID", "CURRENT ROOT")
+    rows = [
+        (
+            _table_text(project["status"]),
+            _table_text(project["name"]),
+            _table_text(project["projectId"]),
+            _table_text(project["currentRoot"]),
+        )
+        for project in projects
+    ]
+    widths = [
+        max(len(headers[index]), *(len(row[index]) for row in rows))
+        for index in range(3)
+    ]
+    print(
+        f"{headers[0]:<{widths[0]}}  "
+        f"{headers[1]:<{widths[1]}}  "
+        f"{headers[2]:<{widths[2]}}  "
+        f"{headers[3]}"
+    )
+    for status, name, project_id, current_root in rows:
+        print(
+            f"{status:<{widths[0]}}  "
+            f"{name:<{widths[1]}}  "
+            f"{project_id:<{widths[2]}}  "
+            f"{current_root}"
+        )
+
+
 def _progress(value: dict[str, Any]) -> None:
     LOGGER.info("%s", json.dumps(value, ensure_ascii=False, separators=(",", ":")))
 
@@ -123,13 +165,13 @@ def _prepare_projects(
     config = load_app_config(explicit_path=args.config, overrides=_overrides(args))
     pipeline_config = config.session_pipeline_config(allow_missing_watermark=dry_run)
     app_state = load_codex_app_state(config.app_state_path)
-    records, sync_report = sync_projects(config, app_state, dry_run=dry_run)
+    records, fetch_report = fetch_projects(config, app_state, dry_run=dry_run)
     return (
         config,
         pipeline_config,
         app_state,
         runtime_projects(records, app_state),
-        sync_report,
+        fetch_report,
     )
 
 
@@ -166,9 +208,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 explicit_path=args.config,
                 overrides=_overrides(args),
             )
+            if args.projects_command == "list":
+                registered_projects = list_registered_projects(config.registry_path)
+                if args.json:
+                    _emit(
+                        {
+                            "command": "projects list",
+                            "projectCount": len(registered_projects),
+                            "projects": registered_projects,
+                        }
+                    )
+                else:
+                    _emit_project_table(registered_projects)
+                return 0
             state = load_codex_app_state(config.app_state_path)
-            _records, report = sync_projects(config, state, dry_run=args.dry_run)
-            _emit({"command": "projects sync", **report})
+            _records, report = fetch_projects(config, state, dry_run=args.dry_run)
+            _emit({"command": "projects fetch", **report})
             return 2 if report["pendingCount"] else 0
 
         dry_run = bool(args.dry_run)
@@ -177,7 +232,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             pipeline_config,
             _state,
             projects,
-            sync_report,
+            fetch_report,
         ) = _prepare_projects(args, dry_run=dry_run)
         summarizer = (
             None
@@ -187,7 +242,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 observer=_progress,
             )
         )
-        if args.notes_command == "run":
+        if args.notes_command == "pull":
             report, report_path = execute_pipeline(
                 pipeline_config,
                 projects,
@@ -229,7 +284,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _emit(
             {
                 "command": f"session-notes {args.notes_command}",
-                "projectSync": sync_report,
+                "projectFetch": fetch_report,
                 "reportPath": str(report_path) if report_path else None,
                 "report": report,
             }
