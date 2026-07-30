@@ -56,10 +56,10 @@ Implemented commands:
 init [--force]
 config show
 projects fetch
-session-notes pull
-session-notes backfill --project-id <id>
-session-notes backfill --all
-session-notes rebuild --project-id <id> [--force]
+session-notes pull [--force]
+session-notes pull --backfill --project-id <id-name-or-root> [--force]
+session-notes pull --backfill --all [--force]
+session-notes rebuild --project-id <id-name-or-root> [--force]
 validate <session-note>
 ```
 
@@ -121,10 +121,15 @@ model_timeout_seconds: 1800
 ```
 
 `init` creates the configuration and Project registry, records the current
-time as `installed_at`, and creates empty Project storage. Normal runs process
+time as `installed_at`, and creates empty Project storage. Normal pulls process
 only chats created or updated at or after this time. Older chats require
-explicit backfill or rebuild. `init --force` preserves configuration values,
+explicit `pull --backfill` or rebuild. `init --force` preserves configuration values,
 refreshes `installed_at`, and transactionally replaces data, state, and cache.
+
+Normal and backfill pulls skip notes whose source fingerprint, current schema,
+model, reasoning effort, prompt version, and renderer version still match.
+`pull --force` bypasses this no-op check. Rebuild treats every numeric schema
+version below the current version as legacy, while refusing future versions.
 
 The canonical Project registry is `data/project-registry.jsonl`. Session Notes
 are stored under `data/projects/<projectId>/sessions/`; per-Project refresh
@@ -140,9 +145,13 @@ Do not commit a real `.tkn/config.yaml`. Only
 ## Project binding
 
 The Codex app internal ID in `local-projects` is the authoritative
-`projectId`, registry key, directory name, and CLI selector. Project names and
-roots are mutable metadata and never establish identity. Two sidebar Projects
-remain distinct even when they share a name or root.
+`projectId`, registry key, and directory name. `--project-id` accepts that ID,
+an exact current Name, or CURRENT ROOT as a CLI convenience, but always
+resolves to the internal ID before pipeline work. Resolution order is ID,
+Name, then normalized CURRENT ROOT. Duplicate Name or root matches fail with
+the candidate IDs. Project names and roots are mutable metadata and never
+establish stored identity. Two sidebar Projects remain distinct even when they
+share a name or root.
 
 Registry updates preserve unknown fields and use atomic replacement.
 
@@ -323,7 +332,7 @@ uv run tkn-codex-context session-notes pull
 Historical processing should start with a small Project-scoped batch:
 
 ```powershell
-uv run tkn-codex-context session-notes backfill `
+uv run tkn-codex-context session-notes pull --backfill `
   --project-id <projectId> `
   --limit 5 `
   --dry-run

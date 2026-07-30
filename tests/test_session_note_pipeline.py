@@ -455,6 +455,49 @@ class SessionNotePipelineTests(unittest.TestCase):
         self.assertEqual(1, report["scan"]["unchanged"])
         self.assertEqual(0, report["selectedCount"])
 
+    def test_old_note_schema_is_regenerated_even_when_state_matches(self) -> None:
+        write_chat(self.sessions / "chat.jsonl", thread_id="thread-1", cwd=self.repo)
+        execute_pipeline(
+            self.config,
+            [self.project],
+            summarizer=FakeSummarizer(),
+            cache_root=self.cache,
+        )
+        note = next(self.project.sessions_path.glob("*.md"))
+        note.write_text(
+            note.read_text(encoding="utf-8").replace("schemaVersion: 2", "schemaVersion: 1"),
+            encoding="utf-8",
+        )
+
+        candidates, counts = scan_candidates(self.config, [self.project])
+
+        self.assertEqual(["thread-1"], [item.thread_id for item in candidates])
+        self.assertEqual(1, counts["staleGenerator"])
+        self.assertEqual(0, counts["unchanged"])
+
+    def test_force_regenerates_unchanged_source(self) -> None:
+        write_chat(self.sessions / "chat.jsonl", thread_id="thread-1", cwd=self.repo)
+        execute_pipeline(
+            self.config,
+            [self.project],
+            summarizer=FakeSummarizer(),
+            cache_root=self.cache,
+        )
+        forced = FakeSummarizer()
+
+        report, _path = execute_pipeline(
+            self.config,
+            [self.project],
+            summarizer=forced,
+            force=True,
+            cache_root=self.cache,
+        )
+
+        self.assertEqual(["thread-1"], forced.calls)
+        self.assertTrue(report["force"])
+        self.assertEqual(1, report["selectedCount"])
+        self.assertEqual(1, len(report["processed"]))
+
     def test_state_failure_rolls_back_existing_note_and_state(self) -> None:
         source = self.sessions / "chat.jsonl"
         write_chat(source, thread_id="thread-1", cwd=self.repo)
@@ -641,7 +684,7 @@ class SessionNotePipelineTests(unittest.TestCase):
             cache_root=self.cache,
         )
         self.assertEqual(0, second["generationCount"])
-        self.assertEqual(2, len(second["preservedV2"]))
+        self.assertEqual(2, len(second["preservedCurrent"]))
         self.assertEqual([], second["deletedLegacy"])
 
     def test_rebuild_failure_keeps_legacy_notes_and_state(self) -> None:
@@ -691,8 +734,8 @@ class SessionNotePipelineTests(unittest.TestCase):
 
         self.assertEqual(0, dry["generationCount"])
         self.assertEqual(1, forced["generationCount"])
-        self.assertEqual(1, len(forced["replacedV2"]))
-        self.assertEqual(64, len(forced["replacedV2"][0]["sha256"]))
+        self.assertEqual(1, len(forced["replacedCurrent"]))
+        self.assertEqual(64, len(forced["replacedCurrent"][0]["sha256"]))
 
     def test_rebuild_dry_run_does_not_save_approved_root(self) -> None:
         historical = self.root / "old-repo"
@@ -729,6 +772,28 @@ class SessionNotePipelineTests(unittest.TestCase):
                 dry_run=True,
                 cache_root=self.cache,
             )
+
+    def test_rebuild_treats_every_older_schema_as_legacy(self) -> None:
+        write_chat(self.sessions / "chat.jsonl", thread_id="thread-1", cwd=self.repo)
+        execute_rebuild(
+            self.config,
+            self.project,
+            summarizer=FakeSummarizer(),
+            cache_root=self.cache,
+        )
+        note = next(self.project.sessions_path.glob("*.md"))
+
+        with patch("tkn_codex_context.session_notes.SESSION_SCHEMA_VERSION", 3):
+            report, _path = execute_rebuild(
+                self.config,
+                self.project,
+                summarizer=None,
+                dry_run=True,
+                cache_root=self.cache,
+            )
+
+        self.assertEqual([note.name], [item["file"] for item in report["deletedLegacy"]])
+        self.assertEqual(1, report["generationCount"])
 
     def test_saved_historical_root_is_used_by_daily_scan(self) -> None:
         historical = self.root / "historical"

@@ -147,6 +147,40 @@ def list_registered_projects(path: Path) -> list[dict[str, Any]]:
     )
 
 
+def resolve_project_selector(projects: Iterable[Project], selector: str) -> Project:
+    """Resolve by exact ID, exact current Name, then normalized CURRENT ROOT."""
+
+    available = tuple(projects)
+    id_matches = [project for project in available if project.project_id == selector]
+    if id_matches:
+        return id_matches[0]
+    name_matches = [project for project in available if project.title == selector]
+    if len(name_matches) == 1:
+        return name_matches[0]
+    if len(name_matches) > 1:
+        project_ids = ", ".join(sorted(project.project_id for project in name_matches))
+        raise PipelineError(
+            f"ambiguous Project Name {selector!r}; matching projectIds: {project_ids}. "
+            "Use --project-id with an exact Project ID."
+        )
+    normalized_selector = normalize_path_text(selector)
+    root_matches = [
+        project
+        for project in available
+        if normalized_selector
+        and normalize_path_text(str(project.current_root)) == normalized_selector
+    ]
+    if len(root_matches) == 1:
+        return root_matches[0]
+    if len(root_matches) > 1:
+        project_ids = ", ".join(sorted(project.project_id for project in root_matches))
+        raise PipelineError(
+            f"ambiguous Project CURRENT ROOT {selector!r}; matching projectIds: {project_ids}. "
+            "Use --project-id with an exact Project ID."
+        )
+    raise PipelineError(f"unknown or inactive Project ID, Name, or CURRENT ROOT: {selector}")
+
+
 def _update_record(record: dict[str, Any], project: CodexAppProject, config: AppConfig) -> None:
     record["schemaVersion"] = REGISTRY_SCHEMA_VERSION
     record["identityKind"] = IDENTITY_KIND

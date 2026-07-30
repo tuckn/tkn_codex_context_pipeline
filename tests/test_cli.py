@@ -1,34 +1,98 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
 from pytest import CaptureFixture
 
-from tkn_codex_context.cli import build_parser, main
+from tkn_codex_context.cli import LOGGER, _configure_logging, _progress, build_parser, main
 
 
-def write_app_state(home: Path) -> None:
+def write_app_state(
+    home: Path,
+    *,
+    local_projects: dict[str, dict[str, object]] | None = None,
+) -> None:
     codex_home = home / ".codex"
     codex_home.mkdir(parents=True)
+    projects = local_projects or {
+        "local-project": {
+            "id": "local-project",
+            "name": "Project",
+            "rootPaths": [str(home / "project")],
+            "createdAt": "2026-07-01T00:00:00Z",
+        }
+    }
     (codex_home / ".codex-global-state.json").write_text(
         json.dumps(
             {
-                "local-projects": {
-                    "local-project": {
-                        "id": "local-project",
-                        "name": "Project",
-                        "rootPaths": [str(home / "project")],
-                        "createdAt": "2026-07-01T00:00:00Z",
-                    }
-                },
+                "local-projects": projects,
                 "thread-project-assignments": {},
                 "projectless-thread-ids": [],
             }
         ),
         encoding="utf-8",
     )
+
+
+def test_logging_uses_readable_stderr_prefixes(
+    capsys: CaptureFixture[str],
+) -> None:
+    args = build_parser().parse_args(["config", "show"])
+
+    _configure_logging(args)
+    LOGGER.info("Readable progress")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "[info] Readable progress\n"
+    assert logging.getLogger().level == logging.INFO
+
+
+def test_quiet_and_verbose_logging_levels() -> None:
+    quiet = build_parser().parse_args(["-q", "config", "show"])
+    _configure_logging(quiet)
+    assert logging.getLogger().level == logging.ERROR
+
+    verbose = build_parser().parse_args(["-v", "config", "show"])
+    _configure_logging(verbose)
+    assert logging.getLogger().level == logging.DEBUG
+
+
+def test_progress_events_are_human_readable(
+    capsys: CaptureFixture[str],
+) -> None:
+    args = build_parser().parse_args(["config", "show"])
+    _configure_logging(args)
+
+    _progress(
+        {
+            "type": "thread-start",
+            "index": 2,
+            "total": 7,
+            "threadId": "thread-2",
+        }
+    )
+    _progress(
+        {
+            "type": "thread-complete",
+            "index": 2,
+            "total": 7,
+            "threadId": "thread-2",
+            "durationSeconds": 12.5,
+            "chunkCount": 2,
+            "modelCalls": 3,
+        }
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        "[info] Starting thread 2/7: thread-2",
+        "[info] Completed thread 2/7: thread-2 (12.5s, 2 chunks, 3 model calls)",
+    ]
 
 
 def test_init_dry_run_has_no_files(
@@ -95,16 +159,215 @@ def test_projects_fetch_replaces_sync(
     assert exc.value.code == 2
 
 
-def test_session_notes_pull_replaces_run() -> None:
+def test_session_notes_pull_replaces_run_and_backfill() -> None:
     parser = build_parser()
 
     args = parser.parse_args(["session-notes", "pull", "--dry-run"])
 
     assert args.notes_command == "pull"
     assert args.dry_run is True
-    with pytest.raises(SystemExit) as exc:
-        parser.parse_args(["session-notes", "run"])
-    assert exc.value.code == 2
+    assert args.backfill is False
+
+    historical = parser.parse_args(
+        [
+            "session-notes",
+            "pull",
+            "--backfill",
+            "--project-id",
+            "local-project",
+            "--dry-run",
+        ]
+    )
+
+    assert historical.notes_command == "pull"
+    assert historical.backfill is True
+    assert historical.project_id == "local-project"
+    forced = parser.parse_args(["session-notes", "pull", "--force", "--dry-run"])
+    assert forced.force is True
+    for removed_command in ("run", "backfill"):
+        with pytest.raises(SystemExit) as exc:
+            parser.parse_args(["session-notes", removed_command])
+        assert exc.value.code == 2
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        (
+            ["session-notes", "pull", "--backfill", "--dry-run"],
+            "--backfill requires --project-id <projectIdOrNameOrRoot> or --all",
+        ),
+        (
+            ["session-notes", "pull", "--all", "--dry-run"],
+            "--project-id and --all require --backfill",
+        ),
+    ],
+)
+def test_session_notes_pull_rejects_incomplete_backfill_options(
+    arguments: list[str],
+    message: str,
+    capsys: CaptureFixture[str],
+) -> None:
+    result = main(arguments)
+
+    assert result == 2
+    output = json.loads(capsys.readouterr().out)
+    assert output == {"ok": False, "error": message}
+
+
+def test_session_notes_pull_backfill_all_uses_historical_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    write_app_state(home)
+    assert main(["init"]) == 0
+    capsys.readouterr()
+
+    result = main(
+        [
+            "session-notes",
+            "pull",
+            "--backfill",
+            "--all",
+            "--dry-run",
+        ]
+    )
+
+    assert result == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["command"] == "session-notes pull"
+    assert output["report"]["mode"] == "backfill"
+    assert output["report"]["dryRun"] is True
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        [
+            "session-notes",
+            "rebuild",
+            "--project-id",
+            "Project",
+            "--dry-run",
+        ],
+        [
+            "session-notes",
+            "pull",
+            "--backfill",
+            "--project-id",
+            "Project",
+            "--dry-run",
+        ],
+    ],
+)
+def test_session_notes_project_selector_accepts_unique_name(
+    arguments: list[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    target = home / ".tkn" / "codex_context_pipeline" / "config.yaml"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    write_app_state(home)
+    assert main(["--config", str(target), "init"]) == 0
+    capsys.readouterr()
+
+    result = main(["--config", str(target), *arguments])
+
+    assert result == 0
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+    assert "Resolved Project Name 'Project' to ID local-project" in captured.err
+    if output["report"]["mode"] == "rebuild":
+        assert output["report"]["projectId"] == "local-project"
+
+
+def test_session_notes_project_selector_accepts_current_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    target = home / ".tkn" / "codex_context_pipeline" / "config.yaml"
+    current_root = home / "project"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    write_app_state(home)
+    assert main(["--config", str(target), "init"]) == 0
+    capsys.readouterr()
+
+    result = main(
+        [
+            "--config",
+            str(target),
+            "session-notes",
+            "rebuild",
+            "--project-id",
+            str(current_root).replace("\\", "/") + "/",
+            "--dry-run",
+        ]
+    )
+
+    assert result == 0
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+    assert "Resolved Project CURRENT ROOT" in captured.err
+    assert output["report"]["projectId"] == "local-project"
+
+
+def test_session_notes_project_selector_rejects_duplicate_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    target = home / ".tkn" / "codex_context_pipeline" / "config.yaml"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    write_app_state(
+        home,
+        local_projects={
+            "project-one": {
+                "id": "project-one",
+                "name": "Duplicate",
+                "rootPaths": [str(home / "one")],
+                "createdAt": "2026-07-01T00:00:00Z",
+            },
+            "project-two": {
+                "id": "project-two",
+                "name": "Duplicate",
+                "rootPaths": [str(home / "two")],
+                "createdAt": "2026-07-01T00:00:00Z",
+            },
+        },
+    )
+    assert main(["--config", str(target), "init"]) == 0
+    capsys.readouterr()
+
+    result = main(
+        [
+            "--config",
+            str(target),
+            "session-notes",
+            "rebuild",
+            "--project-id",
+            "Duplicate",
+            "--dry-run",
+        ]
+    )
+
+    assert result == 2
+    output = json.loads(capsys.readouterr().out)
+    assert output["error"] == (
+        "ambiguous Project Name 'Duplicate'; matching projectIds: "
+        "project-one, project-two. Use --project-id with an exact Project ID."
+    )
 
 
 def test_invalid_config_returns_machine_readable_error(

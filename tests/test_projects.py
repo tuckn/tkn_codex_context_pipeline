@@ -13,8 +13,13 @@ from tkn_codex_context.app_state import (
     load_codex_app_state,
 )
 from tkn_codex_context.config import AppConfig
-from tkn_codex_context.projects import fetch_projects, list_registered_projects, runtime_projects
-from tkn_codex_context.session_notes import PipelineError
+from tkn_codex_context.projects import (
+    fetch_projects,
+    list_registered_projects,
+    resolve_project_selector,
+    runtime_projects,
+)
+from tkn_codex_context.session_notes import PipelineError, Project
 
 
 def app_project(project_id: str, name: str, roots: list[Path]) -> CodexAppProject:
@@ -24,6 +29,71 @@ def app_project(project_id: str, name: str, roots: list[Path]) -> CodexAppProjec
         rootPaths=roots,
         createdAt=datetime.fromisoformat("2026-07-01T00:00:00+00:00"),
     )
+
+
+def runtime_project(project_id: str, name: str, root: Path) -> Project:
+    return Project(
+        project_id=project_id,
+        title=name,
+        current_root=root,
+        context_path=root / "context",
+    )
+
+
+def test_resolve_project_selector_accepts_id_name_or_current_root(tmp_path: Path) -> None:
+    projects = [
+        runtime_project("project-one", "Shared selector", tmp_path / "one"),
+        runtime_project("project-two", "Unique Name", tmp_path / "two"),
+    ]
+
+    assert resolve_project_selector(projects, "project-one").project_id == "project-one"
+    assert resolve_project_selector(projects, "Unique Name").project_id == "project-two"
+    root_selector = str(tmp_path / "two").upper().replace("\\", "/") + "/"
+    assert resolve_project_selector(projects, root_selector).project_id == "project-two"
+
+
+def test_resolve_project_selector_prefers_id_over_name(tmp_path: Path) -> None:
+    projects = [
+        runtime_project("preferred", "First", tmp_path / "one"),
+        runtime_project("other", "preferred", tmp_path / "two"),
+    ]
+
+    assert resolve_project_selector(projects, "preferred").project_id == "preferred"
+
+
+def test_resolve_project_selector_prefers_name_over_current_root(tmp_path: Path) -> None:
+    root_selector = str(tmp_path / "root")
+    projects = [
+        runtime_project("named-project", root_selector, tmp_path / "one"),
+        runtime_project("root-project", "Second", tmp_path / "root"),
+    ]
+
+    assert resolve_project_selector(projects, root_selector).project_id == "named-project"
+
+
+def test_resolve_project_selector_rejects_duplicate_name(tmp_path: Path) -> None:
+    projects = [
+        runtime_project("project-one", "Duplicate", tmp_path / "one"),
+        runtime_project("project-two", "Duplicate", tmp_path / "two"),
+    ]
+
+    with pytest.raises(PipelineError, match="ambiguous Project Name 'Duplicate'") as exc:
+        resolve_project_selector(projects, "Duplicate")
+
+    assert "project-one, project-two" in str(exc.value)
+
+
+def test_resolve_project_selector_rejects_duplicate_current_root(tmp_path: Path) -> None:
+    shared_root = tmp_path / "shared"
+    projects = [
+        runtime_project("project-one", "First", shared_root),
+        runtime_project("project-two", "Second", shared_root),
+    ]
+
+    with pytest.raises(PipelineError, match="ambiguous Project CURRENT ROOT") as exc:
+        resolve_project_selector(projects, str(shared_root))
+
+    assert "project-one, project-two" in str(exc.value)
 
 
 def test_fetch_binds_multi_root_and_preserves_unknown_fields(tmp_path: Path) -> None:

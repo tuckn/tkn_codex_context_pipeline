@@ -409,6 +409,7 @@ def update_refresh_state(
     source["threads"][candidate.thread_id] = {
         "fingerprint": candidate.fingerprint,
         "generationFingerprint": generation_fingerprint(config, candidate),
+        "sessionSchemaVersion": SESSION_SCHEMA_VERSION,
         "generatorModel": config.model,
         "generatorReasoningEffort": config.reasoning_effort,
         "generatorPromptVersion": GENERATOR_PROMPT_VERSION,
@@ -651,7 +652,10 @@ def scan_candidates(
             source = states[project.project_id]["sources"][config.source_id]
             prior = source["threads"].get(candidate.thread_id, {})
             if not ignore_fingerprints and prior.get("fingerprint") == candidate.fingerprint:
-                if prior.get("generationFingerprint") == generation_fingerprint(config, candidate):
+                if (
+                    prior.get("generationFingerprint") == generation_fingerprint(config, candidate)
+                    and current_note_matches_generation(candidate, config)
+                ):
                     counts["unchanged"] += 1
                     continue
                 counts["staleGenerator"] += 1
@@ -1288,6 +1292,7 @@ def write_candidate_note(
     summarizer: Summarizer,
     *,
     work_cache_root: Path,
+    force: bool = False,
 ) -> Path:
     project_key = sha256(candidate.project.project_id.encode()).hexdigest()[:16]
     thread_key = sha256(candidate.thread_id.encode()).hexdigest()[:16]
@@ -1301,7 +1306,7 @@ def write_candidate_note(
             manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError):
             manifest = None
-        if isinstance(manifest, dict):
+        if not force and isinstance(manifest, dict):
             filename = str(manifest.get("file") or "")
             proposed = work_root / filename
             final = candidate.project.sessions_path / filename
@@ -1499,6 +1504,41 @@ def session_note_metadata(path: Path) -> tuple[dict[str, str], list[str], list[s
     )
 
 
+def parse_session_schema_version(version: str, path: Path) -> int:
+    if not re.fullmatch(r"[1-9][0-9]*", version):
+        raise PipelineError(f"unsupported session schemaVersion {version}: {path.name}")
+    return int(version)
+
+
+def current_note_matches_generation(
+    candidate: Candidate,
+    config: PipelineConfig,
+) -> bool:
+    matches = find_note_matches(candidate.project, candidate.thread_id)
+    if len(matches) > 1:
+        raise PipelineError(
+            f"multiple session notes match thread {candidate.thread_id}: "
+            + ", ".join(str(path) for path in matches)
+        )
+    if not matches:
+        return False
+    path = matches[0]
+    metadata, thread_ids, source_refs, version = session_note_metadata(path)
+    parsed_version = parse_session_schema_version(version, path)
+    if parsed_version > SESSION_SCHEMA_VERSION:
+        raise PipelineError(f"unsupported session schemaVersion {version}: {path.name}")
+    return (
+        parsed_version == SESSION_SCHEMA_VERSION
+        and thread_ids == [candidate.thread_id]
+        and source_refs == [candidate.source_ref]
+        and metadata.get("sourceFingerprint") == candidate.fingerprint
+        and metadata.get("generatorModel") == config.model
+        and metadata.get("generatorReasoningEffort") == config.reasoning_effort
+        and metadata.get("generatorPromptVersion") == str(GENERATOR_PROMPT_VERSION)
+        and metadata.get("rendererVersion") == str(RENDERER_VERSION)
+    )
+
+
 def validate_staged_sessions(
     sessions_path: Path,
     candidates: Sequence[Candidate],
@@ -1512,8 +1552,10 @@ def validate_staged_sessions(
     strict = strict_threads or set()
     for path in sorted(sessions_path.glob("*.md")):
         metadata, thread_ids, source_refs, version = session_note_metadata(path)
-        if version != str(SESSION_SCHEMA_VERSION):
-            raise PipelineError(f"staged session note is not schemaVersion 2: {path.name}")
+        if parse_session_schema_version(version, path) != SESSION_SCHEMA_VERSION:
+            raise PipelineError(
+                f"staged session note is not schemaVersion {SESSION_SCHEMA_VERSION}: {path.name}"
+            )
         if metadata.get("type") != "session":
             raise PipelineError(f"staged session note has invalid type: {path.name}")
         if thread_ids:
@@ -1586,8 +1628,8 @@ def validate_session_note(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise PipelineError(f"session note not found: {path}")
     metadata, thread_ids, source_refs, version = session_note_metadata(path)
-    if version != str(SESSION_SCHEMA_VERSION):
-        raise PipelineError(f"session note is not schemaVersion 2: {path}")
+    if parse_session_schema_version(version, path) != SESSION_SCHEMA_VERSION:
+        raise PipelineError(f"session note is not schemaVersion {SESSION_SCHEMA_VERSION}: {path}")
     required = {
         "type": "session",
         "reviewStatus": "unreviewed",
@@ -1644,6 +1686,7 @@ def rebuild_state(
         threads[candidate.thread_id] = {
             "fingerprint": candidate.fingerprint,
             "generationFingerprint": generation_fingerprint(config, candidate),
+            "sessionSchemaVersion": SESSION_SCHEMA_VERSION,
             "generatorModel": config.model,
             "generatorReasoningEffort": config.reasoning_effort,
             "generatorPromptVersion": GENERATOR_PROMPT_VERSION,
@@ -1845,17 +1888,18 @@ def execute_rebuild(
 
     preserve: list[Path] = []
     legacy: list[Path] = []
-    replaced_v2: list[Path] = []
+    replaced_current: list[Path] = []
     matched_v2: dict[str, Path] = {}
     reusable_threads: set[str] = set()
     generator_versions = {"current": 0, "older": 0, "unknown": 0}
     if project.sessions_path.is_dir():
         for path in sorted(project.sessions_path.glob("*.md")):
             metadata, thread_ids, _source_refs, version = session_note_metadata(path)
-            if version == "1":
+            parsed_version = parse_session_schema_version(version, path)
+            if parsed_version < SESSION_SCHEMA_VERSION:
                 legacy.append(path)
                 continue
-            if version != str(SESSION_SCHEMA_VERSION):
+            if parsed_version > SESSION_SCHEMA_VERSION:
                 raise PipelineError(f"unsupported session schemaVersion {version}: {path.name}")
             if len(thread_ids) == 1 and thread_ids[0] in candidates_by_thread:
                 if thread_ids[0] in matched_v2:
@@ -1877,7 +1921,7 @@ def execute_rebuild(
                     generator_versions["older"] += 1
                 current_source = metadata.get("sourceFingerprint") == candidates_by_thread[thread_ids[0]].fingerprint
                 if force or not (current_generator and current_source):
-                    replaced_v2.append(path)
+                    replaced_current.append(path)
                     continue
                 reusable_threads.add(thread_ids[0])
             preserve.append(path)
@@ -1902,12 +1946,15 @@ def execute_rebuild(
         "approvedHistoricalRoots": [str(root) for root in approved],
         "scan": scan_counts,
         "selectedCount": len(candidates),
-        "preservedV2": [path.name for path in preserve],
+        "preservedCurrent": [path.name for path in preserve],
         "generatorVersions": generator_versions,
         "generationCount": len(generate),
         "generationThreadIds": [item.thread_id for item in generate],
         "deletedLegacy": deleted,
-        "replacedV2": [{"file": path.name, "sha256": sha256(path.read_bytes()).hexdigest()} for path in replaced_v2],
+        "replacedCurrent": [
+            {"file": path.name, "sha256": sha256(path.read_bytes()).hexdigest()}
+            for path in replaced_current
+        ],
         "processed": [],
         "failed": [],
         "deferred": [],
@@ -2110,6 +2157,7 @@ def execute_pipeline(
     summarizer: Summarizer | None,
     dry_run: bool = False,
     backfill: bool = False,
+    force: bool = False,
     project_ids: Sequence[str] = (),
     thread_ids: Sequence[str] = (),
     limit: int | None = None,
@@ -2126,6 +2174,7 @@ def execute_pipeline(
         backfill=backfill,
         project_ids=project_ids,
         thread_ids=thread_ids,
+        ignore_fingerprints=force,
     )
     if limit is not None:
         if limit <= 0:
@@ -2137,6 +2186,7 @@ def execute_pipeline(
         "finishedAt": None,
         "mode": "backfill" if backfill else "daily",
         "dryRun": dry_run,
+        "force": force,
         "scan": scan_counts,
         "selectedCount": len(candidates),
         "processed": [],
@@ -2185,6 +2235,7 @@ def execute_pipeline(
                     config,
                     summarizer,
                     work_cache_root=work_cache_root or cache_root or default_cache_root(),
+                    force=force,
                 )
             except Exception as exc:  # Per-thread isolation is intentional.
                 report["failed"].append(

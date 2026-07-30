@@ -12,12 +12,36 @@ Project folderにはmarker・設定・contextを一切書きません。
 
 ## インストール
 
-Python 3.11以上とuvを用意し、このrepositoryのrootでCLIをインストールします。
+リポジトリ内のソースコードの変更を再インストールなしで反映するeditable
+installationを既定とします。
 
-```powershell
-uv tool install .
+```console
+uv tool install -e "C:\path\to\tkn_codex_context_pipeline"
 tkn-codex-context --help
 ```
+
+例示したパスは、このリポジトリの実際のフォルダパスに置き換えてください。
+リポジトリのパスを明示しているため、どのworking directoryからでも実行できます。
+editable installationでは、`git pull`後のPythonソースコードの変更が
+`tkn-codex-context`へそのまま反映されます。
+
+既存installationをeditableへ切り替える場合:
+
+```console
+uv tool install -e "C:\path\to\tkn_codex_context_pipeline" --force
+```
+
+dependency、package metadata、entry pointを変更した場合、またはリポジトリを別の
+folderへ移動した場合は、editable installationでも上記コマンドを再実行してください。
+
+non-editable installationを使用する場合:
+
+```console
+uv tool install "C:\path\to\tkn_codex_context_pipeline" --force
+```
+
+non-editable installationは、その後のリポジトリ変更を追従しません。`git pull`後の
+変更をCLIへ反映するには、同じinstallコマンドを再実行する必要があります。
 
 ## 設定
 
@@ -33,7 +57,7 @@ tkn-codex-context config show
 Projectごとに空の`sessions/`を用意します。Session Noteは生成しません。
 実行日時は`installed_at`として保存され、通常実行が
 自動処理するのは、この日時以後に作成または更新されたchatだけです。それ以前の
-chatは、明示的な`backfill`または`rebuild`で処理します。
+chatは、明示的な`pull --backfill`または`rebuild`で処理します。
 
 既存のpipelineを完全に作り直す場合は、まず削除対象を確認してからforce初期化
 します。modelや保存先などの設定は維持され、`installed_at`だけが更新されます。
@@ -165,6 +189,7 @@ tkn-codex-context session-notes pull --dry-run
 | --- | --- |
 | `reportPath` | 保存したrun report。dry-runでは保存しないため`null` |
 | `mode` | `daily`は通常のpull、`backfill`は過去chatの明示処理 |
+| `force` | fingerprintや生成条件が同じでも強制再生成するか |
 | `scan.files` | 読み取ったCodex JSONL file数 |
 | `scan.eligible` | fingerprint確認後に作成・更新候補となった件数 |
 | `scan.unchanged` | 前回処理時からsourceと生成条件が変わらず、再生成しない件数 |
@@ -193,17 +218,96 @@ tkn-codex-context session-notes pull
 
 通常のpullは30分以上idleのchatだけを処理します。過去分は明示的に実行します。
 
+#### 既存Session Noteの更新判定
+
+既存Session Noteについてsource fingerprint、schema、model、reasoning effort、
+prompt version、renderer versionが現在の条件とすべて一致する場合は
+`scan.unchanged`としてスキップします。生成AIは呼び出さず、Session Noteとstateも
+変更しません。
+
+sourceが更新された場合、現在より古いschemaの場合、またはmodelなどの生成条件が
+異なる場合は、自動的に作成・更新候補になります。現在より新しい未対応schemaは、
+誤って上書きせずエラーで停止します。
+
+条件が同じSession Noteも再生成する場合は`--force`を指定します。
+
 ```powershell
-tkn-codex-context session-notes backfill --project-id <projectId> --dry-run
-tkn-codex-context session-notes backfill --all
-tkn-codex-context session-notes rebuild --project-id <projectId> --dry-run
-tkn-codex-context session-notes rebuild --project-id <projectId> --force
+tkn-codex-context session-notes pull --force --dry-run
+tkn-codex-context session-notes pull --force
+```
+
+通常の`pull --force`が対象にするのは`installed_at`以後のchatです。全履歴を
+強制再生成する場合は、過去分と通常分をそれぞれ実行します。
+
+```powershell
+tkn-codex-context session-notes pull --backfill --all --force --dry-run
+tkn-codex-context session-notes pull --backfill --all --force
+tkn-codex-context session-notes pull --force
+```
+
+#### 過去chatをbackfillする
+
+`pull --backfill`は、`installed_at`より前のchatを取り込みます。通常のpullと
+同じfingerprint・schema・model判定を使用するため、変更のない最新ノートは
+スキップします。dry-runでは生成AIも書き込みも発生しません。
+
+```powershell
+tkn-codex-context session-notes pull --backfill --project-id <projectIdOrNameOrRoot> --dry-run
+tkn-codex-context session-notes pull --backfill --all --dry-run
+tkn-codex-context session-notes pull --backfill --all
+```
+
+`--backfill`には、誤って全履歴を処理しないよう`--project-id`または`--all`が
+必要です。`--project-id`と`--all`は`--backfill`なしでは使用できません。
+`--project-id`には内部Project IDのほか、現在のProject NameまたはCURRENT ROOTを
+指定できます。解決順は内部IDの完全一致、現在のNameの完全一致、CURRENT ROOTの
+順です。root比較ではWindows pathの大文字小文字、`/`と`\`、末尾separatorの違いを
+正規化します。NameまたはCURRENT ROOTで一致する有効なProjectが複数ある場合は、
+誤選択せず一致したProject IDを表示してエラーで停止します。
+
+#### 1つのProjectをrebuildする
+
+`rebuild`は、1つのProjectに帰属する全chatを`installed_at`やidle時間に関係なく
+再評価し、Session Note directoryとrefresh stateを整合した状態へ再構築します。
+生成と検証がすべて成功してから新しい構成へ切り替えるため、途中失敗時は既存の
+Session Noteとstateを維持します。
+
+現在より古いすべての数値schema versionは再生成対象です。最新schemaかつsourceと
+生成条件が同じノートは再利用します。現在より新しいschemaは未対応形式として
+停止します。`--force`を付けると、最新のノートも含めて全対象を再生成します。
+
+```powershell
+tkn-codex-context session-notes rebuild --project-id <projectIdOrNameOrRoot> --dry-run
+tkn-codex-context session-notes rebuild --project-id <projectIdOrNameOrRoot>
+tkn-codex-context session-notes rebuild --project-id <projectIdOrNameOrRoot> --force
+```
+
+#### Session Noteをvalidateする
+
+`validate`は、指定した1つのSession Noteについて、現在のschema、必須Frontmatter、
+source thread/ref、source fingerprint、必須見出し、本文とFrontmatterのstatus一致を
+検証します。ファイルを変更せず、生成AIも呼び出しません。
+
+```powershell
 tkn-codex-context validate <session-note.md>
 ```
 
 `projects list`の既定出力を除き、各コマンドはJSON結果を出力します。
-機械可読な一覧には`projects list --json`を使います。`--verbose`は進捗ログを
-追加し、`--quiet`はコマンド出力を維持したままログを抑えます。
+機械可読な一覧には`projects list --json`を使います。
+
+進捗ログは既定でstderrへ、最終JSONはstdoutへ出力します。そのため、対話実行では
+`[info] Starting thread 1/7: ...`のような進捗を確認でき、scriptではstdoutだけを
+安全にpipeまたはcaptureできます。実装にはPython標準の`logging` moduleだけを使い、
+logging専用の外部dependencyは追加していません。
+
+- `-q` / `--quiet`: 進捗を省略し、errorだけを表示
+- `-v` / `--verbose`: `[debug]`の詳細な診断情報と元の進捗eventを追加表示
+
+```powershell
+tkn-codex-context session-notes rebuild --project-id <projectIdOrNameOrRoot>
+tkn-codex-context -q session-notes rebuild --project-id <projectIdOrNameOrRoot> --dry-run
+tkn-codex-context -v session-notes pull
+```
 
 ## 対象範囲
 
@@ -216,8 +320,10 @@ repositoryでも問題ありません。
 
 ## Projectとthreadの同定
 
-`projectId`には、Codex appの`local-projects`に保存された内部Project IDを
-そのまま使用します。Project名とrootは変更可能なmetadataであり、Projectの
+保存先とreportの`projectId`には、Codex appの`local-projects`に保存された内部
+Project IDをそのまま使用します。`--project-id`でNameまたはCURRENT ROOTを
+指定した場合も、それらはCLI入力時の検索にだけ使われ、保存時には解決後の内部IDを
+使用します。Project名とrootは変更可能なmetadataであり、Projectの
 同一性判定には使用しません。同じrootでも左ペイン上で別Projectなら別Project、
 同じ内部IDなら名前やrootが変わっても同じProjectとして扱います。
 

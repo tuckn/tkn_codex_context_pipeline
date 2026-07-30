@@ -14,13 +14,36 @@ Japanese documentation: [README_ja.md](README_ja.md)
 
 ## Installation
 
-Install Python 3.11 or later and uv, then install the CLI from the repository
-root:
+The default is an editable installation so repository source changes are
+reflected without reinstalling the CLI:
 
-```powershell
-uv tool install .
+```console
+uv tool install -e "C:\path\to\tkn_codex_context_pipeline"
 tkn-codex-context --help
 ```
+
+Replace the example path with the actual repository folder. Because the path
+is explicit, the command can be run from any working directory. With an
+editable installation, Python source changes from `git pull` are immediately
+used by `tkn-codex-context`.
+
+To replace an existing installation with an editable installation:
+
+```console
+uv tool install -e "C:\path\to\tkn_codex_context_pipeline" --force
+```
+
+Run the command again after changing dependencies, package metadata, or entry
+points, or after moving the repository to another folder.
+
+To use a non-editable installation:
+
+```console
+uv tool install "C:\path\to\tkn_codex_context_pipeline" --force
+```
+
+A non-editable installation does not follow later repository changes. Run the
+same installation command again after `git pull` to update the installed CLI.
 
 ## Configuration
 
@@ -37,7 +60,7 @@ empty `sessions/` directory for each Project in the Codex app sidebar. It does
 not generate Session Notes. The command records the current time as
 `installed_at`. A normal pull
 automatically processes only chats created or updated at or after that time.
-Older chats require an explicit `backfill` or `rebuild`.
+Older chats require an explicit `pull --backfill` or `rebuild`.
 
 To rebuild existing pipeline storage, inspect the destructive plan and then
 force initialization. Model, path, and runtime settings are preserved;
@@ -179,6 +202,7 @@ The main `report` fields mean:
 | --- | --- |
 | `reportPath` | Saved run report; `null` in dry-run because no report is written |
 | `mode` | `daily` for a normal pull or `backfill` for explicit historical processing |
+| `force` | Whether unchanged fingerprints and generation conditions are forcibly regenerated |
 | `scan.files` | Number of Codex JSONL files read |
 | `scan.eligible` | Number of create or update candidates after fingerprint checks |
 | `scan.unchanged` | Previously processed sources whose source and generation conditions are unchanged |
@@ -207,20 +231,102 @@ tkn-codex-context session-notes pull
 ```
 
 Normal pulls process chats that have been idle for at least 30 minutes.
-Historical processing is explicit:
+
+#### Existing Session Note update behavior
+
+An existing Session Note is reported as `scan.unchanged` and skipped when its
+source fingerprint, schema, model, reasoning effort, prompt version, and
+renderer version all match the current conditions. The generative AI is not
+called, and neither the Session Note nor state is modified.
+
+A changed source, an older schema, or different generation conditions such as
+the model automatically make the note eligible for creation or update. A
+schema newer than the current implementation stops with an error rather than
+being overwritten.
+
+Use `--force` to regenerate notes even when all conditions match:
 
 ```powershell
-tkn-codex-context session-notes backfill --project-id <projectId> --dry-run
-tkn-codex-context session-notes backfill --all
-tkn-codex-context session-notes rebuild --project-id <projectId> --dry-run
-tkn-codex-context session-notes rebuild --project-id <projectId> --force
+tkn-codex-context session-notes pull --force --dry-run
+tkn-codex-context session-notes pull --force
+```
+
+Normal `pull --force` covers chats at or after `installed_at`. To force the
+entire history, run the historical and normal windows separately:
+
+```powershell
+tkn-codex-context session-notes pull --backfill --all --force --dry-run
+tkn-codex-context session-notes pull --backfill --all --force
+tkn-codex-context session-notes pull --force
+```
+
+#### Backfill historical chats
+
+`pull --backfill` processes chats from before `installed_at`. It uses the same
+fingerprint, schema, and model checks as a normal pull, so unchanged current
+notes are skipped. Dry-run does not call the generative AI or write files.
+
+```powershell
+tkn-codex-context session-notes pull --backfill --project-id <projectIdOrNameOrRoot> --dry-run
+tkn-codex-context session-notes pull --backfill --all --dry-run
+tkn-codex-context session-notes pull --backfill --all
+```
+
+`--backfill` requires either `--project-id` or `--all` to prevent accidental
+full-history processing. `--project-id` and `--all` are valid only with
+`--backfill`. `--project-id` accepts an internal Project ID, exact current
+Project Name, or CURRENT ROOT. Resolution order is exact ID, exact current
+Name, then CURRENT ROOT. Root comparison normalizes Windows path case, `/`
+versus `\`, and trailing separators. If a Name or CURRENT ROOT matches more
+than one active Project, the command stops and lists the matching Project IDs.
+
+#### Rebuild one Project
+
+`rebuild` re-evaluates every chat attributed to one Project, regardless of
+`installed_at` or the idle threshold, and reconstructs its Session Note
+directory and refresh state as a consistent set. Existing notes and state
+remain in place if generation or staged validation fails.
+
+Every numeric schema version older than the current schema is regenerated.
+Notes already using the current schema with matching source and generation
+conditions are reused. A newer schema stops as unsupported. `--force`
+regenerates every eligible note, including current unchanged notes.
+
+```powershell
+tkn-codex-context session-notes rebuild --project-id <projectIdOrNameOrRoot> --dry-run
+tkn-codex-context session-notes rebuild --project-id <projectIdOrNameOrRoot>
+tkn-codex-context session-notes rebuild --project-id <projectIdOrNameOrRoot> --force
+```
+
+#### Validate one Session Note
+
+`validate` checks one Session Note against the current schema, required
+frontmatter, source thread/ref and fingerprint, required headings, and status
+consistency between frontmatter and the body. It does not modify the file or
+call the generative AI.
+
+```powershell
 tkn-codex-context validate <session-note.md>
 ```
 
 Commands emit structured JSON results except for the human-readable default of
 `projects list`; use `projects list --json` when machine-readable output is
-needed. `--verbose` adds progress logs, and `--quiet` limits logs while
-preserving command output.
+needed.
+
+Progress logs go to standard error by default, while the final JSON result stays
+on standard output. Interactive runs therefore show messages such as
+`[info] Starting thread 1/7: ...`, while scripts can safely pipe or capture
+standard output. Logging uses only Python's standard-library `logging` module
+and adds no logging dependency.
+
+- `-q` / `--quiet`: suppress progress logs and show errors only.
+- `-v` / `--verbose`: include `[debug]` diagnostics and raw progress events.
+
+```powershell
+tkn-codex-context session-notes rebuild --project-id <projectIdOrNameOrRoot>
+tkn-codex-context -q session-notes rebuild --project-id <projectIdOrNameOrRoot> --dry-run
+tkn-codex-context -v session-notes pull
+```
 
 ## Scope
 
@@ -234,11 +340,13 @@ Git repositories.
 
 ## Project and thread attribution
 
-`projectId` is the internal Project ID stored in the Codex app's
-`local-projects` state. Project names and roots are mutable metadata and are
-not used as identity. Two sidebar Projects remain distinct even when they use
-the same root; the same internal ID remains one Project when its name or roots
-change.
+Stored paths, reports, and `projectId` values use the internal Project ID from
+the Codex app's `local-projects` state. When `--project-id` receives a Name or
+CURRENT ROOT, that value is used only to resolve the CLI input; the resolved
+internal ID is still used for storage. Project names and roots are mutable
+metadata and are not used as identity. Two sidebar Projects remain distinct
+even when they use the same root; the same internal ID remains one Project when
+its name or roots change.
 
 Thread attribution uses an explicit Codex app assignment first, then a unique
 cwd match against all active roots, then saved historical aliases.

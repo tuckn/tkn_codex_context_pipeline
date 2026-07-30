@@ -13,7 +13,12 @@ from typing import Any
 from .app_state import load_codex_app_state
 from .config import config_document, load_app_config
 from .initialization import initialize_application
-from .projects import fetch_projects, list_registered_projects, runtime_projects
+from .projects import (
+    fetch_projects,
+    list_registered_projects,
+    resolve_project_selector,
+    runtime_projects,
+)
 from .session_notes import (
     CodexSummarizer,
     PipelineError,
@@ -23,6 +28,13 @@ from .session_notes import (
 )
 
 LOGGER = logging.getLogger("tkn_codex_context")
+
+
+class _LowercaseLevelFormatter(logging.Formatter):
+    """Render standard-library log levels as compact CLI prefixes."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return f"[{record.levelname.lower()}] {super().format(record)}"
 
 
 def _utf8_console() -> None:
@@ -45,8 +57,18 @@ def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model-timeout-seconds", type=int)
     parser.add_argument("--codex-executable")
     output = parser.add_mutually_exclusive_group()
-    output.add_argument("--quiet", action="store_true")
-    output.add_argument("--verbose", action="store_true")
+    output.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress progress logs; errors are still shown",
+    )
+    output.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Show detailed diagnostic logs",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -73,20 +95,35 @@ def build_parser() -> argparse.ArgumentParser:
     note_commands = notes.add_subparsers(dest="notes_command", required=True)
     pull = note_commands.add_parser(
         "pull",
-        help="Pull post-install idle chats into Session Notes",
+        help="Pull eligible chats into Session Notes",
     )
     pull.add_argument("--dry-run", action="store_true")
     pull.add_argument("--limit", type=int)
-
-    backfill = note_commands.add_parser("backfill", help="Process older chats")
-    selector = backfill.add_mutually_exclusive_group(required=True)
-    selector.add_argument("--project-id")
+    pull.add_argument(
+        "--force",
+        action="store_true",
+        help="Regenerate eligible notes even when unchanged",
+    )
+    pull.add_argument(
+        "--backfill",
+        action="store_true",
+        help="Pull chats from before installed_at",
+    )
+    selector = pull.add_mutually_exclusive_group()
+    selector.add_argument(
+        "--project-id",
+        metavar="PROJECT_ID_NAME_OR_ROOT",
+        help="Select one active Project by ID, exact current Name, or CURRENT ROOT",
+    )
     selector.add_argument("--all", action="store_true")
-    backfill.add_argument("--limit", type=int)
-    backfill.add_argument("--dry-run", action="store_true")
 
     rebuild = note_commands.add_parser("rebuild", help="Re-evaluate all chats for one Project")
-    rebuild.add_argument("--project-id", required=True)
+    rebuild.add_argument(
+        "--project-id",
+        metavar="PROJECT_ID_NAME_OR_ROOT",
+        required=True,
+        help="Select one active Project by ID, exact current Name, or CURRENT ROOT",
+    )
     rebuild.add_argument("--force", action="store_true")
     rebuild.add_argument("--dry-run", action="store_true")
 
@@ -108,8 +145,10 @@ def _overrides(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _configure_logging(args: argparse.Namespace) -> None:
-    level = logging.WARNING if args.quiet else logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(level=level, format="%(levelname)s %(message)s")
+    level = logging.DEBUG if args.verbose else logging.ERROR if args.quiet else logging.INFO
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(_LowercaseLevelFormatter("%(message)s"))
+    logging.basicConfig(level=level, handlers=[handler], force=True)
 
 
 def _emit(value: dict[str, Any]) -> None:
@@ -153,8 +192,113 @@ def _emit_project_table(projects: list[dict[str, Any]]) -> None:
         )
 
 
+def _metric_summary(value: dict[str, Any]) -> str:
+    metrics: list[str] = []
+    duration = value.get("durationSeconds")
+    if isinstance(duration, int | float):
+        metrics.append(f"{duration:g}s")
+    chunks = value.get("chunkCount")
+    if isinstance(chunks, int):
+        metrics.append(f"{chunks} chunk{'s' if chunks != 1 else ''}")
+    calls = value.get("modelCalls")
+    if isinstance(calls, int):
+        metrics.append(f"{calls} model call{'s' if calls != 1 else ''}")
+    transport_retries = value.get("transportRetries")
+    if isinstance(transport_retries, int) and transport_retries:
+        metrics.append(f"{transport_retries} transport retries")
+    semantic_retries = value.get("semanticRetries")
+    if isinstance(semantic_retries, int) and semantic_retries:
+        metrics.append(f"{semantic_retries} semantic retries")
+    return f" ({', '.join(metrics)})" if metrics else ""
+
+
 def _progress(value: dict[str, Any]) -> None:
-    LOGGER.info("%s", json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+    LOGGER.debug(
+        "Progress event: %s",
+        json.dumps(value, ensure_ascii=False, separators=(",", ":")),
+    )
+    event_type = value.get("type")
+    if event_type == "thread-start":
+        LOGGER.info(
+            "Starting thread %s/%s: %s",
+            value.get("index", "?"),
+            value.get("total", "?"),
+            value.get("threadId", "unknown"),
+        )
+    elif event_type == "thread-resumed":
+        LOGGER.info(
+            "Resuming completed thread %s/%s from cache: %s",
+            value.get("index", "?"),
+            value.get("total", "?"),
+            value.get("threadId", "unknown"),
+        )
+    elif event_type == "chunk-start":
+        LOGGER.info(
+            "Generating chunk %s/%s for thread %s",
+            value.get("chunk", "?"),
+            value.get("chunkCount", "?"),
+            value.get("threadId", "unknown"),
+        )
+    elif event_type == "model-attempt":
+        LOGGER.info(
+            "Calling Codex (attempt %s, timeout %ss)",
+            value.get("attempt", "?"),
+            value.get("timeoutSeconds", "?"),
+        )
+    elif event_type == "thread-complete":
+        LOGGER.info(
+            "Completed thread %s/%s: %s%s",
+            value.get("index", "?"),
+            value.get("total", "?"),
+            value.get("threadId", "unknown"),
+            _metric_summary(value),
+        )
+    elif event_type == "thread-failed":
+        LOGGER.error(
+            "Failed thread %s/%s: %s — %s",
+            value.get("index", "?"),
+            value.get("total", "?"),
+            value.get("threadId", "unknown"),
+            value.get("error", "unknown error"),
+        )
+
+
+def _log_project_fetch(report: dict[str, Any]) -> None:
+    LOGGER.info(
+        "Project metadata ready: %s total, %s bound, %s new, %s pending",
+        report.get("projectCount", 0),
+        report.get("boundCount", 0),
+        report.get("newCount", 0),
+        report.get("pendingCount", 0),
+    )
+
+
+def _log_session_report(report: dict[str, Any], report_path: Path | None) -> None:
+    selected = report.get("selectedCount", 0)
+    failed = len(report.get("failed", []))
+    deferred = len(report.get("deferred", []))
+    if report.get("dryRun"):
+        generation = report.get("generationCount")
+        generation_text = f", {generation} require generation" if isinstance(generation, int) else ""
+        LOGGER.info(
+            "Dry run complete: %s selected%s, %s failed, %s deferred",
+            selected,
+            generation_text,
+            failed,
+            deferred,
+        )
+    else:
+        LOGGER.info(
+            "Session Note run complete: %s processed, %s failed, %s deferred",
+            len(report.get("processed", [])),
+            failed,
+            deferred,
+        )
+    warnings = report.get("warnings", [])
+    if warnings:
+        LOGGER.warning("Run completed with %s warning%s", len(warnings), "s" if len(warnings) != 1 else "")
+    if report_path is not None:
+        LOGGER.info("Run report: %s", report_path)
 
 
 def _prepare_projects(
@@ -180,18 +324,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     _configure_logging(args)
+    LOGGER.debug("Parsed command: %s", args.command)
     try:
         if args.command == "init":
+            LOGGER.info("%s pipeline storage", "Previewing" if args.dry_run else "Initializing")
             report = initialize_application(
                 args.config,
                 overrides=_overrides(args),
                 force=args.force,
                 dry_run=args.dry_run,
             )
+            LOGGER.info("%s complete", "Dry run" if args.dry_run else "Initialization")
             _emit({"command": "init", **report})
             return 0
 
         if args.command == "config":
+            LOGGER.info("Showing resolved configuration")
             resolved = load_app_config(
                 explicit_path=args.config,
                 overrides=_overrides(args),
@@ -200,7 +348,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "validate":
-            _emit(validate_session_note(args.session_note.expanduser().absolute()))
+            note = args.session_note.expanduser().absolute()
+            LOGGER.info("Validating Session Note: %s", note)
+            _emit(validate_session_note(note))
+            LOGGER.info("Validation succeeded: %s", note)
             return 0
 
         if args.command == "projects":
@@ -209,6 +360,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 overrides=_overrides(args),
             )
             if args.projects_command == "list":
+                LOGGER.info("Listing registered Projects")
                 registered_projects = list_registered_projects(config.registry_path)
                 if args.json:
                     _emit(
@@ -221,12 +373,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else:
                     _emit_project_table(registered_projects)
                 return 0
+            LOGGER.info("%s Project metadata from the Codex app", "Previewing" if args.dry_run else "Fetching")
             state = load_codex_app_state(config.app_state_path)
             _records, report = fetch_projects(config, state, dry_run=args.dry_run)
+            _log_project_fetch(report)
             _emit({"command": "projects fetch", **report})
             return 2 if report["pendingCount"] else 0
 
+        if args.notes_command == "pull":
+            has_backfill_selector = bool(args.project_id or args.all)
+            if args.backfill and not has_backfill_selector:
+                raise PipelineError("--backfill requires --project-id <projectIdOrNameOrRoot> or --all")
+            if not args.backfill and has_backfill_selector:
+                raise PipelineError("--project-id and --all require --backfill")
+
         dry_run = bool(args.dry_run)
+        if args.notes_command == "rebuild":
+            LOGGER.info(
+                "%s Session Note rebuild for Project %s",
+                "Planning" if dry_run else "Starting",
+                args.project_id,
+            )
+        else:
+            mode = "backfill" if args.backfill else "pull"
+            LOGGER.info("%s Session Note %s", "Planning" if dry_run else "Starting", mode)
         (
             config,
             pipeline_config,
@@ -234,6 +404,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             projects,
             fetch_report,
         ) = _prepare_projects(args, dry_run=dry_run)
+        _log_project_fetch(fetch_report)
+        selected_project = (
+            resolve_project_selector(projects, args.project_id)
+            if args.project_id
+            else None
+        )
+        if selected_project is not None and selected_project.project_id != args.project_id:
+            selector_kind = (
+                "Name"
+                if selected_project.title == args.project_id
+                else "CURRENT ROOT"
+            )
+            LOGGER.info(
+                "Resolved Project %s %r to ID %s",
+                selector_kind,
+                args.project_id,
+                selected_project.project_id,
+            )
+        if not dry_run:
+            LOGGER.info(
+                "Generator: %s (%s reasoning)",
+                pipeline_config.model,
+                pipeline_config.reasoning_effort,
+            )
         summarizer = (
             None
             if dry_run
@@ -248,32 +442,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 projects,
                 summarizer=summarizer,
                 dry_run=dry_run,
-                limit=args.limit,
-                cache_root=config.reports_root,
-                work_cache_root=config.cache_root,
-                progress=_progress,
-            )
-        elif args.notes_command == "backfill":
-            project_ids = () if args.all else (args.project_id,)
-            report, report_path = execute_pipeline(
-                pipeline_config,
-                projects,
-                summarizer=summarizer,
-                dry_run=dry_run,
-                backfill=True,
-                project_ids=project_ids,
+                backfill=args.backfill,
+                force=args.force,
+                project_ids=(selected_project.project_id,) if selected_project is not None else (),
                 limit=args.limit,
                 cache_root=config.reports_root,
                 work_cache_root=config.cache_root,
                 progress=_progress,
             )
         else:
-            selected = [item for item in projects if item.project_id == args.project_id]
-            if len(selected) != 1:
-                raise PipelineError(f"unknown or pending projectId: {args.project_id}")
+            if selected_project is None:
+                raise PipelineError("rebuild requires --project-id")
             report, report_path = execute_rebuild(
                 pipeline_config,
-                selected[0],
+                selected_project,
                 summarizer=summarizer,
                 force=args.force,
                 dry_run=dry_run,
@@ -281,6 +463,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 work_cache_root=config.cache_root,
                 progress=_progress,
             )
+        _log_session_report(report, report_path)
         _emit(
             {
                 "command": f"session-notes {args.notes_command}",
