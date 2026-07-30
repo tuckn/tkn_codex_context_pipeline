@@ -12,6 +12,7 @@ from typing import Any
 
 from .app_state import load_codex_app_state
 from .config import config_document, load_app_config
+from .console_logging import ColorFormatter, log_success, supports_color
 from .initialization import initialize_application
 from .projects import (
     fetch_projects,
@@ -19,6 +20,7 @@ from .projects import (
     resolve_project_selector,
     runtime_projects,
 )
+from .prompting import initialize_user_prompt, load_summary_prompt
 from .session_notes import (
     CodexSummarizer,
     PipelineError,
@@ -28,13 +30,6 @@ from .session_notes import (
 )
 
 LOGGER = logging.getLogger("tkn_codex_context")
-
-
-class _LowercaseLevelFormatter(logging.Formatter):
-    """Render standard-library log levels as compact CLI prefixes."""
-
-    def format(self, record: logging.LogRecord) -> str:
-        return f"[{record.levelname.lower()}] {super().format(record)}"
 
 
 def _utf8_console() -> None:
@@ -56,6 +51,7 @@ def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--runtime-minutes", type=int)
     parser.add_argument("--model-timeout-seconds", type=int)
     parser.add_argument("--codex-executable")
+    parser.add_argument("--summary-prompt", type=Path)
     output = parser.add_mutually_exclusive_group()
     output.add_argument(
         "-q",
@@ -83,6 +79,14 @@ def build_parser() -> argparse.ArgumentParser:
     config = commands.add_parser("config", help="Manage pipeline configuration")
     config_commands = config.add_subparsers(dest="config_command", required=True)
     config_commands.add_parser("show", help="Show resolved configuration")
+
+    prompt = commands.add_parser("prompt", help="Manage summary prompts")
+    prompt_commands = prompt.add_subparsers(dest="prompt_command", required=True)
+    prompt_init = prompt_commands.add_parser(
+        "init",
+        help="Create an editable summary prompt in the user prompts directory",
+    )
+    prompt_init.add_argument("name", nargs="?", default="summary.md")
 
     projects = commands.add_parser("projects", help="Manage Project bindings")
     project_commands = projects.add_subparsers(dest="projects_command", required=True)
@@ -140,6 +144,7 @@ def _overrides(args: argparse.Namespace) -> dict[str, Any]:
         "runtime_minutes",
         "model_timeout_seconds",
         "codex_executable",
+        "summary_prompt",
     )
     return {name: getattr(args, name) for name in names if getattr(args, name, None) is not None}
 
@@ -147,7 +152,12 @@ def _overrides(args: argparse.Namespace) -> dict[str, Any]:
 def _configure_logging(args: argparse.Namespace) -> None:
     level = logging.DEBUG if args.verbose else logging.ERROR if args.quiet else logging.INFO
     handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(_LowercaseLevelFormatter("%(message)s"))
+    handler.setFormatter(
+        ColorFormatter(
+            "[%(levelname)s] %(message)s",
+            use_color=supports_color(sys.stderr),
+        )
+    )
     logging.basicConfig(level=level, handlers=[handler], force=True)
 
 
@@ -246,7 +256,8 @@ def _progress(value: dict[str, Any]) -> None:
             value.get("timeoutSeconds", "?"),
         )
     elif event_type == "thread-complete":
-        LOGGER.info(
+        log_success(
+            LOGGER,
             "Completed thread %s/%s: %s%s",
             value.get("index", "?"),
             value.get("total", "?"),
@@ -288,12 +299,12 @@ def _log_session_report(report: dict[str, Any], report_path: Path | None) -> Non
             deferred,
         )
     else:
-        LOGGER.info(
-            "Session Note run complete: %s processed, %s failed, %s deferred",
-            len(report.get("processed", [])),
-            failed,
-            deferred,
-        )
+        message = "Session Note run complete: %s processed, %s failed, %s deferred"
+        values = (len(report.get("processed", [])), failed, deferred)
+        if failed:
+            LOGGER.error(message, *values)
+        else:
+            log_success(LOGGER, message, *values)
     warnings = report.get("warnings", [])
     if warnings:
         LOGGER.warning("Run completed with %s warning%s", len(warnings), "s" if len(warnings) != 1 else "")
@@ -334,7 +345,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 force=args.force,
                 dry_run=args.dry_run,
             )
-            LOGGER.info("%s complete", "Dry run" if args.dry_run else "Initialization")
+            if args.dry_run:
+                LOGGER.info("Dry run complete")
+            else:
+                log_success(LOGGER, "Initialization complete")
             _emit({"command": "init", **report})
             return 0
 
@@ -344,14 +358,48 @@ def main(argv: Sequence[str] | None = None) -> int:
                 explicit_path=args.config,
                 overrides=_overrides(args),
             )
-            _emit({"command": "config show", "config": config_document(resolved)})
+            try:
+                prompt = load_summary_prompt(resolved.summary_prompt)
+            except (RuntimeError, ValueError) as exc:
+                raise PipelineError(str(exc)) from exc
+            _emit(
+                {
+                    "command": "config show",
+                    "config": config_document(resolved),
+                    "summaryPrompt": {
+                        "mode": prompt.mode,
+                        "source": prompt.source,
+                        "id": prompt.prompt_id,
+                        "version": prompt.version,
+                        "sha256": prompt.sha256,
+                    },
+                }
+            )
+            return 0
+
+        if args.command == "prompt":
+            try:
+                target = initialize_user_prompt(args.name)
+                prompt = load_summary_prompt(target)
+            except (FileExistsError, RuntimeError, ValueError) as exc:
+                raise PipelineError(str(exc)) from exc
+            log_success(LOGGER, "Created summary prompt: %s", target)
+            _emit(
+                {
+                    "command": "prompt init",
+                    "status": "created",
+                    "path": str(target),
+                    "promptId": prompt.prompt_id,
+                    "promptVersion": prompt.version,
+                }
+            )
             return 0
 
         if args.command == "validate":
             note = args.session_note.expanduser().absolute()
             LOGGER.info("Validating Session Note: %s", note)
             _emit(validate_session_note(note))
-            LOGGER.info("Validation succeeded: %s", note)
+            log_success(LOGGER, "Validation succeeded: %s", note)
             return 0
 
         if args.command == "projects":

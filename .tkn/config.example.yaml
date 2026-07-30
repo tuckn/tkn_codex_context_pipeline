@@ -10,3 +10,6 @@ reasoning_effort: high
 idle_minutes: 30
 runtime_minutes: 230
 model_timeout_seconds: 1800
+# null uses the built-in prompt. A bare filename is loaded from
+# ~/.tkn/codex_context_pipeline/prompts/. Other locations require an absolute path.
+summary_prompt: null

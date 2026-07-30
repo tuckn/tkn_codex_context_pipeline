@@ -8,6 +8,7 @@ import pytest
 from pytest import CaptureFixture
 
 from tkn_codex_context.cli import LOGGER, _configure_logging, _progress, build_parser, main
+from tkn_codex_context.console_logging import SUCCESS, ColorFormatter
 
 
 def write_app_state(
@@ -47,7 +48,7 @@ def test_logging_uses_readable_stderr_prefixes(
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == "[info] Readable progress\n"
+    assert captured.err == "[INFO] Readable progress\n"
     assert logging.getLogger().level == logging.INFO
 
 
@@ -90,9 +91,56 @@ def test_progress_events_are_human_readable(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err.splitlines() == [
-        "[info] Starting thread 2/7: thread-2",
-        "[info] Completed thread 2/7: thread-2 (12.5s, 2 chunks, 3 model calls)",
+        "[INFO] Starting thread 2/7: thread-2",
+        "[SUCCESS] Completed thread 2/7: thread-2 (12.5s, 2 chunks, 3 model calls)",
     ]
+
+
+@pytest.mark.parametrize(
+    ("level", "name", "color"),
+    [
+        (SUCCESS, "SUCCESS", "\x1b[32m"),
+        (logging.ERROR, "ERROR", "\x1b[31m"),
+    ],
+)
+def test_console_formatter_colors_success_and_error(
+    level: int,
+    name: str,
+    color: str,
+) -> None:
+    formatter = ColorFormatter("[%(levelname)s] %(message)s", use_color=True)
+    record = logging.LogRecord("test", level, __file__, 1, "message", (), None)
+
+    assert formatter.format(record) == f"{color}[{name}] message\x1b[0m"
+
+
+def test_console_formatter_keeps_redirected_output_plain() -> None:
+    formatter = ColorFormatter("[%(levelname)s] %(message)s", use_color=False)
+    record = logging.LogRecord("test", SUCCESS, __file__, 1, "message", (), None)
+
+    assert formatter.format(record) == "[SUCCESS] message"
+
+
+def test_prompt_init_creates_versioned_markdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    prompt_root = tmp_path / "prompts"
+    monkeypatch.setattr(
+        "tkn_codex_context.prompting.user_prompts_root",
+        lambda: prompt_root,
+    )
+
+    assert main(["-q", "prompt", "init", "custom.md"]) == 0
+    output = json.loads(capsys.readouterr().out)
+
+    assert output["status"] == "created"
+    assert output["path"] == str(prompt_root / "custom.md")
+    assert output["promptVersion"] == "1.0"
+    assert len(output["promptId"]) == 36
+    assert main(["-q", "prompt", "init", "custom.md"]) == 2
+    assert "refusing to overwrite" in capsys.readouterr().err
 
 
 def test_init_dry_run_has_no_files(
@@ -466,8 +514,10 @@ def test_validate_command_accepts_session_note_v2(
     note = tmp_path / "note.md"
     note.write_text(
         """---
-type: session
+type: summary
 schemaVersion: 2
+promptId: f5dfc679-13d3-4fcc-9736-b7d4e6bb5c11
+promptVersion: "1.0"
 reviewStatus: unreviewed
 automatedValidation: passed
 status: done

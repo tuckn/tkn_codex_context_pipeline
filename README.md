@@ -11,6 +11,7 @@ Japanese documentation: [README_ja.md](README_ja.md)
 - Python 3.11 or newer
 - [uv](https://docs.astral.sh/uv/)
 - `codex` on `PATH` for summary generation
+  - For Windows, install using the following command: `powershell -ExecutionPolicy Bypass -c "irm https://chatgpt.com/codex/install.ps1 | iex"`
 
 ## Installation
 
@@ -22,9 +23,8 @@ uv tool install -e "C:\path\to\tkn_codex_context_pipeline"
 tkn-codex-context --help
 ```
 
-Replace the example path with the actual repository folder. Because the path
-is explicit, the command can be run from any working directory. With an
-editable installation, Python source changes from `git pull` are immediately
+Replace the example path with the actual repository folder. With an
+editable installation (`-e`), Python source changes from `git pull` are immediately
 used by `tkn-codex-context`.
 
 To replace an existing installation with an editable installation:
@@ -88,6 +88,8 @@ The application separates its own files by purpose:
 ```text
 ~/.tkn/codex_context_pipeline/
 ├── config.yaml
+├── prompts/
+│   └── summary.md
 ├── data/
 │   ├── project-registry.jsonl
 │   └── projects/
@@ -120,6 +122,49 @@ Configuration is merged in this order:
 
 Only `.tkn/config.example.yaml` is versioned. Do not commit real configuration.
 Relative paths in a YAML layer are resolved relative to that YAML file.
+
+### Summary prompt
+
+Generative-AI summary instructions are stored in a versioned Markdown prompt,
+not embedded in the Python implementation. With `summary_prompt: null`, the
+pipeline uses its packaged default prompt. Create an editable copy with:
+
+```powershell
+tkn-codex-context prompt init
+```
+
+The command creates
+`~/.tkn/codex_context_pipeline/prompts/summary.md` without overwriting an
+existing file. Select it in `config.yaml`:
+
+```yaml
+summary_prompt: summary.md
+```
+
+A bare filename is resolved under the user prompts directory. A prompt
+elsewhere must use an absolute path; nested relative paths are rejected.
+`--summary-prompt` is the equivalent one-run CLI override.
+
+Each prompt is UTF-8 Markdown with required YAML frontmatter:
+
+```markdown
+---
+type: prompt
+id: 00000000-0000-4000-8000-000000000001
+version: "1.0"
+---
+
+# Summary instructions
+
+Write the instructions here.
+```
+
+Give each logically distinct prompt its own stable UUID. Increase the quoted
+`version` whenever its instructions change. Generated note frontmatter records
+this identity as `promptId` and `promptVersion`; `config show` also reports the
+effective prompt source and SHA-256. The SHA-256 participates in the generation
+fingerprint used by normal pulls. Authors must still increase `version` so the
+change remains explicit and portable in note frontmatter.
 
 ## Normal operation
 
@@ -187,6 +232,9 @@ In `projects list --json`, `roots[*].status` is `active` for a current root and
 `session-notes pull` pulls Codex chats eligible for normal processing and
 creates or updates Session Notes. It automatically fetches Project metadata
 before scanning, so its output contains both `projectFetch` and `report`.
+Generated notes use `type: summary`; the directory and command names remain
+`sessions` and `session-notes` for compatibility with the Project context
+layout.
 
 Inspect the selection with dry-run first. Dry-run does not call the generative
 AI and does not change the registry, Session Notes, refresh state, cache, or
@@ -235,9 +283,10 @@ Normal pulls process chats that have been idle for at least 30 minutes.
 #### Existing Session Note update behavior
 
 An existing Session Note is reported as `scan.unchanged` and skipped when its
-source fingerprint, schema, model, reasoning effort, prompt version, and
-renderer version all match the current conditions. The generative AI is not
-called, and neither the Session Note nor state is modified.
+source fingerprint, schema, model, reasoning effort, summary prompt identity
+and content, generator prompt envelope, and renderer version all match the
+current conditions. The generative AI is not called, and neither the Session
+Note nor state is modified.
 
 A changed source, an older schema, or different generation conditions such as
 the model automatically make the note eligible for creation or update. A
@@ -315,12 +364,18 @@ needed.
 
 Progress logs go to standard error by default, while the final JSON result stays
 on standard output. Interactive runs therefore show messages such as
-`[info] Starting thread 1/7: ...`, while scripts can safely pipe or capture
+`[INFO] Starting thread 1/7: ...` and
+`[SUCCESS] Completed thread 1/7: ...`, while scripts can safely pipe or capture
 standard output. Logging uses only Python's standard-library `logging` module
 and adds no logging dependency.
 
+In an ANSI-capable interactive terminal, `[SUCCESS]` lines are green and
+`[ERROR]` / `[CRITICAL]` lines are red. Redirected output, `NO_COLOR`, and
+`TERM=dumb` remain uncolored. On Windows, the CLI enables virtual-terminal
+processing when the console supports it.
+
 - `-q` / `--quiet`: suppress progress logs and show errors only.
-- `-v` / `--verbose`: include `[debug]` diagnostics and raw progress events.
+- `-v` / `--verbose`: include `[DEBUG]` diagnostics and raw progress events.
 
 ```powershell
 tkn-codex-context session-notes rebuild --project-id <projectIdOrNameOrRoot>

@@ -54,6 +54,7 @@ class AppConfig(BaseModel):
     runtime_minutes: int = Field(default=DEFAULT_RUNTIME_MINUTES, gt=0)
     model_timeout_seconds: int = Field(default=DEFAULT_MODEL_TIMEOUT_SECONDS, gt=0)
     source_id: str = DEFAULT_SOURCE_ID
+    summary_prompt: Path | None = None
 
     @field_validator("model")
     @classmethod
@@ -109,6 +110,7 @@ class AppConfig(BaseModel):
             idle_minutes=self.idle_minutes,
             runtime_minutes=self.runtime_minutes,
             model_timeout_seconds=self.model_timeout_seconds,
+            summary_prompt=self.summary_prompt,
         )
 
 
@@ -140,6 +142,19 @@ def _resolve_paths(value: dict[str, Any], base: Path) -> dict[str, Any]:
             continue
         expanded = Path(os.path.expandvars(str(raw))).expanduser()
         result[key] = expanded if expanded.is_absolute() else (base / expanded).absolute()
+    raw_prompt = result.get("summary_prompt")
+    if raw_prompt is not None:
+        prompt_text = os.path.expandvars(str(raw_prompt))
+        prompt_path = Path(prompt_text).expanduser()
+        if prompt_path.is_absolute():
+            result["summary_prompt"] = prompt_path
+        elif Path(prompt_text).name == prompt_text:
+            result["summary_prompt"] = default_app_root() / "prompts" / prompt_path
+        else:
+            raise PipelineError(
+                "summary_prompt must be a filename in the user prompts directory "
+                "or an absolute path"
+            )
     return result
 
 

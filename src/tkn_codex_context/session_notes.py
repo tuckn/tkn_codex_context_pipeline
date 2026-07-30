@@ -37,6 +37,12 @@ from .frontmatter import (
     parse_simple_frontmatter,
     split_frontmatter_lines,
 )
+from .prompting import (
+    SummaryPrompt,
+    load_summary_prompt,
+    render_chunk_prompt,
+    render_reduction_prompt,
+)
 from .safety import redact_secret_like_content
 
 CONFIG_SCHEMA_VERSION = 1
@@ -53,8 +59,8 @@ DEFAULT_RUNTIME_MINUTES = 230
 DEFAULT_MODEL_TIMEOUT_SECONDS = 1800
 DEFAULT_CHUNK_CHARACTERS = 120_000
 MAX_EVENT_TEXT_CHARACTERS = 8_000
-GENERATOR_PROMPT_VERSION = 2
-RENDERER_VERSION = 2
+GENERATOR_PROMPT_VERSION = 3
+RENDERER_VERSION = 3
 REBUILD_WORK_SCHEMA_VERSION = 1
 IN_FLIGHT_GRACE_MINUTES = 9
 MAX_SUMMARY_ITEMS = 5
@@ -98,6 +104,7 @@ class PipelineConfig:
     idle_minutes: int = DEFAULT_IDLE_MINUTES
     runtime_minutes: int = DEFAULT_RUNTIME_MINUTES
     model_timeout_seconds: int = DEFAULT_MODEL_TIMEOUT_SECONDS
+    summary_prompt: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -403,6 +410,7 @@ def update_refresh_state(
     note_path: Path,
 ) -> None:
     state = load_refresh_state(project, config)
+    prompt = configured_summary_prompt(config)
     source = state["sources"][config.source_id]
     relative_note = note_path.relative_to(project.context_path).as_posix()
     processed_at = now_iso()
@@ -413,6 +421,9 @@ def update_refresh_state(
         "generatorModel": config.model,
         "generatorReasoningEffort": config.reasoning_effort,
         "generatorPromptVersion": GENERATOR_PROMPT_VERSION,
+        "summaryPromptId": prompt.prompt_id,
+        "summaryPromptVersion": prompt.version,
+        "summaryPromptSha256": prompt.sha256,
         "rendererVersion": RENDERER_VERSION,
         "noteHash": sha256(note_path.read_bytes()).hexdigest(),
         "sourceRefs": [candidate.source_ref],
@@ -902,6 +913,13 @@ def validate_note_data(value: Any, allowed_event_ids: set[str]) -> dict[str, Any
     return value
 
 
+def configured_summary_prompt(config: PipelineConfig) -> SummaryPrompt:
+    try:
+        return load_summary_prompt(config.summary_prompt)
+    except (RuntimeError, ValueError) as exc:
+        raise PipelineError(str(exc)) from exc
+
+
 class CodexSummarizer:
     def __init__(
         self,
@@ -915,6 +933,7 @@ class CodexSummarizer:
         self.chunk_characters = chunk_characters
         self.sleeper = sleeper
         self.observer = observer
+        self.prompt = configured_summary_prompt(config)
         self.deadline: datetime | None = None
         self.last_metrics: dict[str, int] = {}
 
@@ -1048,46 +1067,20 @@ class CodexSummarizer:
                     "chunkCount": len(chunks),
                 }
             )
-            prompt = json.dumps(
-                {
-                    "instruction": (
-                        "Create a concise source-near factual digest from only the supplied events. "
-                        "Do not infer goals, decisions, results, or next steps that are absent. "
-                        "Write natural Japanese except for literal headings, paths, commands, "
-                        "identifiers, and product names. Avoid unnecessary English prose. "
-                        "Use short independent summary bullets and cite eventIds for every material fact. "
-                        "Keep only facts needed to understand the request, material changes, validation, "
-                        "and last state; omit repetitive command-by-command chronology. "
-                        "Use one work item for a coherent task and multiple work items only for "
-                        "independent tasks in the same chat. Provide a short descriptive ASCII fileSlug. "
-                        "Use unresolved only for an unfinished explicit user request. Put checks outside "
-                        "the completed request in unverified; done must have no unresolved or continuation. "
-                        "Use the exact permitted labels. "
-                        "Use an empty array or empty string when the source does not establish a field."
-                    ),
-                    "threadId": candidate.thread_id,
-                    "part": index,
-                    "partCount": len(chunks),
-                    "events": [event.as_dict() for event in chunk],
-                },
-                ensure_ascii=False,
+            prompt = render_chunk_prompt(
+                self.prompt,
+                thread_id=candidate.thread_id,
+                part=index,
+                part_count=len(chunks),
+                events=[event.as_dict() for event in chunk],
             )
             partials.append(self._validated_invoke(prompt, allowed_ids))
         if len(partials) == 1:
             return partials[0]
-        reduction_prompt = json.dumps(
-            {
-                "instruction": (
-                    "Merge these ordered partial factual digests into one compact session note. "
-                    "Write natural Japanese except for literal identifiers. Remove duplication and "
-                    "command-by-command detail, preserve corrections over superseded statements, retain "
-                    "eventIds, combine matching work items, respect every item limit, and do not add facts "
-                    "or recommendations. Use unresolved only for unfinished explicit user requests."
-                ),
-                "threadId": candidate.thread_id,
-                "partials": partials,
-            },
-            ensure_ascii=False,
+        reduction_prompt = render_reduction_prompt(
+            self.prompt,
+            thread_id=candidate.thread_id,
+            partials=partials,
         )
         return self._validated_invoke(reduction_prompt, allowed_ids)
 
@@ -1100,10 +1093,14 @@ def source_timestamp(value: str) -> datetime:
 
 
 def generator_fingerprint(config: PipelineConfig) -> str:
+    prompt = configured_summary_prompt(config)
     value = {
         "model": config.model,
         "reasoningEffort": config.reasoning_effort,
-        "promptVersion": GENERATOR_PROMPT_VERSION,
+        "generatorPromptVersion": GENERATOR_PROMPT_VERSION,
+        "summaryPromptId": prompt.prompt_id,
+        "summaryPromptVersion": prompt.version,
+        "summaryPromptSha256": prompt.sha256,
         "rendererVersion": RENDERER_VERSION,
     }
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
@@ -1178,6 +1175,7 @@ def render_note(
     existing: dict[str, str],
     existing_distilled_to: list[str],
 ) -> str:
+    default_prompt = load_summary_prompt()
     started = source_timestamp(candidate.started_at)
     created = existing.get("date") or started.isoformat(timespec="seconds")
     session_id = existing.get("sessionId") or started.strftime("%Y%m%dT%H%M%S%z")
@@ -1185,7 +1183,7 @@ def render_note(
     last_state = data["lastKnownState"]
     rendered_at = now_iso()
     fields: list[tuple[str, str | int | list[str]]] = [
-        ("type", "session"),
+        ("type", "summary"),
         ("schemaVersion", SESSION_SCHEMA_VERSION),
         ("title", str(data["title"]).strip() or "Codex session"),
         ("description", str(data["description"]).strip()),
@@ -1195,6 +1193,8 @@ def render_note(
             "generatorReasoningEffort",
             data.get("_generatorReasoningEffort", DEFAULT_REASONING_EFFORT),
         ),
+        ("promptId", data.get("_summaryPromptId", default_prompt.prompt_id)),
+        ("promptVersion", data.get("_summaryPromptVersion", default_prompt.version)),
         ("generatorPromptVersion", GENERATOR_PROMPT_VERSION),
         ("rendererVersion", RENDERER_VERSION),
         ("generatedAt", rendered_at),
@@ -1338,6 +1338,9 @@ def write_candidate_note(
         data["fileSlug"] = file_slug_from_note_path(candidate, note_path)
         data["_generatorModel"] = config.model
         data["_generatorReasoningEffort"] = config.reasoning_effort
+        prompt = configured_summary_prompt(config)
+        data["_summaryPromptId"] = prompt.prompt_id
+        data["_summaryPromptVersion"] = prompt.version
         rendered = render_note(candidate, data, existing, existing_distilled_to)
         staged_note = work_root / note_path.name
         atomic_write_text(staged_note, rendered)
@@ -1514,6 +1517,7 @@ def current_note_matches_generation(
     candidate: Candidate,
     config: PipelineConfig,
 ) -> bool:
+    prompt = configured_summary_prompt(config)
     matches = find_note_matches(candidate.project, candidate.thread_id)
     if len(matches) > 1:
         raise PipelineError(
@@ -1529,11 +1533,14 @@ def current_note_matches_generation(
         raise PipelineError(f"unsupported session schemaVersion {version}: {path.name}")
     return (
         parsed_version == SESSION_SCHEMA_VERSION
+        and metadata.get("type") == "summary"
         and thread_ids == [candidate.thread_id]
         and source_refs == [candidate.source_ref]
         and metadata.get("sourceFingerprint") == candidate.fingerprint
         and metadata.get("generatorModel") == config.model
         and metadata.get("generatorReasoningEffort") == config.reasoning_effort
+        and metadata.get("promptId") == prompt.prompt_id
+        and metadata.get("promptVersion") == prompt.version
         and metadata.get("generatorPromptVersion") == str(GENERATOR_PROMPT_VERSION)
         and metadata.get("rendererVersion") == str(RENDERER_VERSION)
     )
@@ -1546,6 +1553,7 @@ def validate_staged_sessions(
     *,
     strict_threads: set[str] | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
+    prompt = configured_summary_prompt(config)
     by_thread: dict[str, str] = {}
     note_hashes: dict[str, str] = {}
     candidates_by_thread = {candidate.thread_id: candidate for candidate in candidates}
@@ -1556,9 +1564,9 @@ def validate_staged_sessions(
             raise PipelineError(
                 f"staged session note is not schemaVersion {SESSION_SCHEMA_VERSION}: {path.name}"
             )
-        if metadata.get("type") != "session":
-            raise PipelineError(f"staged session note has invalid type: {path.name}")
         if thread_ids:
+            if metadata.get("type") != "summary":
+                raise PipelineError(f"staged session note has invalid type: {path.name}")
             if metadata.get("reviewStatus") != "unreviewed":
                 raise PipelineError(f"chat-backed note is not unreviewed: {path.name}")
             if metadata.get("sourceType") != "codexChat" or not source_refs:
@@ -1570,6 +1578,8 @@ def validate_staged_sessions(
                     )
                 by_thread[thread_id] = path.name
                 note_hashes[thread_id] = sha256(path.read_bytes()).hexdigest()
+        elif metadata.get("type") not in {"session", "summary"}:
+            raise PipelineError(f"staged session note has invalid type: {path.name}")
         body = path.read_text(encoding="utf-8-sig")
         for heading in (
             "# Session Note",
@@ -1601,6 +1611,8 @@ def validate_staged_sessions(
                 expected_scalars = {
                     "generatorModel": config.model,
                     "generatorReasoningEffort": config.reasoning_effort,
+                    "promptId": prompt.prompt_id,
+                    "promptVersion": prompt.version,
                     "generatorPromptVersion": str(GENERATOR_PROMPT_VERSION),
                     "rendererVersion": str(RENDERER_VERSION),
                     "automatedValidation": "passed",
@@ -1631,7 +1643,7 @@ def validate_session_note(path: Path) -> dict[str, Any]:
     if parse_session_schema_version(version, path) != SESSION_SCHEMA_VERSION:
         raise PipelineError(f"session note is not schemaVersion {SESSION_SCHEMA_VERSION}: {path}")
     required = {
-        "type": "session",
+        "type": "summary",
         "reviewStatus": "unreviewed",
         "sourceType": "codexChat",
         "automatedValidation": "passed",
@@ -1639,6 +1651,12 @@ def validate_session_note(path: Path) -> dict[str, Any]:
     for key, expected in required.items():
         if metadata.get(key) != expected:
             raise PipelineError(f"session note has invalid {key}: {path}")
+    try:
+        uuid.UUID(metadata.get("promptId") or "")
+    except ValueError as exc:
+        raise PipelineError(f"session note has invalid promptId: {path}") from exc
+    if not metadata.get("promptVersion"):
+        raise PipelineError(f"session note has no promptVersion: {path}")
     if len(thread_ids) != 1 or len(source_refs) != 1:
         raise PipelineError(f"session note must have one source thread and source ref: {path}")
     if not metadata.get("sourceFingerprint"):
@@ -1680,6 +1698,7 @@ def rebuild_state(
 ) -> dict[str, Any]:
     state = deepcopy(previous)
     processed_at = now_iso()
+    prompt = configured_summary_prompt(config)
     source = state["sources"][config.source_id]
     threads = deepcopy(source.get("threads", {}))
     for candidate in candidates:
@@ -1690,6 +1709,9 @@ def rebuild_state(
             "generatorModel": config.model,
             "generatorReasoningEffort": config.reasoning_effort,
             "generatorPromptVersion": GENERATOR_PROMPT_VERSION,
+            "summaryPromptId": prompt.prompt_id,
+            "summaryPromptVersion": prompt.version,
+            "summaryPromptSha256": prompt.sha256,
             "rendererVersion": RENDERER_VERSION,
             "noteHash": note_hash_by_thread[candidate.thread_id],
             "sourceRefs": [candidate.source_ref],
@@ -1884,6 +1906,7 @@ def execute_rebuild(
         historical_roots=tuple(dict.fromkeys((*project.historical_roots, *approved))),
     )
     candidates, scan_counts = scan_rebuild_candidates(config, project)
+    prompt = configured_summary_prompt(config)
     candidates_by_thread = {item.thread_id: item for item in candidates}
 
     preserve: list[Path] = []
@@ -1912,6 +1935,9 @@ def execute_rebuild(
                     and renderer_version == str(RENDERER_VERSION)
                     and metadata.get("generatorModel") == config.model
                     and metadata.get("generatorReasoningEffort") == config.reasoning_effort
+                    and metadata.get("type") == "summary"
+                    and metadata.get("promptId") == prompt.prompt_id
+                    and metadata.get("promptVersion") == prompt.version
                 )
                 if not prompt_version or not renderer_version:
                     generator_versions["unknown"] += 1
@@ -1940,6 +1966,10 @@ def execute_rebuild(
             "model": config.model,
             "reasoningEffort": config.reasoning_effort,
             "promptVersion": GENERATOR_PROMPT_VERSION,
+            "summaryPromptId": prompt.prompt_id,
+            "summaryPromptVersion": prompt.version,
+            "summaryPromptSource": prompt.source,
+            "summaryPromptSha256": prompt.sha256,
             "rendererVersion": RENDERER_VERSION,
             "fingerprint": generator_fingerprint(config),
         },
@@ -2042,6 +2072,9 @@ def execute_rebuild(
             data["fileSlug"] = file_slug_from_note_path(candidate, note_path)
             data["_generatorModel"] = config.model
             data["_generatorReasoningEffort"] = config.reasoning_effort
+            prompt = configured_summary_prompt(config)
+            data["_summaryPromptId"] = prompt.prompt_id
+            data["_summaryPromptVersion"] = prompt.version
             atomic_write_text(note_path, render_note(candidate, data, {}, []))
             note_hash = sha256(note_path.read_bytes()).hexdigest()
             work_manifest["completed"][candidate.thread_id] = {

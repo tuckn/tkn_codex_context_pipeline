@@ -9,6 +9,7 @@ Project folderにはmarker・設定・contextを一切書きません。
 - Python 3.11以上
 - [uv](https://docs.astral.sh/uv/)
 - summary生成時に`PATH`から実行できる`codex`
+  - Windowsの場合、次のコマンドでインストールします。`powershell -ExecutionPolicy Bypass -c "irm https://chatgpt.com/codex/install.ps1 | iex"`
 
 ## インストール
 
@@ -21,8 +22,7 @@ tkn-codex-context --help
 ```
 
 例示したパスは、このリポジトリの実際のフォルダパスに置き換えてください。
-リポジトリのパスを明示しているため、どのworking directoryからでも実行できます。
-editable installationでは、`git pull`後のPythonソースコードの変更が
+`-e` オプション editable installationでは、`git pull`後のPythonソースコードの変更が
 `tkn-codex-context`へそのまま反映されます。
 
 既存installationをeditableへ切り替える場合:
@@ -82,6 +82,8 @@ tkn-codex-context projects list --json
 ```text
 ~/.tkn/codex_context_pipeline/
 ├── config.yaml
+├── prompts/
+│   └── summary.md
 ├── data/
 │   ├── project-registry.jsonl
 │   └── projects/
@@ -113,6 +115,48 @@ directoryを使うため、Windowsでは通常`%TMP%`、Linuxでは通常`/tmp`�
 
 commitするのは`.tkn/config.example.yaml`だけです。実設定をcommitしないで
 ください。YAML中の相対パスは、そのYAMLファイルがあるfolderを基準に解決します。
+
+### 要約プロンプト
+
+生成AIへの要約指示はPython実装へ埋め込まず、version付きMarkdown promptとして
+管理します。`summary_prompt: null`ではpackage内の既定promptを使用します。
+編集用copyは次のcommandで作成できます。
+
+```powershell
+tkn-codex-context prompt init
+```
+
+既存fileを上書きせず、
+`~/.tkn/codex_context_pipeline/prompts/summary.md`を作成します。使用するpromptは
+`config.yaml`で指定します。
+
+```yaml
+summary_prompt: summary.md
+```
+
+file名だけを指定した場合はuser prompts directoryから読み込みます。それ以外の
+場所はabsolute pathで指定し、階層を含むrelative pathは拒否します。
+1回だけ変更する場合は`--summary-prompt`でも上書きできます。
+
+promptはUTF-8 Markdownで、次のFrontmatterが必須です。
+
+```markdown
+---
+type: prompt
+id: 00000000-0000-4000-8000-000000000001
+version: "1.0"
+---
+
+# 要約指示
+
+ここに指示を書きます。
+```
+
+内容の異なるpromptには固有のstable UUIDを割り当て、指示を変更したらquoted
+stringの`version`を更新します。生成ノートのFrontmatterには`promptId`と
+`promptVersion`を記録し、`config show`は実際のsourceとSHA-256も表示します。
+SHA-256は通常pullの生成fingerprintにも含めます。Frontmatter上で変更を明示し、
+他の環境でも追跡できるよう、内容変更時は必ず`version`も更新してください。
 
 ## 通常実行
 
@@ -175,6 +219,8 @@ Projectも含めた状態は`projects list`で確認します。こちらの`sta
 `session-notes pull`は、通常処理の対象となるCodex chatを取り込み、Session Noteを
 作成または更新します。実行前にProject metadataのfetchも自動的に行うため、
 出力には`projectFetch`と`report`の両方が含まれます。
+生成ノートのFrontmatterは`type: summary`です。Project context layoutとの互換性の
+ため、directory名とcommand名は引き続き`sessions`と`session-notes`を使用します。
 
 最初にdry-runで対象を確認します。dry-runは生成AIを呼び出さず、registry、
 Session Note、refresh state、cache、run reportのいずれも変更しません。
@@ -221,7 +267,8 @@ tkn-codex-context session-notes pull
 #### 既存Session Noteの更新判定
 
 既存Session Noteについてsource fingerprint、schema、model、reasoning effort、
-prompt version、renderer versionが現在の条件とすべて一致する場合は
+要約promptのidentityと内容、generator prompt envelope、renderer versionが
+現在の条件とすべて一致する場合は
 `scan.unchanged`としてスキップします。生成AIは呼び出さず、Session Noteとstateも
 変更しません。
 
@@ -296,12 +343,17 @@ tkn-codex-context validate <session-note.md>
 機械可読な一覧には`projects list --json`を使います。
 
 進捗ログは既定でstderrへ、最終JSONはstdoutへ出力します。そのため、対話実行では
-`[info] Starting thread 1/7: ...`のような進捗を確認でき、scriptではstdoutだけを
+`[INFO] Starting thread 1/7: ...`や`[SUCCESS] Completed thread 1/7: ...`の
+ような進捗を確認でき、scriptではstdoutだけを
 安全にpipeまたはcaptureできます。実装にはPython標準の`logging` moduleだけを使い、
 logging専用の外部dependencyは追加していません。
 
+ANSI対応のinteractive terminalでは`[SUCCESS]`を緑、`[ERROR]`と`[CRITICAL]`を
+赤で表示します。redirect、`NO_COLOR`、`TERM=dumb`では色を付けません。Windowsでは
+consoleが対応している場合にvirtual-terminal processingを有効化します。
+
 - `-q` / `--quiet`: 進捗を省略し、errorだけを表示
-- `-v` / `--verbose`: `[debug]`の詳細な診断情報と元の進捗eventを追加表示
+- `-v` / `--verbose`: `[DEBUG]`の詳細な診断情報と元の進捗eventを追加表示
 
 ```powershell
 tkn-codex-context session-notes rebuild --project-id <projectIdOrNameOrRoot>

@@ -40,6 +40,29 @@ def test_precedence_and_relative_paths(tmp_path: Path, monkeypatch: pytest.Monke
     assert config.projects_state_root == config.state_root / "projects"
 
 
+def test_summary_prompt_bare_filename_uses_user_prompt_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "work"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    write_yaml(cwd / ".tkn/config.yaml", {"summary_prompt": "custom.md"})
+
+    config = load_app_config(cwd=cwd)
+
+    assert config.summary_prompt == (
+        home / ".tkn" / "codex_context_pipeline" / "prompts" / "custom.md"
+    )
+
+
+def test_summary_prompt_nested_relative_path_is_rejected(tmp_path: Path) -> None:
+    write_yaml(tmp_path / ".tkn/config.yaml", {"summary_prompt": "prompts/custom.md"})
+
+    with pytest.raises(PipelineError, match="filename in the user prompts directory"):
+        load_app_config(cwd=tmp_path)
+
+
 def test_unknown_key_is_rejected(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     write_yaml(path, {"unknown_setting": True})

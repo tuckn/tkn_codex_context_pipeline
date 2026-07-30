@@ -6,6 +6,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from tkn_codex_context.session_notes import (
     event_matches_project,
     execute_pipeline,
     execute_rebuild,
+    generator_fingerprint,
     load_config,
     make_config,
     prepare_events,
@@ -1009,8 +1011,11 @@ class SessionNotePipelineTests(unittest.TestCase):
         note = next(self.project.sessions_path.glob("*.md")).read_text(encoding="utf-8")
         self.assertIn('generatorModel: "gpt-5.6-sol"', note)
         self.assertIn('generatorReasoningEffort: "high"', note)
-        self.assertIn("generatorPromptVersion: 2", note)
-        self.assertIn("rendererVersion: 2", note)
+        self.assertIn('type: "summary"', note)
+        self.assertIn('promptId: "f5dfc679-13d3-4fcc-9736-b7d4e6bb5c11"', note)
+        self.assertIn('promptVersion: "1.0"', note)
+        self.assertIn("generatorPromptVersion: 3", note)
+        self.assertIn("rendererVersion: 3", note)
         self.assertIn("generatedAt:", note)
         self.assertIn('fileSlug: "automated-session"', note)
         self.assertIn('automatedValidation: "passed"', note)
@@ -1018,6 +1023,36 @@ class SessionNotePipelineTests(unittest.TestCase):
         thread = state["sources"]["windows"]["threads"]["thread-1"]
         self.assertTrue(thread["generationFingerprint"])
         self.assertTrue(thread["noteHash"])
+
+    def test_custom_prompt_version_is_recorded_and_content_changes_fingerprint(self) -> None:
+        prompt = self.root / "custom-summary.md"
+        prompt.write_text(
+            "---\ntype: prompt\n"
+            "id: 00000000-0000-4000-8000-000000000007\n"
+            'version: "7.2"\n---\n\n'
+            "# Custom instructions\n\nSummarize source-backed facts.",
+            encoding="utf-8",
+        )
+        config = replace(self.config, summary_prompt=prompt)
+        first_fingerprint = generator_fingerprint(config)
+        prompt.write_text(
+            prompt.read_text(encoding="utf-8") + "\nPreserve explicit decisions.\n",
+            encoding="utf-8",
+        )
+        self.assertNotEqual(first_fingerprint, generator_fingerprint(config))
+
+        write_chat(self.sessions / "chat.jsonl", thread_id="thread-1", cwd=self.repo)
+        report, _path = execute_rebuild(
+            config,
+            self.project,
+            summarizer=FakeSummarizer(),
+            cache_root=self.cache,
+        )
+
+        self.assertEqual([], report["failed"])
+        note = next(self.project.sessions_path.glob("*.md")).read_text(encoding="utf-8")
+        self.assertIn('promptId: "00000000-0000-4000-8000-000000000007"', note)
+        self.assertIn('promptVersion: "7.2"', note)
 
     def test_done_note_rejects_unresolved_items(self) -> None:
         write_chat(self.sessions / "chat.jsonl", thread_id="thread-1", cwd=self.repo)
