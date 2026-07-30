@@ -116,11 +116,22 @@ directoryを使うため、Windowsでは通常`%TMP%`、Linuxでは通常`/tmp`�
 commitするのは`.tkn/config.example.yaml`だけです。実設定をcommitしないで
 ください。YAML中の相対パスは、そのYAMLファイルがあるfolderを基準に解決します。
 
-### 要約プロンプト
+### 要約生成resource
 
-生成AIへの要約指示はPython実装へ埋め込まず、version付きMarkdown promptとして
-管理します。`summary_prompt: null`ではpackage内の既定promptを使用します。
-編集用copyは次のcommandで作成できます。
+要約仕様は、package内の次の3つの外部resourceへ分けて管理します。
+
+| resource | 役割 |
+| --- | --- |
+| `prompts/default-summary.md` | version付きの編集方針、各fieldの意味、development labelの定義、source・merge・repair modeの指示 |
+| `schemas/summary-note-output.schema.json` | Codex structured outputとPython検証が共用する、生成JSONのfield・型・enum・件数上限 |
+| `templates/default-summary-note.md` | version付きの決定的なMarkdown見出し順序とsection配置 |
+
+Pythonに残すのはapplication管理の安全envelope、event ID検証、chunk制御、厳格な
+検証、provenance、安全なfile操作です。最終Markdownはstructured JSONと外部
+templateから生成し、modelが最終レイアウトを直接書くことはありません。
+
+`summary_prompt: null`ではpackage内の既定promptを使用します。編集用copyは次の
+commandで作成できます。
 
 ```powershell
 tkn-codex-context prompt init
@@ -154,9 +165,14 @@ version: "1.0"
 
 内容の異なるpromptには固有のstable UUIDを割り当て、指示を変更したらquoted
 stringの`version`を更新します。生成ノートのFrontmatterには`promptId`と
-`promptVersion`を記録し、`config show`は実際のsourceとSHA-256も表示します。
-SHA-256は通常pullの生成fingerprintにも含めます。Frontmatter上で変更を明示し、
-他の環境でも追跡できるよう、内容変更時は必ず`version`も更新してください。
+`promptVersion`に加え、`outputSchemaSha256`、`templateId`、
+`templateVersion`を記録します。`config show`はprompt、schema、templateそれぞれの
+実効sourceとprovenanceを表示します。
+
+prompt、schema、templateすべてのSHA-256を生成fingerprintへ含めます。
+Frontmatter上でsemantic changeを明示し、他の環境でも追跡できるよう、prompt内容の
+変更時は必ず`version`も更新してください。package内schemaとtemplateは、現時点では
+config overrideではなくapplication管理resourceです。
 
 ## 通常実行
 
@@ -266,9 +282,9 @@ tkn-codex-context session-notes pull
 
 #### 既存Session Noteの更新判定
 
-既存Session Noteについてsource fingerprint、schema、model、reasoning effort、
-要約promptのidentityと内容、generator prompt envelope、renderer versionが
-現在の条件とすべて一致する場合は
+既存Session Noteについてsource fingerprint、artifact schema、model、
+reasoning effort、要約prompt、出力schema、Markdown template、generator prompt
+envelope、renderer versionが現在の条件とすべて一致する場合は
 `scan.unchanged`としてスキップします。生成AIは呼び出さず、Session Noteとstateも
 変更しません。
 

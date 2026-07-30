@@ -143,6 +143,28 @@ def test_prompt_init_creates_versioned_markdown(
     assert "refusing to overwrite" in capsys.readouterr().err
 
 
+def test_config_show_reports_all_summary_resource_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    assert main(["-q", "config", "show"]) == 0
+    output = json.loads(capsys.readouterr().out)
+
+    assert output["summaryPrompt"]["version"] == "2.0"
+    assert output["summaryPrompt"]["source"].endswith("prompts/default-summary.md")
+    assert output["summarySchema"]["source"].endswith(
+        "schemas/summary-note-output.schema.json"
+    )
+    assert len(output["summarySchema"]["sha256"]) == 64
+    assert output["summaryTemplate"]["version"] == "1.0"
+    assert output["summaryTemplate"]["source"].endswith(
+        "templates/default-summary-note.md"
+    )
+
+
 def test_init_dry_run_has_no_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -517,7 +539,10 @@ def test_validate_command_accepts_session_note_v2(
 type: summary
 schemaVersion: 2
 promptId: f5dfc679-13d3-4fcc-9736-b7d4e6bb5c11
-promptVersion: "1.0"
+promptVersion: "2.0"
+outputSchemaSha256: 3ebffe117e29f76dfca25375a7e96ba0867de31a7ed68022dc6b65d91d651170
+templateId: 4d19c51c-0d02-43a5-b6ad-6d67f9739b75
+templateVersion: "1.0"
 reviewStatus: unreviewed
 automatedValidation: passed
 status: done

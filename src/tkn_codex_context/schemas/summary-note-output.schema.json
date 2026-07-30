@@ -1,0 +1,192 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "title": {
+      "type": "string"
+    },
+    "fileSlug": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+      "minLength": 3,
+      "maxLength": 72
+    },
+    "description": {
+      "type": "string"
+    },
+    "summaryItems": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "eventIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "text",
+          "eventIds"
+        ]
+      }
+    },
+    "workItems": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "developments": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "label": {
+                  "type": "string",
+                  "enum": [
+                    "Action",
+                    "Clarification / Correction",
+                    "Explicit Decision",
+                    "Proposal",
+                    "Reported Result",
+                    "Request",
+                    "Validation"
+                  ]
+                },
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 420
+                },
+                "eventIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "label",
+                "text",
+                "eventIds"
+              ]
+            }
+          }
+        },
+        "required": [
+          "title",
+          "developments"
+        ]
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 360
+          },
+          "eventIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "text",
+          "eventIds"
+        ]
+      }
+    },
+    "lastKnownState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "workState": {
+          "type": "string",
+          "enum": [
+            "blocked",
+            "done",
+            "in-progress",
+            "waiting-for-user"
+          ]
+        },
+        "detail": {
+          "type": "string"
+        },
+        "latestUserDirection": {
+          "type": "string"
+        },
+        "unresolved": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unverified": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "continuationPoint": {
+          "type": "string"
+        },
+        "eventIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "workState",
+        "detail",
+        "latestUserDirection",
+        "unresolved",
+        "unverified",
+        "continuationPoint",
+        "eventIds"
+      ]
+    },
+    "sourceLimitations": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "title",
+    "fileSlug",
+    "description",
+    "summaryItems",
+    "workItems",
+    "evidence",
+    "lastKnownState",
+    "sourceLimitations"
+  ]
+}

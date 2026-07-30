@@ -28,6 +28,7 @@ from .session_notes import (
     execute_rebuild,
     validate_session_note,
 )
+from .summary_resources import load_summary_schema, load_summary_template
 
 LOGGER = logging.getLogger("tkn_codex_context")
 
@@ -360,6 +361,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             try:
                 prompt = load_summary_prompt(resolved.summary_prompt)
+                schema = load_summary_schema()
+                template = load_summary_template()
             except (RuntimeError, ValueError) as exc:
                 raise PipelineError(str(exc)) from exc
             _emit(
@@ -372,6 +375,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "id": prompt.prompt_id,
                         "version": prompt.version,
                         "sha256": prompt.sha256,
+                    },
+                    "summarySchema": {
+                        "source": schema.source,
+                        "sha256": schema.sha256,
+                    },
+                    "summaryTemplate": {
+                        "source": template.source,
+                        "id": template.template_id,
+                        "version": template.version,
+                        "sha256": template.sha256,
                     },
                 }
             )

@@ -160,13 +160,24 @@ def render_reduction_prompt(
         prompt,
         mode="merge-partial-summaries",
         thread_id=thread_id,
+        payload={"partials": partials},
+    )
+
+
+def render_repair_prompt(
+    prompt: SummaryPrompt,
+    *,
+    thread_id: str,
+    validation_error: str,
+    draft: dict[str, Any],
+) -> str:
+    return _managed_input(
+        prompt,
+        mode="repair-invalid-draft",
+        thread_id=thread_id,
         payload={
-            "instruction": (
-                "Merge the ordered partial summaries into one compact result. "
-                "Remove duplication, preserve corrections over superseded statements, "
-                "retain event IDs, combine matching work items, and do not add facts."
-            ),
-            "partials": partials,
+            "validationError": validation_error,
+            "draft": draft,
         },
     )
 

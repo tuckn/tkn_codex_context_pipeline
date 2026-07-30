@@ -42,8 +42,16 @@ from .prompting import (
     load_summary_prompt,
     render_chunk_prompt,
     render_reduction_prompt,
+    render_repair_prompt,
 )
 from .safety import redact_secret_like_content
+from .summary_resources import (
+    SummaryTemplate,
+    load_summary_schema,
+    load_summary_template,
+    render_summary_template,
+    validate_summary_output_schema,
+)
 
 CONFIG_SCHEMA_VERSION = 1
 STATE_SCHEMA_VERSION = 2
@@ -59,30 +67,48 @@ DEFAULT_RUNTIME_MINUTES = 230
 DEFAULT_MODEL_TIMEOUT_SECONDS = 1800
 DEFAULT_CHUNK_CHARACTERS = 120_000
 MAX_EVENT_TEXT_CHARACTERS = 8_000
-GENERATOR_PROMPT_VERSION = 3
-RENDERER_VERSION = 3
+GENERATOR_PROMPT_VERSION = 4
+RENDERER_VERSION = 4
 REBUILD_WORK_SCHEMA_VERSION = 1
 IN_FLIGHT_GRACE_MINUTES = 9
-MAX_SUMMARY_ITEMS = 5
-MAX_WORK_ITEMS = 5
-MAX_DEVELOPMENTS_PER_WORK_ITEM = 6
-MAX_EVIDENCE_ITEMS = 8
-MAX_SOURCE_LIMITATIONS = 5
 MAX_NOTE_NARRATIVE_CHARACTERS = 9_000
 AVOIDABLE_ENGLISH_PHRASES = {
     "actual execution",
     "supplied events",
 }
-ALLOWED_STATUS = {"in-progress", "blocked", "waiting-for-user", "done"}
-ALLOWED_LABELS = {
-    "Request",
-    "Clarification / Correction",
-    "Proposal",
-    "Action",
-    "Reported Result",
-    "Validation",
-    "Explicit Decision",
-}
+SUMMARY_SCHEMA_RESOURCE = load_summary_schema()
+SUMMARY_TEMPLATE_RESOURCE = load_summary_template()
+NOTE_SCHEMA = SUMMARY_SCHEMA_RESOURCE.value
+MAX_SUMMARY_ITEMS = int(NOTE_SCHEMA["properties"]["summaryItems"]["maxItems"])
+MAX_WORK_ITEMS = int(NOTE_SCHEMA["properties"]["workItems"]["maxItems"])
+MAX_DEVELOPMENTS_PER_WORK_ITEM = int(
+    NOTE_SCHEMA["properties"]["workItems"]["items"]["properties"]["developments"][
+        "maxItems"
+    ]
+)
+MAX_EVIDENCE_ITEMS = int(NOTE_SCHEMA["properties"]["evidence"]["maxItems"])
+MAX_SOURCE_LIMITATIONS = int(
+    NOTE_SCHEMA["properties"]["sourceLimitations"]["maxItems"]
+)
+MAX_SUMMARY_TEXT_CHARACTERS = int(
+    NOTE_SCHEMA["properties"]["summaryItems"]["items"]["properties"]["text"]["maxLength"]
+)
+MAX_DEVELOPMENT_TEXT_CHARACTERS = int(
+    NOTE_SCHEMA["properties"]["workItems"]["items"]["properties"]["developments"][
+        "items"
+    ]["properties"]["text"]["maxLength"]
+)
+MAX_EVIDENCE_TEXT_CHARACTERS = int(
+    NOTE_SCHEMA["properties"]["evidence"]["items"]["properties"]["text"]["maxLength"]
+)
+ALLOWED_STATUS = set(
+    NOTE_SCHEMA["properties"]["lastKnownState"]["properties"]["workState"]["enum"]
+)
+ALLOWED_LABELS = set(
+    NOTE_SCHEMA["properties"]["workItems"]["items"]["properties"]["developments"][
+        "items"
+    ]["properties"]["label"]["enum"]
+)
 
 
 class PipelineError(RuntimeError):
@@ -424,6 +450,10 @@ def update_refresh_state(
         "summaryPromptId": prompt.prompt_id,
         "summaryPromptVersion": prompt.version,
         "summaryPromptSha256": prompt.sha256,
+        "outputSchemaSha256": SUMMARY_SCHEMA_RESOURCE.sha256,
+        "templateId": SUMMARY_TEMPLATE_RESOURCE.template_id,
+        "templateVersion": SUMMARY_TEMPLATE_RESOURCE.version,
+        "templateSha256": SUMMARY_TEMPLATE_RESOURCE.sha256,
         "rendererVersion": RENDERER_VERSION,
         "noteHash": sha256(note_path.read_bytes()).hexdigest(),
         "sourceRefs": [candidate.source_ref],
@@ -724,119 +754,11 @@ def chunk_events(
     return chunks
 
 
-NOTE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "title": {"type": "string"},
-        "fileSlug": {
-            "type": "string",
-            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
-            "minLength": 3,
-            "maxLength": 72,
-        },
-        "description": {"type": "string"},
-        "summaryItems": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": MAX_SUMMARY_ITEMS,
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "text": {"type": "string"},
-                    "eventIds": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["text", "eventIds"],
-            },
-        },
-        "workItems": {
-            "type": "array",
-            "maxItems": MAX_WORK_ITEMS,
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "title": {"type": "string"},
-                    "developments": {
-                        "type": "array",
-                        "maxItems": MAX_DEVELOPMENTS_PER_WORK_ITEM,
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "properties": {
-                                "label": {
-                                    "type": "string",
-                                    "enum": sorted(ALLOWED_LABELS),
-                                },
-                                "text": {"type": "string"},
-                                "eventIds": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                },
-                            },
-                            "required": ["label", "text", "eventIds"],
-                        },
-                    },
-                },
-                "required": ["title", "developments"],
-            },
-        },
-        "evidence": {
-            "type": "array",
-            "maxItems": MAX_EVIDENCE_ITEMS,
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "text": {"type": "string"},
-                    "eventIds": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["text", "eventIds"],
-            },
-        },
-        "lastKnownState": {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "workState": {"type": "string", "enum": sorted(ALLOWED_STATUS)},
-                "detail": {"type": "string"},
-                "latestUserDirection": {"type": "string"},
-                "unresolved": {"type": "array", "items": {"type": "string"}},
-                "unverified": {"type": "array", "items": {"type": "string"}},
-                "continuationPoint": {"type": "string"},
-                "eventIds": {"type": "array", "items": {"type": "string"}},
-            },
-            "required": [
-                "workState",
-                "detail",
-                "latestUserDirection",
-                "unresolved",
-                "unverified",
-                "continuationPoint",
-                "eventIds",
-            ],
-        },
-        "sourceLimitations": {
-            "type": "array",
-            "maxItems": MAX_SOURCE_LIMITATIONS,
-            "items": {"type": "string"},
-        },
-    },
-    "required": [
-        "title",
-        "fileSlug",
-        "description",
-        "summaryItems",
-        "workItems",
-        "evidence",
-        "lastKnownState",
-        "sourceLimitations",
-    ],
-}
-
-
 def validate_note_data(value: Any, allowed_event_ids: set[str]) -> dict[str, Any]:
+    try:
+        validate_summary_output_schema(value, NOTE_SCHEMA)
+    except ValueError as exc:
+        raise PipelineError(f"Codex output does not match the summary schema: {exc}") from exc
     if not isinstance(value, dict):
         raise PipelineError("Codex output must be a JSON object")
     required = set(NOTE_SCHEMA["required"])
@@ -873,7 +795,7 @@ def validate_note_data(value: Any, allowed_event_ids: set[str]) -> dict[str, Any
     for item in summary_items:
         if not isinstance(item, dict) or not str(item.get("text") or "").strip():
             raise PipelineError("Codex output has an invalid summary item")
-        if len(str(item["text"])) > 300:
+        if len(str(item["text"])) > MAX_SUMMARY_TEXT_CHARACTERS:
             raise PipelineError("Codex output summary item is too long")
         cited.extend(item.get("eventIds") or [])
     for work_item in work_items:
@@ -884,7 +806,10 @@ def validate_note_data(value: Any, allowed_event_ids: set[str]) -> dict[str, Any
         for item in work_item["developments"]:
             if not isinstance(item, dict) or item.get("label") not in ALLOWED_LABELS:
                 raise PipelineError("Codex output has an invalid key development")
-            if not str(item.get("text") or "").strip() or len(str(item["text"])) > 420:
+            if (
+                not str(item.get("text") or "").strip()
+                or len(str(item["text"])) > MAX_DEVELOPMENT_TEXT_CHARACTERS
+            ):
                 raise PipelineError("Codex output has an empty or overly long development")
             cited.extend(item.get("eventIds") or [])
     evidence = value.get("evidence")
@@ -893,7 +818,10 @@ def validate_note_data(value: Any, allowed_event_ids: set[str]) -> dict[str, Any
     for item in evidence:
         if not isinstance(item, dict):
             raise PipelineError("Codex output has invalid evidence")
-        if not str(item.get("text") or "").strip() or len(str(item["text"])) > 360:
+        if (
+            not str(item.get("text") or "").strip()
+            or len(str(item["text"])) > MAX_EVIDENCE_TEXT_CHARACTERS
+        ):
             raise PipelineError("Codex output has an empty or overly long evidence item")
         cited.extend(item.get("eventIds") or [])
     if len(evidence) > MAX_EVIDENCE_ITEMS:
@@ -1021,6 +949,7 @@ class CodexSummarizer:
         self,
         prompt: str,
         allowed_event_ids: set[str],
+        thread_id: str,
     ) -> dict[str, Any]:
         current_prompt = prompt
         for semantic_attempt in range(2):
@@ -1031,18 +960,11 @@ class CodexSummarizer:
                 if semantic_attempt:
                     raise
                 self.last_metrics["semanticRetries"] = self.last_metrics.get("semanticRetries", 0) + 1
-                current_prompt = json.dumps(
-                    {
-                        "instruction": (
-                            "Correct the supplied draft to satisfy the validation error. "
-                            "Keep only source-backed facts, shorten rather than expand, "
-                            "write natural Japanese except for literal identifiers, and "
-                            "do not add new event IDs."
-                        ),
-                        "validationError": str(exc),
-                        "draft": value,
-                    },
-                    ensure_ascii=False,
+                current_prompt = render_repair_prompt(
+                    self.prompt,
+                    thread_id=thread_id,
+                    validation_error=str(exc),
+                    draft=value,
                 )
         raise PipelineError("Codex semantic validation did not produce a valid note")
 
@@ -1074,7 +996,9 @@ class CodexSummarizer:
                 part_count=len(chunks),
                 events=[event.as_dict() for event in chunk],
             )
-            partials.append(self._validated_invoke(prompt, allowed_ids))
+            partials.append(
+                self._validated_invoke(prompt, allowed_ids, candidate.thread_id)
+            )
         if len(partials) == 1:
             return partials[0]
         reduction_prompt = render_reduction_prompt(
@@ -1082,7 +1006,11 @@ class CodexSummarizer:
             thread_id=candidate.thread_id,
             partials=partials,
         )
-        return self._validated_invoke(reduction_prompt, allowed_ids)
+        return self._validated_invoke(
+            reduction_prompt,
+            allowed_ids,
+            candidate.thread_id,
+        )
 
 
 def source_timestamp(value: str) -> datetime:
@@ -1101,6 +1029,10 @@ def generator_fingerprint(config: PipelineConfig) -> str:
         "summaryPromptId": prompt.prompt_id,
         "summaryPromptVersion": prompt.version,
         "summaryPromptSha256": prompt.sha256,
+        "outputSchemaSha256": SUMMARY_SCHEMA_RESOURCE.sha256,
+        "templateId": SUMMARY_TEMPLATE_RESOURCE.template_id,
+        "templateVersion": SUMMARY_TEMPLATE_RESOURCE.version,
+        "templateSha256": SUMMARY_TEMPLATE_RESOURCE.sha256,
         "rendererVersion": RENDERER_VERSION,
     }
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
@@ -1174,6 +1106,8 @@ def render_note(
     data: dict[str, Any],
     existing: dict[str, str],
     existing_distilled_to: list[str],
+    *,
+    template: SummaryTemplate = SUMMARY_TEMPLATE_RESOURCE,
 ) -> str:
     default_prompt = load_summary_prompt()
     started = source_timestamp(candidate.started_at)
@@ -1195,6 +1129,9 @@ def render_note(
         ),
         ("promptId", data.get("_summaryPromptId", default_prompt.prompt_id)),
         ("promptVersion", data.get("_summaryPromptVersion", default_prompt.version)),
+        ("outputSchemaSha256", SUMMARY_SCHEMA_RESOURCE.sha256),
+        ("templateId", template.template_id),
+        ("templateVersion", template.version),
         ("generatorPromptVersion", GENERATOR_PROMPT_VERSION),
         ("rendererVersion", RENDERER_VERSION),
         ("generatedAt", rendered_at),
@@ -1214,58 +1151,72 @@ def render_note(
     ]
     if candidate.project.source_project_id:
         fields.append(("sourceProjectId", candidate.project.source_project_id))
-    lines = [frontmatter(fields), "", "# Session Note", ""]
-    lines.extend(["## Summary", ""])
-    for item in data.get("summaryItems", []):
-        lines.append(f"- {str(item['text']).strip()}{event_citation(item.get('eventIds', []))}")
-    lines.extend(["", "## Key Developments", ""])
+    summary_lines = [
+        f"- {str(item['text']).strip()}{event_citation(item.get('eventIds', []))}"
+        for item in data.get("summaryItems", [])
+    ]
+    development_lines: list[str] = []
     work_items = [item for item in data.get("workItems", []) if item.get("developments")]
     if not work_items:
-        lines.append("- 確認できる記録なし。")
+        development_lines.append("- 確認できる記録なし。")
     for work_index, work_item in enumerate(work_items, 1):
         multiple = len(work_items) > 1
         if multiple:
             title = str(work_item.get("title") or f"Work item {work_index}").strip()
-            lines.extend([f"### WI-{work_index:02d}: {title}", ""])
+            development_lines.extend([f"### WI-{work_index:02d}: {title}", ""])
         grouped: dict[str, list[dict[str, Any]]] = {}
         for development in work_item["developments"]:
             grouped.setdefault(str(development["label"]), []).append(development)
         for label, developments in grouped.items():
             heading = "####" if multiple else "###"
-            lines.extend([f"{heading} {label}", ""])
+            development_lines.extend([f"{heading} {label}", ""])
             for item in developments:
-                lines.append(f"- {str(item['text']).strip()}{event_citation(item.get('eventIds', []))}")
-            lines.append("")
-        while lines and not lines[-1]:
-            lines.pop()
-    lines.extend(
-        [
-            "",
-            "## Last Known State",
-            "",
-            f"- Work State: {last_state['workState']} — "
-            f"{str(last_state['detail']).strip()}"
-            f"{event_citation(last_state.get('eventIds', []))}",
-            "- Latest User Direction: " + (str(last_state["latestUserDirection"]).strip() or "追加指示なし。"),
-        ]
-    )
+                development_lines.append(
+                    f"- {str(item['text']).strip()}"
+                    f"{event_citation(item.get('eventIds', []))}"
+                )
+            development_lines.append("")
+        while development_lines and not development_lines[-1]:
+            development_lines.pop()
+    last_state_lines = [
+        f"- Work State: {last_state['workState']} — "
+        f"{str(last_state['detail']).strip()}"
+        f"{event_citation(last_state.get('eventIds', []))}",
+        "- Latest User Direction: "
+        + (str(last_state["latestUserDirection"]).strip() or "追加指示なし。"),
+    ]
     for unresolved in last_state.get("unresolved", []):
-        lines.append(f"- Unresolved: {str(unresolved).strip()}")
+        last_state_lines.append(f"- Unresolved: {str(unresolved).strip()}")
     for unverified in last_state.get("unverified", []):
-        lines.append(f"- Unverified: {str(unverified).strip()}")
+        last_state_lines.append(f"- Unverified: {str(unverified).strip()}")
     continuation = str(last_state.get("continuationPoint") or "").strip()
     if continuation:
-        lines.append(f"- Continuation Point: {continuation}")
+        last_state_lines.append(f"- Continuation Point: {continuation}")
     evidence = [item for item in data.get("evidence", []) if str(item.get("text") or "").strip()]
+    evidence_section = ""
     if evidence:
-        lines.extend(["", "## Evidence", ""])
-        for item in evidence:
-            lines.append(f"- {str(item['text']).strip()}{event_citation(item.get('eventIds', []))}")
+        evidence_lines = [
+            f"- {str(item['text']).strip()}{event_citation(item.get('eventIds', []))}"
+            for item in evidence
+        ]
+        evidence_section = "\n\n## Evidence\n\n" + "\n".join(evidence_lines)
     limitations = [str(value).strip() for value in data.get("sourceLimitations", []) if str(value).strip()]
+    source_notes_section = ""
     if limitations:
-        lines.extend(["", "## Source Notes", ""])
-        lines.extend(f"- {value}" for value in limitations)
-    return "\n".join(lines).rstrip() + "\n"
+        source_notes_section = "\n\n## Source Notes\n\n" + "\n".join(
+            f"- {value}" for value in limitations
+        )
+    return render_summary_template(
+        template,
+        {
+            "frontmatter": frontmatter(fields),
+            "summary": "\n".join(summary_lines),
+            "key_developments": "\n".join(development_lines),
+            "last_known_state": "\n".join(last_state_lines),
+            "evidence_section": evidence_section,
+            "source_notes_section": source_notes_section,
+        },
+    )
 
 
 def revalidate_candidate(candidate: Candidate, config: PipelineConfig) -> None:
@@ -1541,6 +1492,9 @@ def current_note_matches_generation(
         and metadata.get("generatorReasoningEffort") == config.reasoning_effort
         and metadata.get("promptId") == prompt.prompt_id
         and metadata.get("promptVersion") == prompt.version
+        and metadata.get("outputSchemaSha256") == SUMMARY_SCHEMA_RESOURCE.sha256
+        and metadata.get("templateId") == SUMMARY_TEMPLATE_RESOURCE.template_id
+        and metadata.get("templateVersion") == SUMMARY_TEMPLATE_RESOURCE.version
         and metadata.get("generatorPromptVersion") == str(GENERATOR_PROMPT_VERSION)
         and metadata.get("rendererVersion") == str(RENDERER_VERSION)
     )
@@ -1613,6 +1567,9 @@ def validate_staged_sessions(
                     "generatorReasoningEffort": config.reasoning_effort,
                     "promptId": prompt.prompt_id,
                     "promptVersion": prompt.version,
+                    "outputSchemaSha256": SUMMARY_SCHEMA_RESOURCE.sha256,
+                    "templateId": SUMMARY_TEMPLATE_RESOURCE.template_id,
+                    "templateVersion": SUMMARY_TEMPLATE_RESOURCE.version,
                     "generatorPromptVersion": str(GENERATOR_PROMPT_VERSION),
                     "rendererVersion": str(RENDERER_VERSION),
                     "automatedValidation": "passed",
@@ -1657,6 +1614,14 @@ def validate_session_note(path: Path) -> dict[str, Any]:
         raise PipelineError(f"session note has invalid promptId: {path}") from exc
     if not metadata.get("promptVersion"):
         raise PipelineError(f"session note has no promptVersion: {path}")
+    try:
+        uuid.UUID(metadata.get("templateId") or "")
+    except ValueError as exc:
+        raise PipelineError(f"session note has invalid templateId: {path}") from exc
+    if not metadata.get("templateVersion"):
+        raise PipelineError(f"session note has no templateVersion: {path}")
+    if not re.fullmatch(r"[0-9a-f]{64}", metadata.get("outputSchemaSha256") or ""):
+        raise PipelineError(f"session note has invalid outputSchemaSha256: {path}")
     if len(thread_ids) != 1 or len(source_refs) != 1:
         raise PipelineError(f"session note must have one source thread and source ref: {path}")
     if not metadata.get("sourceFingerprint"):
@@ -1712,6 +1677,10 @@ def rebuild_state(
             "summaryPromptId": prompt.prompt_id,
             "summaryPromptVersion": prompt.version,
             "summaryPromptSha256": prompt.sha256,
+            "outputSchemaSha256": SUMMARY_SCHEMA_RESOURCE.sha256,
+            "templateId": SUMMARY_TEMPLATE_RESOURCE.template_id,
+            "templateVersion": SUMMARY_TEMPLATE_RESOURCE.version,
+            "templateSha256": SUMMARY_TEMPLATE_RESOURCE.sha256,
             "rendererVersion": RENDERER_VERSION,
             "noteHash": note_hash_by_thread[candidate.thread_id],
             "sourceRefs": [candidate.source_ref],
@@ -1938,6 +1907,12 @@ def execute_rebuild(
                     and metadata.get("type") == "summary"
                     and metadata.get("promptId") == prompt.prompt_id
                     and metadata.get("promptVersion") == prompt.version
+                    and metadata.get("outputSchemaSha256")
+                    == SUMMARY_SCHEMA_RESOURCE.sha256
+                    and metadata.get("templateId")
+                    == SUMMARY_TEMPLATE_RESOURCE.template_id
+                    and metadata.get("templateVersion")
+                    == SUMMARY_TEMPLATE_RESOURCE.version
                 )
                 if not prompt_version or not renderer_version:
                     generator_versions["unknown"] += 1
@@ -1970,6 +1945,12 @@ def execute_rebuild(
             "summaryPromptVersion": prompt.version,
             "summaryPromptSource": prompt.source,
             "summaryPromptSha256": prompt.sha256,
+            "outputSchemaSource": SUMMARY_SCHEMA_RESOURCE.source,
+            "outputSchemaSha256": SUMMARY_SCHEMA_RESOURCE.sha256,
+            "templateId": SUMMARY_TEMPLATE_RESOURCE.template_id,
+            "templateVersion": SUMMARY_TEMPLATE_RESOURCE.version,
+            "templateSource": SUMMARY_TEMPLATE_RESOURCE.source,
+            "templateSha256": SUMMARY_TEMPLATE_RESOURCE.sha256,
             "rendererVersion": RENDERER_VERSION,
             "fingerprint": generator_fingerprint(config),
         },

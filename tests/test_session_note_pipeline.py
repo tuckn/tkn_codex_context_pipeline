@@ -1013,9 +1013,15 @@ class SessionNotePipelineTests(unittest.TestCase):
         self.assertIn('generatorReasoningEffort: "high"', note)
         self.assertIn('type: "summary"', note)
         self.assertIn('promptId: "f5dfc679-13d3-4fcc-9736-b7d4e6bb5c11"', note)
-        self.assertIn('promptVersion: "1.0"', note)
-        self.assertIn("generatorPromptVersion: 3", note)
-        self.assertIn("rendererVersion: 3", note)
+        self.assertIn('promptVersion: "2.0"', note)
+        self.assertIn(
+            'outputSchemaSha256: "3ebffe117e29f76dfca25375a7e96ba0867de31a7ed68022dc6b65d91d651170"',
+            note,
+        )
+        self.assertIn('templateId: "4d19c51c-0d02-43a5-b6ad-6d67f9739b75"', note)
+        self.assertIn('templateVersion: "1.0"', note)
+        self.assertIn("generatorPromptVersion: 4", note)
+        self.assertIn("rendererVersion: 4", note)
         self.assertIn("generatedAt:", note)
         self.assertIn('fileSlug: "automated-session"', note)
         self.assertIn('automatedValidation: "passed"', note)

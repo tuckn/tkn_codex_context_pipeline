@@ -123,11 +123,23 @@ Configuration is merged in this order:
 Only `.tkn/config.example.yaml` is versioned. Do not commit real configuration.
 Relative paths in a YAML layer are resolved relative to that YAML file.
 
-### Summary prompt
+### Summary generation resources
 
-Generative-AI summary instructions are stored in a versioned Markdown prompt,
-not embedded in the Python implementation. With `summary_prompt: null`, the
-pipeline uses its packaged default prompt. Create an editable copy with:
+The summary contract is split into three external package resources:
+
+| Resource | Role |
+| --- | --- |
+| `prompts/default-summary.md` | Versioned editorial policy, field meanings, development-label definitions, and source/merge/repair mode instructions |
+| `schemas/summary-note-output.schema.json` | Strict generated-JSON fields, types, enums, and size limits used by both Codex structured output and Python validation |
+| `templates/default-summary-note.md` | Versioned deterministic Markdown heading order and section placement |
+
+Python retains only the application-managed safety envelope, event-ID checks,
+chunk orchestration, strict validation, provenance, and safe file operations.
+The generated Markdown is produced from structured JSON and the external
+template; the model does not write the final note layout directly.
+
+With `summary_prompt: null`, the pipeline uses its packaged default prompt.
+Create an editable prompt copy with:
 
 ```powershell
 tkn-codex-context prompt init
@@ -162,9 +174,15 @@ Write the instructions here.
 Give each logically distinct prompt its own stable UUID. Increase the quoted
 `version` whenever its instructions change. Generated note frontmatter records
 this identity as `promptId` and `promptVersion`; `config show` also reports the
-effective prompt source and SHA-256. The SHA-256 participates in the generation
-fingerprint used by normal pulls. Authors must still increase `version` so the
-change remains explicit and portable in note frontmatter.
+effective prompt source and SHA-256. The generated note also records
+`outputSchemaSha256`, `templateId`, and `templateVersion`. `config show` reports
+the effective prompt, schema, and template provenance.
+
+The prompt, schema, and template SHA-256 values all participate in the
+generation fingerprint. Authors must still increase the prompt `version` so a
+semantic change remains explicit and portable in note frontmatter. The packaged
+schema and template are currently application-owned resources rather than
+configuration overrides.
 
 ## Normal operation
 
@@ -283,10 +301,10 @@ Normal pulls process chats that have been idle for at least 30 minutes.
 #### Existing Session Note update behavior
 
 An existing Session Note is reported as `scan.unchanged` and skipped when its
-source fingerprint, schema, model, reasoning effort, summary prompt identity
-and content, generator prompt envelope, and renderer version all match the
-current conditions. The generative AI is not called, and neither the Session
-Note nor state is modified.
+source fingerprint, artifact schema, model, reasoning effort, summary prompt,
+output schema, Markdown template, generator prompt envelope, and renderer
+version all match the current conditions. The generative AI is not called, and
+neither the Session Note nor state is modified.
 
 A changed source, an older schema, or different generation conditions such as
 the model automatically make the note eligible for creation or update. A
