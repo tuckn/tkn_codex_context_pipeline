@@ -54,7 +54,6 @@ class AppConfig(BaseModel):
     runtime_minutes: int = Field(default=DEFAULT_RUNTIME_MINUTES, gt=0)
     model_timeout_seconds: int = Field(default=DEFAULT_MODEL_TIMEOUT_SECONDS, gt=0)
     source_id: str = DEFAULT_SOURCE_ID
-    summary_prompt: Path | None = None
 
     @field_validator("model")
     @classmethod
@@ -110,7 +109,6 @@ class AppConfig(BaseModel):
             idle_minutes=self.idle_minutes,
             runtime_minutes=self.runtime_minutes,
             model_timeout_seconds=self.model_timeout_seconds,
-            summary_prompt=self.summary_prompt,
         )
 
 
@@ -142,20 +140,24 @@ def _resolve_paths(value: dict[str, Any], base: Path) -> dict[str, Any]:
             continue
         expanded = Path(os.path.expandvars(str(raw))).expanduser()
         result[key] = expanded if expanded.is_absolute() else (base / expanded).absolute()
-    raw_prompt = result.get("summary_prompt")
-    if raw_prompt is not None:
-        prompt_text = os.path.expandvars(str(raw_prompt))
-        prompt_path = Path(prompt_text).expanduser()
-        if prompt_path.is_absolute():
-            result["summary_prompt"] = prompt_path
-        elif Path(prompt_text).name == prompt_text:
-            result["summary_prompt"] = default_app_root() / "prompts" / prompt_path
-        else:
-            raise PipelineError(
-                "summary_prompt must be a filename in the user prompts directory "
-                "or an absolute path"
-            )
     return result
+
+
+def _without_retired_user_prompt(
+    value: dict[str, Any],
+    *,
+    remove_configured: bool,
+) -> tuple[dict[str, Any], bool]:
+    result = dict(value)
+    if "summary_prompt" not in result:
+        return result, False
+    configured = result.pop("summary_prompt")
+    if configured is not None and not remove_configured:
+        raise PipelineError(
+            "summary_prompt is no longer supported; remove it from config because "
+            "summary profiles are application-owned"
+        )
+    return result, True
 
 
 def load_app_config(
@@ -175,7 +177,11 @@ def load_app_config(
     ]
     for path in layers:
         if path is not None and path.is_file():
-            merged.update(_resolve_paths(_read_layer(path), path.parent))
+            layer, _removed = _without_retired_user_prompt(
+                _read_layer(path),
+                remove_configured=False,
+            )
+            merged.update(_resolve_paths(layer, path.parent))
     merged.update(_resolve_paths(overrides or {}, working))
     try:
         config = AppConfig.model_validate(merged)
@@ -211,6 +217,12 @@ def initialization_config(
     removed: list[str] = []
     if target.is_file():
         raw = _read_layer(target)
+        raw, removed_summary_prompt = _without_retired_user_prompt(
+            raw,
+            remove_configured=True,
+        )
+        if removed_summary_prompt:
+            removed.append("summary_prompt")
         for key in ("context_store_root",):
             if key in raw:
                 raw.pop(key)

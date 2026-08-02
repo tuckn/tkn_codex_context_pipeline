@@ -4,6 +4,7 @@ import pytest
 
 from tkn_codex_context.summary_resources import (
     REQUIRED_TEMPLATE_FIELDS,
+    load_summary_profile,
     load_summary_schema,
     load_summary_template,
     render_summary_template,
@@ -15,7 +16,7 @@ def test_packaged_schema_is_strict_and_versioned_by_hash() -> None:
     resource = load_summary_schema()
     schema = resource.value
 
-    assert resource.source.endswith("schemas/summary-note-output.schema.json")
+    assert resource.source.endswith("summary_profiles/default/output.schema.json")
     assert len(resource.sha256) == 64
     assert schema["additionalProperties"] is False
     assert set(schema["required"]) == set(schema["properties"])
@@ -23,6 +24,17 @@ def test_packaged_schema_is_strict_and_versioned_by_hash() -> None:
         "developments"
     ]["items"]["properties"]["label"]["enum"]
     assert "Explicit Decision" in labels
+
+
+def test_default_summary_profile_loads_one_application_owned_bundle() -> None:
+    profile = load_summary_profile()
+
+    assert profile.name == "default"
+    assert profile.source.endswith("summary_profiles/default")
+    assert profile.prompt.source.endswith("summary_profiles/default/prompt.md")
+    assert profile.schema.source.endswith("summary_profiles/default/output.schema.json")
+    assert profile.template.source.endswith("summary_profiles/default/template.md")
+    assert len(profile.sha256) == 64
 
 
 def test_external_schema_validator_rejects_missing_and_extra_fields() -> None:

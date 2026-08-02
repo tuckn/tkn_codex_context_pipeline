@@ -14,6 +14,16 @@ def write_yaml(path: Path, value: dict[str, object]) -> None:
     path.write_text(yaml.safe_dump(value), encoding="utf-8")
 
 
+def test_example_config_uses_readable_forward_slash_paths() -> None:
+    example = Path(__file__).parents[1] / ".tkn" / "config.example.yaml"
+    value = yaml.safe_load(example.read_text(encoding="utf-8"))
+
+    for key in ("codex_home", "data_root", "state_root", "cache_root"):
+        assert "\\" not in value[key]
+        assert value[key].startswith("C:/")
+    assert "summary_prompt" not in value
+
+
 def test_precedence_and_relative_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home = tmp_path / "home"
     cwd = tmp_path / "work"
@@ -40,26 +50,21 @@ def test_precedence_and_relative_paths(tmp_path: Path, monkeypatch: pytest.Monke
     assert config.projects_state_root == config.state_root / "projects"
 
 
-def test_summary_prompt_bare_filename_uses_user_prompt_directory(
+def test_retired_null_summary_prompt_is_ignored(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    home = tmp_path / "home"
     cwd = tmp_path / "work"
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    write_yaml(cwd / ".tkn/config.yaml", {"summary_prompt": "custom.md"})
+    write_yaml(cwd / ".tkn/config.yaml", {"summary_prompt": None})
 
     config = load_app_config(cwd=cwd)
 
-    assert config.summary_prompt == (
-        home / ".tkn" / "codex_context_pipeline" / "prompts" / "custom.md"
-    )
+    assert "summary_prompt" not in config.model_dump()
 
 
-def test_summary_prompt_nested_relative_path_is_rejected(tmp_path: Path) -> None:
-    write_yaml(tmp_path / ".tkn/config.yaml", {"summary_prompt": "prompts/custom.md"})
+def test_retired_configured_summary_prompt_is_rejected(tmp_path: Path) -> None:
+    write_yaml(tmp_path / ".tkn/config.yaml", {"summary_prompt": "custom.md"})
 
-    with pytest.raises(PipelineError, match="filename in the user prompts directory"):
+    with pytest.raises(PipelineError, match="summary profiles are application-owned"):
         load_app_config(cwd=tmp_path)
 
 

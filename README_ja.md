@@ -82,8 +82,6 @@ tkn-codex-context projects list --json
 ```text
 ~/.tkn/codex_context_pipeline/
 ├── config.yaml
-├── prompts/
-│   └── summary.md
 ├── data/
 │   ├── project-registry.jsonl
 │   └── projects/
@@ -115,64 +113,9 @@ directoryを使うため、Windowsでは通常`%TMP%`、Linuxでは通常`/tmp`�
 
 commitするのは`.tkn/config.example.yaml`だけです。実設定をcommitしないで
 ください。YAML中の相対パスは、そのYAMLファイルがあるfolderを基準に解決します。
-
-### 要約生成resource
-
-要約仕様は、package内の次の3つの外部resourceへ分けて管理します。
-
-| resource | 役割 |
-| --- | --- |
-| `prompts/default-summary.md` | version付きの編集方針、各fieldの意味、development labelの定義、source・merge・repair modeの指示 |
-| `schemas/summary-note-output.schema.json` | Codex structured outputとPython検証が共用する、生成JSONのfield・型・enum・件数上限 |
-| `templates/default-summary-note.md` | version付きの決定的なMarkdown見出し順序とsection配置 |
-
-Pythonに残すのはapplication管理の安全envelope、event ID検証、chunk制御、厳格な
-検証、provenance、安全なfile操作です。最終Markdownはstructured JSONと外部
-templateから生成し、modelが最終レイアウトを直接書くことはありません。
-
-`summary_prompt: null`ではpackage内の既定promptを使用します。編集用copyは次の
-commandで作成できます。
-
-```powershell
-tkn-codex-context prompt init
-```
-
-既存fileを上書きせず、
-`~/.tkn/codex_context_pipeline/prompts/summary.md`を作成します。使用するpromptは
-`config.yaml`で指定します。
-
-```yaml
-summary_prompt: summary.md
-```
-
-file名だけを指定した場合はuser prompts directoryから読み込みます。それ以外の
-場所はabsolute pathで指定し、階層を含むrelative pathは拒否します。
-1回だけ変更する場合は`--summary-prompt`でも上書きできます。
-
-promptはUTF-8 Markdownで、次のFrontmatterが必須です。
-
-```markdown
----
-type: prompt
-id: 00000000-0000-4000-8000-000000000001
-version: "1.0"
----
-
-# 要約指示
-
-ここに指示を書きます。
-```
-
-内容の異なるpromptには固有のstable UUIDを割り当て、指示を変更したらquoted
-stringの`version`を更新します。生成ノートのFrontmatterには`promptId`と
-`promptVersion`に加え、`outputSchemaSha256`、`templateId`、
-`templateVersion`を記録します。`config show`はprompt、schema、templateそれぞれの
-実効sourceとprovenanceを表示します。
-
-prompt、schema、templateすべてのSHA-256を生成fingerprintへ含めます。
-Frontmatter上でsemantic changeを明示し、他の環境でも追跡できるよう、prompt内容の
-変更時は必ず`version`も更新してください。package内schemaとtemplateは、現時点では
-config overrideではなくapplication管理resourceです。
+要約profileはapplication-ownedで、ユーザー向け設定keyはありません。旧設定の
+`summary_prompt: null`は読み飛ばします。値を設定した`summary_prompt`が残っている
+場合は、現在のCLIを実行する前にそのkeyを削除してください。
 
 ## 通常実行
 
@@ -234,7 +177,9 @@ Projectも含めた状態は`projects list`で確認します。こちらの`sta
 
 `session-notes pull`は、通常処理の対象となるCodex chatを取り込み、Session Noteを
 作成または更新します。実行前にProject metadataのfetchも自動的に行うため、
-出力には`projectFetch`と`report`の両方が含まれます。
+既定のJSON出力は簡潔です。`projectFetchSummary`と`reportSummary`に真偽値と件数を
+表示し、`reportPath`で保存済みの完全なrun reportを示します。Project・thread単位の
+詳細をstdoutにも表示したい場合だけ`--full-output`を使います。
 生成ノートのFrontmatterは`type: summary`です。Project context layoutとの互換性の
 ため、directory名とcommand名は引き続き`sessions`と`session-notes`を使用します。
 
@@ -245,29 +190,38 @@ Session Note、refresh state、cache、run reportのいずれも変更しませ�
 tkn-codex-context session-notes pull --dry-run
 ```
 
-`report`の主なfieldは次の意味です。
+既定の簡潔な出力に含まれる主なfieldは次の意味です。
 
 | field | 意味 |
 | --- | --- |
+| `ok` | threadの失敗および未解決のProject bindingなしで完了したか |
 | `reportPath` | 保存したrun report。dry-runでは保存しないため`null` |
-| `mode` | `daily`は通常のpull、`backfill`は過去chatの明示処理 |
-| `force` | fingerprintや生成条件が同じでも強制再生成するか |
-| `scan.files` | 読み取ったCodex JSONL file数 |
-| `scan.eligible` | fingerprint確認後に作成・更新候補となった件数 |
-| `scan.unchanged` | 前回処理時からsourceと生成条件が変わらず、再生成しない件数 |
-| `scan.staleGenerator` | sourceは同じでも生成条件が変わり、再生成候補となった件数 |
-| `scan.ignoredFiles` | 日時範囲、idle条件、内部chat、帰属判定などの条件で対象外になったfile数 |
-| `selectedCount` | `--limit`適用後、今回作成・更新する予定のSession Note件数 |
-| `selected` | dry-runで選択されたProject、thread、sourceの一覧 |
-| `processed` | 通常実行で作成・更新に成功したSession Note。dry-runでは常に空 |
-| `failed` | 通常実行で処理に失敗したthread |
-| `deferred` | runtime上限により次回へ延期したthread |
+| `projectFetchSummary.projectCount` | Codex appから取得したProject数 |
+| `projectFetchSummary.boundCount` | 使用可能なlocal rootを紐付け済みのProject数 |
+| `projectFetchSummary.newCount` | 新しく検出したProject数 |
+| `projectFetchSummary.pendingCount` | rootの紐付けが必要なProject数 |
+| `reportSummary.mode` | 通常pullは`daily`、過去分は`backfill`、再構築は`rebuild` |
+| `reportSummary.selectedCount` | `--limit`適用後、作成・更新予定のSession Note件数 |
+| `reportSummary.processedCount` | 作成・更新に成功したSession Note件数 |
+| `reportSummary.failedCount` | 失敗したthread数 |
+| `reportSummary.deferredCount` | runtime上限により次回へ延期したthread数 |
+| `reportSummary.warningCount` | run warningの件数 |
+| `reportSummary.scan.*` | file数、候補数、変更なし、対象外などの数値counter |
 
-dry-runで`selectedCount: 0`かつ`selected: []`なら、今回作成・更新する
-Session Noteはありません。`reportPath: null`と`processed: []`はdry-runの
-通常動作であり、それ自体はエラーを意味しません。
+既定出力では、大きくなりやすい`projects`、`selected`、`processed`、error詳細の
+配列を省略します。通常実行の詳細は`reportPath`のfileを確認してください。
+dry-runはreportを保存しないため、選択されたProject、thread、sourceの詳細を
+確認するときは`--full-output`を使います。
 
-`scan.ignoredFiles`は対象外fileの合計であり、後続の個別counterは完全な内訳では
+```powershell
+tkn-codex-context session-notes pull --dry-run --full-output
+```
+
+dry-runで`reportSummary.selectedCount: 0`なら、今回作成・更新するSession Noteは
+ありません。`reportPath: null`と`reportSummary.processedCount: 0`はdry-runの
+通常動作です。
+
+`reportSummary.scan.ignoredFiles`は対象外fileの合計であり、後続の個別counterは完全な内訳では
 ありません。日時範囲またはidle条件で早期に除外されたfileは、
 `ignoredFiles`だけが増えます。そのため`ignoredFiles`が全file数と同じで、
 他の除外counterが0でもエラーではありません。
@@ -356,7 +310,9 @@ tkn-codex-context validate <session-note.md>
 ```
 
 `projects list`の既定出力を除き、各コマンドはJSON結果を出力します。
-機械可読な一覧には`projects list --json`を使います。
+機械可読な一覧には`projects list --json`を使います。Session Note commandは既定で
+簡潔な要約を出力し、通常実行の完全なreportは`reportPath`へ保存します。
+完全なreport JSONもstdoutへ出す場合は`--full-output`を追加します。
 
 進捗ログは既定でstderrへ、最終JSONはstdoutへ出力します。そのため、対話実行では
 `[INFO] Starting thread 1/7: ...`や`[SUCCESS] Completed thread 1/7: ...`の
@@ -412,6 +368,52 @@ refresh stateは検証後にatomic反映し、通常のpullとrebuildの中断�
 利用します。
 
 ## 開発
+
+### Application-ownedな要約profile
+
+要約生成resourceはapplication-ownedな開発者向けassetです。ユーザーはprompt、
+schema、template、profileの選択・上書きを行えません。現在は1つのprofileをbundle
+として読み込み、将来、開発者が別の要約patternを追加するときは同階層へprofile
+directoryを追加します。
+
+```text
+src/tkn_codex_context/summary_profiles/
+└── default/
+    ├── prompt.md
+    ├── output.schema.json
+    └── template.md
+```
+
+| resource | 役割 |
+| --- | --- |
+| `prompt.md` | version付きの編集方針、各fieldの意味、development label、source・merge・repair modeの指示 |
+| `output.schema.json` | Codex structured outputとPython検証が共用する、生成JSONのfield・型・enum・上限 |
+| `template.md` | version付きの決定的なMarkdown見出し順序とsection配置 |
+
+3つは次の生成pipelineとして連携します。
+
+```text
+source event + prompt + output schema
+    -> 検証済みの中間JSON
+    -> Python renderer + template
+    -> Session Note
+```
+
+output schemaは完成したMarkdownではなく、生成AIが返す中間JSONの契約です。
+最終Frontmatter、必須見出し、event IDの整合性、`schemaVersion`はPythonが検証する
+application contractです。bundle loaderはstrict schemaとtemplate placeholderを
+検証しますが、fieldの意味を変える場合は開発者が関連箇所をそろえて変更します。
+
+| 変更内容 | 通常変更するもの |
+| --- | --- |
+| fieldを変えない編集方針の変更 | promptとその`version` |
+| 既存fieldの上限やenum変更 | schema、説明している場合はprompt、test |
+| 生成fieldの追加・削除・改名 | schema、prompt、Pythonの検証・renderer、test。配置も変わる場合はtemplate |
+| Markdown sectionの順序・見出し変更 | templateとその`version`。必須見出し・placeholder変更時はPython検証・testも変更 |
+| Frontmatterや互換性のないSession Note形式の変更 | Python renderer・検証・test。通常は`SESSION_SCHEMA_VERSION`も更新 |
+
+schemaはSHA-256で識別し、promptとtemplateは明示的なversionも持ちます。3つのhashは
+生成fingerprintへ含め、provenanceは`config show`と生成ノートmetadataで確認できます。
 
 開発用dependencyを同期して、test・静的検査・buildを実行します。
 

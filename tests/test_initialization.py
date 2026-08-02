@@ -55,6 +55,7 @@ def test_force_dry_run_and_apply_preserve_settings_and_remove_old_storage(tmp_pa
             "state_root": str(state_root),
             "cache_root": str(cache_root),
             "model": "custom-model",
+            "summary_prompt": "retired-custom.md",
         },
     )
     for root in (data_root, state_root, cache_root):
@@ -66,7 +67,7 @@ def test_force_dry_run_and_apply_preserve_settings_and_remove_old_storage(tmp_pa
 
     assert config_path.read_bytes() == before
     assert all((root / "old.txt").is_file() for root in (data_root, state_root, cache_root))
-    assert preview["removedConfigKeys"] == ["context_store_root"]
+    assert preview["removedConfigKeys"] == ["summary_prompt", "context_store_root"]
     assert preview["projectFetch"]["projects"][0]["projectId"] == "local-project"
 
     initialize_application(config_path, overrides=None, force=True, dry_run=False)
@@ -75,6 +76,7 @@ def test_force_dry_run_and_apply_preserve_settings_and_remove_old_storage(tmp_pa
     assert saved["model"] == "custom-model"
     assert saved["installed_at"] != "2026-01-01T00:00:00+00:00"
     assert "context_store_root" not in saved
+    assert "summary_prompt" not in saved
     assert not any((root / "old.txt").exists() for root in (data_root, state_root, cache_root))
     assert (data_root / "projects/local-project/sessions").is_dir()
     assert not any((data_root / "projects/local-project/sessions").iterdir())

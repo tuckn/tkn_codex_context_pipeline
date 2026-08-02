@@ -20,7 +20,6 @@ from .projects import (
     resolve_project_selector,
     runtime_projects,
 )
-from .prompting import initialize_user_prompt, load_summary_prompt
 from .session_notes import (
     CodexSummarizer,
     PipelineError,
@@ -28,7 +27,7 @@ from .session_notes import (
     execute_rebuild,
     validate_session_note,
 )
-from .summary_resources import load_summary_schema, load_summary_template
+from .summary_resources import load_summary_profile
 
 LOGGER = logging.getLogger("tkn_codex_context")
 
@@ -52,7 +51,6 @@ def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--runtime-minutes", type=int)
     parser.add_argument("--model-timeout-seconds", type=int)
     parser.add_argument("--codex-executable")
-    parser.add_argument("--summary-prompt", type=Path)
     output = parser.add_mutually_exclusive_group()
     output.add_argument(
         "-q",
@@ -81,14 +79,6 @@ def build_parser() -> argparse.ArgumentParser:
     config_commands = config.add_subparsers(dest="config_command", required=True)
     config_commands.add_parser("show", help="Show resolved configuration")
 
-    prompt = commands.add_parser("prompt", help="Manage summary prompts")
-    prompt_commands = prompt.add_subparsers(dest="prompt_command", required=True)
-    prompt_init = prompt_commands.add_parser(
-        "init",
-        help="Create an editable summary prompt in the user prompts directory",
-    )
-    prompt_init.add_argument("name", nargs="?", default="summary.md")
-
     projects = commands.add_parser("projects", help="Manage Project bindings")
     project_commands = projects.add_subparsers(dest="projects_command", required=True)
     project_list = project_commands.add_parser("list", help="List registered Projects")
@@ -103,6 +93,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Pull eligible chats into Session Notes",
     )
     pull.add_argument("--dry-run", action="store_true")
+    pull.add_argument(
+        "--full-output",
+        action="store_true",
+        help="Emit the full Project fetch and run report JSON",
+    )
     pull.add_argument("--limit", type=int)
     pull.add_argument(
         "--force",
@@ -131,6 +126,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     rebuild.add_argument("--force", action="store_true")
     rebuild.add_argument("--dry-run", action="store_true")
+    rebuild.add_argument(
+        "--full-output",
+        action="store_true",
+        help="Emit the full Project fetch and run report JSON",
+    )
 
     validate = commands.add_parser("validate", help="Validate a Session Note v2 file")
     validate.add_argument("session_note", type=Path)
@@ -145,7 +145,6 @@ def _overrides(args: argparse.Namespace) -> dict[str, Any]:
         "runtime_minutes",
         "model_timeout_seconds",
         "codex_executable",
-        "summary_prompt",
     )
     return {name: getattr(args, name) for name in names if getattr(args, name, None) is not None}
 
@@ -313,6 +312,90 @@ def _log_session_report(report: dict[str, Any], report_path: Path | None) -> Non
         LOGGER.info("Run report: %s", report_path)
 
 
+def _list_count(value: Any) -> int:
+    return len(value) if isinstance(value, list) else 0
+
+
+def _project_fetch_summary(report: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "dryRun",
+        "projectCount",
+        "boundCount",
+        "newCount",
+        "pendingCount",
+        "threadAssignmentCount",
+        "projectlessThreadCount",
+    )
+    return {key: report[key] for key in keys if key in report}
+
+
+def _session_report_summary(report: dict[str, Any]) -> dict[str, Any]:
+    failed_count = _list_count(report.get("failed"))
+    summary: dict[str, Any] = {
+        "ok": failed_count == 0,
+        "dryRun": bool(report.get("dryRun")),
+        "mode": report.get("mode"),
+        "force": bool(report.get("force")),
+        "selectedCount": int(report.get("selectedCount") or 0),
+        "processedCount": _list_count(report.get("processed")),
+        "failedCount": failed_count,
+        "deferredCount": _list_count(report.get("deferred")),
+        "warningCount": _list_count(report.get("warnings")),
+    }
+    optional_scalars = (
+        "projectId",
+        "generationCount",
+        "resumedCount",
+        "resumeAvailable",
+        "startedAt",
+        "finishedAt",
+    )
+    for key in optional_scalars:
+        if key in report:
+            summary[key] = report[key]
+    optional_lists = (
+        ("preservedCurrentCount", "preservedCurrent"),
+        ("replacedCurrentCount", "replacedCurrent"),
+        ("deletedLegacyCount", "deletedLegacy"),
+    )
+    for output_key, report_key in optional_lists:
+        if report_key in report:
+            summary[output_key] = _list_count(report.get(report_key))
+    scan = report.get("scan")
+    if isinstance(scan, dict):
+        summary["scan"] = {
+            str(key): value
+            for key, value in scan.items()
+            if type(value) is int
+        }
+    return summary
+
+
+def _session_output(
+    command: str,
+    fetch_report: dict[str, Any],
+    report: dict[str, Any],
+    report_path: Path | None,
+    *,
+    full_output: bool,
+) -> dict[str, Any]:
+    if full_output:
+        return {
+            "command": command,
+            "projectFetch": fetch_report,
+            "reportPath": str(report_path) if report_path else None,
+            "report": report,
+        }
+    summary = _session_report_summary(report)
+    return {
+        "command": command,
+        "ok": bool(summary["ok"]) and not bool(fetch_report.get("pendingCount")),
+        "reportPath": str(report_path) if report_path else None,
+        "projectFetchSummary": _project_fetch_summary(fetch_report),
+        "reportSummary": summary,
+    }
+
+
 def _prepare_projects(
     args: argparse.Namespace,
     *,
@@ -360,50 +443,34 @@ def main(argv: Sequence[str] | None = None) -> int:
                 overrides=_overrides(args),
             )
             try:
-                prompt = load_summary_prompt(resolved.summary_prompt)
-                schema = load_summary_schema()
-                template = load_summary_template()
+                profile = load_summary_profile()
             except (RuntimeError, ValueError) as exc:
                 raise PipelineError(str(exc)) from exc
             _emit(
                 {
                     "command": "config show",
                     "config": config_document(resolved),
-                    "summaryPrompt": {
-                        "mode": prompt.mode,
-                        "source": prompt.source,
-                        "id": prompt.prompt_id,
-                        "version": prompt.version,
-                        "sha256": prompt.sha256,
+                    "summaryProfile": {
+                        "name": profile.name,
+                        "source": profile.source,
+                        "sha256": profile.sha256,
+                        "prompt": {
+                            "source": profile.prompt.source,
+                            "id": profile.prompt.prompt_id,
+                            "version": profile.prompt.version,
+                            "sha256": profile.prompt.sha256,
+                        },
+                        "schema": {
+                            "source": profile.schema.source,
+                            "sha256": profile.schema.sha256,
+                        },
+                        "template": {
+                            "source": profile.template.source,
+                            "id": profile.template.template_id,
+                            "version": profile.template.version,
+                            "sha256": profile.template.sha256,
+                        },
                     },
-                    "summarySchema": {
-                        "source": schema.source,
-                        "sha256": schema.sha256,
-                    },
-                    "summaryTemplate": {
-                        "source": template.source,
-                        "id": template.template_id,
-                        "version": template.version,
-                        "sha256": template.sha256,
-                    },
-                }
-            )
-            return 0
-
-        if args.command == "prompt":
-            try:
-                target = initialize_user_prompt(args.name)
-                prompt = load_summary_prompt(target)
-            except (FileExistsError, RuntimeError, ValueError) as exc:
-                raise PipelineError(str(exc)) from exc
-            log_success(LOGGER, "Created summary prompt: %s", target)
-            _emit(
-                {
-                    "command": "prompt init",
-                    "status": "created",
-                    "path": str(target),
-                    "promptId": prompt.prompt_id,
-                    "promptVersion": prompt.version,
                 }
             )
             return 0
@@ -526,12 +593,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         _log_session_report(report, report_path)
         _emit(
-            {
-                "command": f"session-notes {args.notes_command}",
-                "projectFetch": fetch_report,
-                "reportPath": str(report_path) if report_path else None,
-                "report": report,
-            }
+            _session_output(
+                f"session-notes {args.notes_command}",
+                fetch_report,
+                report,
+                report_path,
+                full_output=args.full_output,
+            )
         )
         return 1 if report.get("failed") else 0
     except PipelineError as exc:

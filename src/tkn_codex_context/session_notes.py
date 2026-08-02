@@ -38,8 +38,6 @@ from .frontmatter import (
     split_frontmatter_lines,
 )
 from .prompting import (
-    SummaryPrompt,
-    load_summary_prompt,
     render_chunk_prompt,
     render_reduction_prompt,
     render_repair_prompt,
@@ -47,8 +45,7 @@ from .prompting import (
 from .safety import redact_secret_like_content
 from .summary_resources import (
     SummaryTemplate,
-    load_summary_schema,
-    load_summary_template,
+    load_summary_profile,
     render_summary_template,
     validate_summary_output_schema,
 )
@@ -76,8 +73,10 @@ AVOIDABLE_ENGLISH_PHRASES = {
     "actual execution",
     "supplied events",
 }
-SUMMARY_SCHEMA_RESOURCE = load_summary_schema()
-SUMMARY_TEMPLATE_RESOURCE = load_summary_template()
+SUMMARY_PROFILE = load_summary_profile()
+SUMMARY_PROMPT_RESOURCE = SUMMARY_PROFILE.prompt
+SUMMARY_SCHEMA_RESOURCE = SUMMARY_PROFILE.schema
+SUMMARY_TEMPLATE_RESOURCE = SUMMARY_PROFILE.template
 NOTE_SCHEMA = SUMMARY_SCHEMA_RESOURCE.value
 MAX_SUMMARY_ITEMS = int(NOTE_SCHEMA["properties"]["summaryItems"]["maxItems"])
 MAX_WORK_ITEMS = int(NOTE_SCHEMA["properties"]["workItems"]["maxItems"])
@@ -130,7 +129,6 @@ class PipelineConfig:
     idle_minutes: int = DEFAULT_IDLE_MINUTES
     runtime_minutes: int = DEFAULT_RUNTIME_MINUTES
     model_timeout_seconds: int = DEFAULT_MODEL_TIMEOUT_SECONDS
-    summary_prompt: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -436,7 +434,7 @@ def update_refresh_state(
     note_path: Path,
 ) -> None:
     state = load_refresh_state(project, config)
-    prompt = configured_summary_prompt(config)
+    prompt = SUMMARY_PROMPT_RESOURCE
     source = state["sources"][config.source_id]
     relative_note = note_path.relative_to(project.context_path).as_posix()
     processed_at = now_iso()
@@ -841,13 +839,6 @@ def validate_note_data(value: Any, allowed_event_ids: set[str]) -> dict[str, Any
     return value
 
 
-def configured_summary_prompt(config: PipelineConfig) -> SummaryPrompt:
-    try:
-        return load_summary_prompt(config.summary_prompt)
-    except (RuntimeError, ValueError) as exc:
-        raise PipelineError(str(exc)) from exc
-
-
 class CodexSummarizer:
     def __init__(
         self,
@@ -861,7 +852,7 @@ class CodexSummarizer:
         self.chunk_characters = chunk_characters
         self.sleeper = sleeper
         self.observer = observer
-        self.prompt = configured_summary_prompt(config)
+        self.prompt = SUMMARY_PROMPT_RESOURCE
         self.deadline: datetime | None = None
         self.last_metrics: dict[str, int] = {}
 
@@ -1021,7 +1012,7 @@ def source_timestamp(value: str) -> datetime:
 
 
 def generator_fingerprint(config: PipelineConfig) -> str:
-    prompt = configured_summary_prompt(config)
+    prompt = SUMMARY_PROMPT_RESOURCE
     value = {
         "model": config.model,
         "reasoningEffort": config.reasoning_effort,
@@ -1109,7 +1100,7 @@ def render_note(
     *,
     template: SummaryTemplate = SUMMARY_TEMPLATE_RESOURCE,
 ) -> str:
-    default_prompt = load_summary_prompt()
+    default_prompt = SUMMARY_PROMPT_RESOURCE
     started = source_timestamp(candidate.started_at)
     created = existing.get("date") or started.isoformat(timespec="seconds")
     session_id = existing.get("sessionId") or started.strftime("%Y%m%dT%H%M%S%z")
@@ -1289,7 +1280,7 @@ def write_candidate_note(
         data["fileSlug"] = file_slug_from_note_path(candidate, note_path)
         data["_generatorModel"] = config.model
         data["_generatorReasoningEffort"] = config.reasoning_effort
-        prompt = configured_summary_prompt(config)
+        prompt = SUMMARY_PROMPT_RESOURCE
         data["_summaryPromptId"] = prompt.prompt_id
         data["_summaryPromptVersion"] = prompt.version
         rendered = render_note(candidate, data, existing, existing_distilled_to)
@@ -1468,7 +1459,7 @@ def current_note_matches_generation(
     candidate: Candidate,
     config: PipelineConfig,
 ) -> bool:
-    prompt = configured_summary_prompt(config)
+    prompt = SUMMARY_PROMPT_RESOURCE
     matches = find_note_matches(candidate.project, candidate.thread_id)
     if len(matches) > 1:
         raise PipelineError(
@@ -1507,7 +1498,7 @@ def validate_staged_sessions(
     *,
     strict_threads: set[str] | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
-    prompt = configured_summary_prompt(config)
+    prompt = SUMMARY_PROMPT_RESOURCE
     by_thread: dict[str, str] = {}
     note_hashes: dict[str, str] = {}
     candidates_by_thread = {candidate.thread_id: candidate for candidate in candidates}
@@ -1663,7 +1654,7 @@ def rebuild_state(
 ) -> dict[str, Any]:
     state = deepcopy(previous)
     processed_at = now_iso()
-    prompt = configured_summary_prompt(config)
+    prompt = SUMMARY_PROMPT_RESOURCE
     source = state["sources"][config.source_id]
     threads = deepcopy(source.get("threads", {}))
     for candidate in candidates:
@@ -1875,7 +1866,7 @@ def execute_rebuild(
         historical_roots=tuple(dict.fromkeys((*project.historical_roots, *approved))),
     )
     candidates, scan_counts = scan_rebuild_candidates(config, project)
-    prompt = configured_summary_prompt(config)
+    prompt = SUMMARY_PROMPT_RESOURCE
     candidates_by_thread = {item.thread_id: item for item in candidates}
 
     preserve: list[Path] = []
@@ -2053,7 +2044,7 @@ def execute_rebuild(
             data["fileSlug"] = file_slug_from_note_path(candidate, note_path)
             data["_generatorModel"] = config.model
             data["_generatorReasoningEffort"] = config.reasoning_effort
-            prompt = configured_summary_prompt(config)
+            prompt = SUMMARY_PROMPT_RESOURCE
             data["_summaryPromptId"] = prompt.prompt_id
             data["_summaryPromptVersion"] = prompt.version
             atomic_write_text(note_path, render_note(candidate, data, {}, []))

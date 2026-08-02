@@ -7,7 +7,14 @@ from pathlib import Path
 import pytest
 from pytest import CaptureFixture
 
-from tkn_codex_context.cli import LOGGER, _configure_logging, _progress, build_parser, main
+from tkn_codex_context.cli import (
+    LOGGER,
+    _configure_logging,
+    _progress,
+    _session_output,
+    build_parser,
+    main,
+)
 from tkn_codex_context.console_logging import SUCCESS, ColorFormatter
 
 
@@ -121,29 +128,7 @@ def test_console_formatter_keeps_redirected_output_plain() -> None:
     assert formatter.format(record) == "[SUCCESS] message"
 
 
-def test_prompt_init_creates_versioned_markdown(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: CaptureFixture[str],
-) -> None:
-    prompt_root = tmp_path / "prompts"
-    monkeypatch.setattr(
-        "tkn_codex_context.prompting.user_prompts_root",
-        lambda: prompt_root,
-    )
-
-    assert main(["-q", "prompt", "init", "custom.md"]) == 0
-    output = json.loads(capsys.readouterr().out)
-
-    assert output["status"] == "created"
-    assert output["path"] == str(prompt_root / "custom.md")
-    assert output["promptVersion"] == "1.0"
-    assert len(output["promptId"]) == 36
-    assert main(["-q", "prompt", "init", "custom.md"]) == 2
-    assert "refusing to overwrite" in capsys.readouterr().err
-
-
-def test_config_show_reports_all_summary_resource_provenance(
+def test_config_show_reports_application_owned_summary_profile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: CaptureFixture[str],
@@ -153,15 +138,19 @@ def test_config_show_reports_all_summary_resource_provenance(
     assert main(["-q", "config", "show"]) == 0
     output = json.loads(capsys.readouterr().out)
 
-    assert output["summaryPrompt"]["version"] == "2.0"
-    assert output["summaryPrompt"]["source"].endswith("prompts/default-summary.md")
-    assert output["summarySchema"]["source"].endswith(
-        "schemas/summary-note-output.schema.json"
+    profile = output["summaryProfile"]
+    assert profile["name"] == "default"
+    assert profile["source"].endswith("summary_profiles/default")
+    assert len(profile["sha256"]) == 64
+    assert profile["prompt"]["version"] == "2.0"
+    assert profile["prompt"]["source"].endswith("summary_profiles/default/prompt.md")
+    assert profile["schema"]["source"].endswith(
+        "summary_profiles/default/output.schema.json"
     )
-    assert len(output["summarySchema"]["sha256"]) == 64
-    assert output["summaryTemplate"]["version"] == "1.0"
-    assert output["summaryTemplate"]["source"].endswith(
-        "templates/default-summary-note.md"
+    assert len(profile["schema"]["sha256"]) == 64
+    assert profile["template"]["version"] == "1.0"
+    assert profile["template"]["source"].endswith(
+        "summary_profiles/default/template.md"
     )
 
 
@@ -237,6 +226,7 @@ def test_session_notes_pull_replaces_run_and_backfill() -> None:
     assert args.notes_command == "pull"
     assert args.dry_run is True
     assert args.backfill is False
+    assert args.full_output is False
 
     historical = parser.parse_args(
         [
@@ -254,10 +244,71 @@ def test_session_notes_pull_replaces_run_and_backfill() -> None:
     assert historical.project_id == "local-project"
     forced = parser.parse_args(["session-notes", "pull", "--force", "--dry-run"])
     assert forced.force is True
+    full = parser.parse_args(
+        ["session-notes", "rebuild", "--project-id", "Project", "--full-output"]
+    )
+    assert full.full_output is True
     for removed_command in ("run", "backfill"):
         with pytest.raises(SystemExit) as exc:
             parser.parse_args(["session-notes", removed_command])
         assert exc.value.code == 2
+
+
+def test_user_summary_prompt_commands_and_override_are_not_public() -> None:
+    parser = build_parser()
+
+    with pytest.raises(SystemExit) as prompt_command:
+        parser.parse_args(["prompt", "init"])
+    assert prompt_command.value.code == 2
+
+    with pytest.raises(SystemExit) as prompt_override:
+        parser.parse_args(["--summary-prompt", "custom.md", "config", "show"])
+    assert prompt_override.value.code == 2
+
+
+def test_compact_session_output_summarizes_rebuild_counts(tmp_path: Path) -> None:
+    report_path = tmp_path / "run.json"
+    output = _session_output(
+        "session-notes rebuild",
+        {
+            "dryRun": False,
+            "projectCount": 21,
+            "boundCount": 21,
+            "newCount": 1,
+            "pendingCount": 0,
+            "threadAssignmentCount": 34,
+            "projectlessThreadCount": 2,
+            "projects": [{"large": "detail"}],
+        },
+        {
+            "mode": "rebuild",
+            "dryRun": False,
+            "force": False,
+            "projectId": "project-1",
+            "selectedCount": 3,
+            "generationCount": 3,
+            "processed": [{}, {}, {}],
+            "failed": [],
+            "deferred": [],
+            "warnings": ["warning"],
+            "preservedCurrent": ["old.md"],
+            "replacedCurrent": [{}, {}],
+            "deletedLegacy": [],
+            "scan": {"files": 370, "eligible": 3, "note": "omitted"},
+        },
+        report_path,
+        full_output=False,
+    )
+
+    assert output["ok"] is True
+    assert output["reportPath"] == str(report_path)
+    assert output["projectFetchSummary"]["projectCount"] == 21
+    assert "projects" not in output["projectFetchSummary"]
+    assert output["reportSummary"]["processedCount"] == 3
+    assert output["reportSummary"]["warningCount"] == 1
+    assert output["reportSummary"]["preservedCurrentCount"] == 1
+    assert output["reportSummary"]["replacedCurrentCount"] == 2
+    assert output["reportSummary"]["scan"] == {"files": 370, "eligible": 3}
 
 
 @pytest.mark.parametrize(
@@ -310,8 +361,11 @@ def test_session_notes_pull_backfill_all_uses_historical_mode(
     assert result == 0
     output = json.loads(capsys.readouterr().out)
     assert output["command"] == "session-notes pull"
-    assert output["report"]["mode"] == "backfill"
-    assert output["report"]["dryRun"] is True
+    assert output["ok"] is True
+    assert output["reportSummary"]["mode"] == "backfill"
+    assert output["reportSummary"]["dryRun"] is True
+    assert output["reportPath"] is None
+    assert "projects" not in output["projectFetchSummary"]
 
 
 @pytest.mark.parametrize(
@@ -354,8 +408,8 @@ def test_session_notes_project_selector_accepts_unique_name(
     captured = capsys.readouterr()
     output = json.loads(captured.out)
     assert "Resolved Project Name 'Project' to ID local-project" in captured.err
-    if output["report"]["mode"] == "rebuild":
-        assert output["report"]["projectId"] == "local-project"
+    if output["reportSummary"]["mode"] == "rebuild":
+        assert output["reportSummary"]["projectId"] == "local-project"
 
 
 def test_session_notes_project_selector_accepts_current_root(
@@ -388,7 +442,69 @@ def test_session_notes_project_selector_accepts_current_root(
     captured = capsys.readouterr()
     output = json.loads(captured.out)
     assert "Resolved Project CURRENT ROOT" in captured.err
-    assert output["report"]["projectId"] == "local-project"
+    assert output["reportSummary"]["projectId"] == "local-project"
+
+
+def test_session_notes_full_output_preserves_detailed_dry_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    target = home / ".tkn" / "codex_context_pipeline" / "config.yaml"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    write_app_state(home)
+    assert main(["--config", str(target), "init"]) == 0
+    capsys.readouterr()
+
+    result = main(
+        [
+            "--config",
+            str(target),
+            "session-notes",
+            "rebuild",
+            "--project-id",
+            "Project",
+            "--dry-run",
+            "--full-output",
+        ]
+    )
+
+    assert result == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["report"]["mode"] == "rebuild"
+    assert output["report"]["dryRun"] is True
+    assert "projects" in output["projectFetch"]
+    assert "reportSummary" not in output
+
+
+def test_session_notes_write_run_emits_compact_summary_and_report_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    target = home / ".tkn" / "codex_context_pipeline" / "config.yaml"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    write_app_state(home)
+    assert main(["--config", str(target), "init"]) == 0
+    capsys.readouterr()
+
+    result = main(["--config", str(target), "session-notes", "pull"])
+
+    assert result == 0
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+    assert output["ok"] is True
+    assert output["reportSummary"]["selectedCount"] == 0
+    assert output["reportSummary"]["processedCount"] == 0
+    assert output["reportSummary"]["failedCount"] == 0
+    assert output["reportPath"]
+    assert Path(output["reportPath"]).is_file()
+    assert "\"report\":" not in captured.out
+    assert "Run report:" in captured.err
 
 
 def test_session_notes_project_selector_rejects_duplicate_name(

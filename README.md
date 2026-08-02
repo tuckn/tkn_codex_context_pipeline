@@ -88,8 +88,6 @@ The application separates its own files by purpose:
 ```text
 ~/.tkn/codex_context_pipeline/
 ├── config.yaml
-├── prompts/
-│   └── summary.md
 ├── data/
 │   ├── project-registry.jsonl
 │   └── projects/
@@ -122,67 +120,9 @@ Configuration is merged in this order:
 
 Only `.tkn/config.example.yaml` is versioned. Do not commit real configuration.
 Relative paths in a YAML layer are resolved relative to that YAML file.
-
-### Summary generation resources
-
-The summary contract is split into three external package resources:
-
-| Resource | Role |
-| --- | --- |
-| `prompts/default-summary.md` | Versioned editorial policy, field meanings, development-label definitions, and source/merge/repair mode instructions |
-| `schemas/summary-note-output.schema.json` | Strict generated-JSON fields, types, enums, and size limits used by both Codex structured output and Python validation |
-| `templates/default-summary-note.md` | Versioned deterministic Markdown heading order and section placement |
-
-Python retains only the application-managed safety envelope, event-ID checks,
-chunk orchestration, strict validation, provenance, and safe file operations.
-The generated Markdown is produced from structured JSON and the external
-template; the model does not write the final note layout directly.
-
-With `summary_prompt: null`, the pipeline uses its packaged default prompt.
-Create an editable prompt copy with:
-
-```powershell
-tkn-codex-context prompt init
-```
-
-The command creates
-`~/.tkn/codex_context_pipeline/prompts/summary.md` without overwriting an
-existing file. Select it in `config.yaml`:
-
-```yaml
-summary_prompt: summary.md
-```
-
-A bare filename is resolved under the user prompts directory. A prompt
-elsewhere must use an absolute path; nested relative paths are rejected.
-`--summary-prompt` is the equivalent one-run CLI override.
-
-Each prompt is UTF-8 Markdown with required YAML frontmatter:
-
-```markdown
----
-type: prompt
-id: 00000000-0000-4000-8000-000000000001
-version: "1.0"
----
-
-# Summary instructions
-
-Write the instructions here.
-```
-
-Give each logically distinct prompt its own stable UUID. Increase the quoted
-`version` whenever its instructions change. Generated note frontmatter records
-this identity as `promptId` and `promptVersion`; `config show` also reports the
-effective prompt source and SHA-256. The generated note also records
-`outputSchemaSha256`, `templateId`, and `templateVersion`. `config show` reports
-the effective prompt, schema, and template provenance.
-
-The prompt, schema, and template SHA-256 values all participate in the
-generation fingerprint. Authors must still increase the prompt `version` so a
-semantic change remains explicit and portable in note frontmatter. The packaged
-schema and template are currently application-owned resources rather than
-configuration overrides.
+Summary profiles are application-owned and have no user configuration key.
+Legacy `summary_prompt: null` is ignored; remove any non-null
+`summary_prompt` entry before running the current CLI.
 
 ## Normal operation
 
@@ -249,7 +189,10 @@ In `projects list --json`, `roots[*].status` is `active` for a current root and
 
 `session-notes pull` pulls Codex chats eligible for normal processing and
 creates or updates Session Notes. It automatically fetches Project metadata
-before scanning, so its output contains both `projectFetch` and `report`.
+before scanning. Its default JSON output is compact: `projectFetchSummary` and
+`reportSummary` contain booleans and counts, and `reportPath` points to the
+saved full run report. Use `--full-output` only when the complete per-Project
+and per-thread detail is needed on standard output.
 Generated notes use `type: summary`; the directory and command names remain
 `sessions` and `session-notes` for compatibility with the Project context
 layout.
@@ -262,29 +205,39 @@ run reports.
 tkn-codex-context session-notes pull --dry-run
 ```
 
-The main `report` fields mean:
+The main compact output fields mean:
 
 | Field | Meaning |
 | --- | --- |
+| `ok` | Whether the run completed without failed threads or pending Project bindings |
 | `reportPath` | Saved run report; `null` in dry-run because no report is written |
-| `mode` | `daily` for a normal pull or `backfill` for explicit historical processing |
-| `force` | Whether unchanged fingerprints and generation conditions are forcibly regenerated |
-| `scan.files` | Number of Codex JSONL files read |
-| `scan.eligible` | Number of create or update candidates after fingerprint checks |
-| `scan.unchanged` | Previously processed sources whose source and generation conditions are unchanged |
-| `scan.staleGenerator` | Sources unchanged but selected for regeneration because generation conditions changed |
-| `scan.ignoredFiles` | Files excluded by the date window, idle requirement, internal-chat filters, or attribution checks |
-| `selectedCount` | Number of Session Notes planned for creation or update after applying `--limit` |
-| `selected` | Projects, threads, and sources selected by dry-run |
-| `processed` | Session Notes successfully created or updated by a non-dry-run pull; always empty in dry-run |
-| `failed` | Threads that failed during a non-dry-run pull |
-| `deferred` | Threads postponed because the runtime limit was reached |
+| `projectFetchSummary.projectCount` | Number of Projects returned by the Codex app |
+| `projectFetchSummary.boundCount` | Number of Projects with a usable local root binding |
+| `projectFetchSummary.newCount` | Number of newly discovered Projects |
+| `projectFetchSummary.pendingCount` | Number of Projects still requiring a root binding |
+| `reportSummary.mode` | `daily` for a normal pull, `backfill` for explicit historical processing, or `rebuild` |
+| `reportSummary.selectedCount` | Number of Session Notes planned after applying `--limit` |
+| `reportSummary.processedCount` | Number of Session Notes successfully created or updated |
+| `reportSummary.failedCount` | Number of failed threads |
+| `reportSummary.deferredCount` | Number of threads postponed by the runtime limit |
+| `reportSummary.warningCount` | Number of run warnings |
+| `reportSummary.scan.*` | Numeric scan counters such as files, eligible, unchanged, and ignored files |
 
-If dry-run reports `selectedCount: 0` and `selected: []`, no Session Note is
-planned for creation or update. `reportPath: null` and `processed: []` are
-normal dry-run behavior and do not indicate an error.
+The default output intentionally omits large `projects`, `selected`,
+`processed`, and error-detail arrays. For a non-dry-run command, inspect the
+file at `reportPath` for those details. Dry-run does not write a report, so use
+`--full-output` when the exact selected Projects, threads, and sources must be
+reviewed:
 
-`scan.ignoredFiles` is the total number of excluded files; the later,
+```powershell
+tkn-codex-context session-notes pull --dry-run --full-output
+```
+
+If dry-run reports `reportSummary.selectedCount: 0`, no Session Note is planned
+for creation or update. `reportPath: null` and
+`reportSummary.processedCount: 0` are normal dry-run behavior.
+
+`reportSummary.scan.ignoredFiles` is the total number of excluded files; the later,
 specialized counters are not a complete breakdown. Files rejected early by
 the date window or idle requirement increment only `ignoredFiles`. It is
 therefore not an error when `ignoredFiles` equals `scan.files` while the other
@@ -378,7 +331,9 @@ tkn-codex-context validate <session-note.md>
 
 Commands emit structured JSON results except for the human-readable default of
 `projects list`; use `projects list --json` when machine-readable output is
-needed.
+needed. Session Note commands emit a compact summary by default and save the
+complete non-dry-run report at `reportPath`; add `--full-output` to emit the
+complete report JSON.
 
 Progress logs go to standard error by default, while the final JSON result stays
 on standard output. Interactive runs therefore show messages such as
@@ -439,6 +394,54 @@ no-op. Notes and refresh state are written atomically only after validation;
 normal and rebuild work is cached and resumable after an interrupted run.
 
 ## Development
+
+### Application-owned summary profiles
+
+Summary generation resources are application-owned developer assets. Users
+cannot select or override a prompt, schema, template, or profile. The current
+profile is loaded as one bundle; additional developer-maintained patterns can
+be added later as sibling profile directories:
+
+```text
+src/tkn_codex_context/summary_profiles/
+└── default/
+    ├── prompt.md
+    ├── output.schema.json
+    └── template.md
+```
+
+| Resource | Role |
+| --- | --- |
+| `prompt.md` | Versioned editorial policy, field meanings, development-label definitions, and source/merge/repair mode instructions |
+| `output.schema.json` | Strict generated-JSON fields, types, enums, and limits used by Codex structured output and Python validation |
+| `template.md` | Versioned deterministic Markdown heading order and section placement |
+
+The resources form one pipeline:
+
+```text
+source events + prompt + output schema
+    -> validated intermediate JSON
+    -> Python renderer + template
+    -> Session Note
+```
+
+The output schema governs the model's intermediate JSON, not the completed
+Markdown file. Final frontmatter, required headings, event-ID integrity, and
+`schemaVersion` remain application contracts enforced by Python. The bundle
+loader verifies the strict schema and exact template placeholders, but semantic
+field changes must still be coordinated by the developer:
+
+| Change | Usually update |
+| --- | --- |
+| Editorial policy without changing fields | Prompt and its `version` |
+| Limits or enum values on existing fields | Schema, prompt when it documents them, and tests |
+| Add, remove, or rename a generated field | Schema, prompt, Python validation/rendering, and tests; template if layout changes |
+| Reorder or rename Markdown sections | Template and its `version`; Python validation/tests when required headings or placeholders change |
+| Change final frontmatter or an incompatible Session Note format | Python renderer/validation, tests, and normally `SESSION_SCHEMA_VERSION` |
+
+The schema is identified by SHA-256; prompt and template also have explicit
+versions. All three hashes participate in the generation fingerprint and their
+provenance remains visible in `config show` and generated note metadata.
 
 Sync the development dependencies, then run the tests, static checks, and
 build:

@@ -1,4 +1,4 @@
-"""Load and validate packaged summary schema and Markdown template resources."""
+"""Load and validate application-owned summary profile bundles."""
 
 from __future__ import annotations
 
@@ -12,8 +12,13 @@ from typing import Any
 
 import yaml
 
-DEFAULT_SCHEMA_RESOURCE = "schemas/summary-note-output.schema.json"
-DEFAULT_TEMPLATE_RESOURCE = "templates/default-summary-note.md"
+from .prompting import SummaryPrompt, parse_summary_prompt
+
+DEFAULT_SUMMARY_PROFILE = "default"
+SUMMARY_PROFILES_ROOT = "summary_profiles"
+PROMPT_FILENAME = "prompt.md"
+SCHEMA_FILENAME = "output.schema.json"
+TEMPLATE_FILENAME = "template.md"
 REQUIRED_TEMPLATE_FIELDS = frozenset(
     {
         "frontmatter",
@@ -43,6 +48,22 @@ class SummaryTemplate:
     sha256: str
 
 
+@dataclass(frozen=True)
+class SummaryProfile:
+    name: str
+    source: str
+    sha256: str
+    prompt: SummaryPrompt
+    schema: SummarySchema
+    template: SummaryTemplate
+
+
+def _profile_resource_name(profile_name: str, filename: str) -> str:
+    if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", profile_name) is None:
+        raise RuntimeError(f"invalid application-owned summary profile name: {profile_name}")
+    return f"{SUMMARY_PROFILES_ROOT}/{profile_name}/{filename}"
+
+
 def _resource_bytes(resource_name: str, label: str) -> bytes:
     resource = files("tkn_codex_context").joinpath(resource_name)
     try:
@@ -53,9 +74,21 @@ def _resource_bytes(resource_name: str, label: str) -> bytes:
         ) from exc
 
 
-def load_summary_schema() -> SummarySchema:
-    payload = _resource_bytes(DEFAULT_SCHEMA_RESOURCE, "summary schema")
-    source = f"package:tkn_codex_context/{DEFAULT_SCHEMA_RESOURCE}"
+def load_summary_prompt(
+    profile_name: str = DEFAULT_SUMMARY_PROFILE,
+) -> SummaryPrompt:
+    resource_name = _profile_resource_name(profile_name, PROMPT_FILENAME)
+    payload = _resource_bytes(resource_name, "summary profile prompt")
+    source = f"package:tkn_codex_context/{resource_name}"
+    return parse_summary_prompt(payload, source)
+
+
+def load_summary_schema(
+    profile_name: str = DEFAULT_SUMMARY_PROFILE,
+) -> SummarySchema:
+    resource_name = _profile_resource_name(profile_name, SCHEMA_FILENAME)
+    payload = _resource_bytes(resource_name, "summary profile schema")
+    source = f"package:tkn_codex_context/{resource_name}"
     try:
         value = json.loads(payload.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -81,9 +114,12 @@ def load_summary_schema() -> SummarySchema:
     )
 
 
-def load_summary_template() -> SummaryTemplate:
-    payload = _resource_bytes(DEFAULT_TEMPLATE_RESOURCE, "summary template")
-    source = f"package:tkn_codex_context/{DEFAULT_TEMPLATE_RESOURCE}"
+def load_summary_template(
+    profile_name: str = DEFAULT_SUMMARY_PROFILE,
+) -> SummaryTemplate:
+    resource_name = _profile_resource_name(profile_name, TEMPLATE_FILENAME)
+    payload = _resource_bytes(resource_name, "summary profile template")
+    source = f"package:tkn_codex_context/{resource_name}"
     try:
         text = payload.decode("utf-8-sig").replace("\r\n", "\n")
     except UnicodeDecodeError as exc:
@@ -124,6 +160,33 @@ def load_summary_template() -> SummaryTemplate:
         body=body,
         source=source,
         sha256=hashlib.sha256(payload).hexdigest(),
+    )
+
+
+def load_summary_profile(
+    profile_name: str = DEFAULT_SUMMARY_PROFILE,
+) -> SummaryProfile:
+    prompt = load_summary_prompt(profile_name)
+    schema = load_summary_schema(profile_name)
+    template = load_summary_template(profile_name)
+    source = f"package:tkn_codex_context/{SUMMARY_PROFILES_ROOT}/{profile_name}"
+    identity = json.dumps(
+        {
+            "name": profile_name,
+            "promptSha256": prompt.sha256,
+            "schemaSha256": schema.sha256,
+            "templateSha256": template.sha256,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return SummaryProfile(
+        name=profile_name,
+        source=source,
+        sha256=hashlib.sha256(identity).hexdigest(),
+        prompt=prompt,
+        schema=schema,
+        template=template,
     )
 
 
