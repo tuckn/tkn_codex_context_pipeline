@@ -1,14 +1,15 @@
 # Tkn Codex Context Pipeline
 
 Codex appのProject状態と`~/.codex/sessions`を読み、chatを再利用可能な
-Session Note v2へ変換する、独立したローカルデータパイプラインです。
+Session Note v2へ変換し、そこからdurableなDecision Record v2を生成する、
+独立したローカルデータパイプラインです。
 Project folderにはmarker・設定・contextを一切書きません。
 
 ## 必要なもの
 
 - Python 3.11以上
 - [uv](https://docs.astral.sh/uv/)
-- summary生成時に`PATH`から実行できる`codex`
+- Session NoteまたはDecision Record生成時に`PATH`から実行できる`codex`
   - Windowsの場合、次のコマンドでインストールします。`powershell -ExecutionPolicy Bypass -c "irm https://chatgpt.com/codex/install.ps1 | iex"`
 
 ## インストール
@@ -54,7 +55,8 @@ tkn-codex-context config show
 ```
 
 `init`はグローバル設定とProject registryを作成し、Codex app左ペインの
-Projectごとに空の`sessions/`を用意します。Session Noteは生成しません。
+Projectごとに空の`sessions/`と`decisions/`を用意します。Session Noteや
+Decision Recordは生成しません。
 実行日時は`installed_at`として保存され、通常実行が
 自動処理するのは、この日時以後に作成または更新されたchatだけです。それ以前の
 chatは、明示的な`pull --backfill`または`rebuild`で処理します。
@@ -86,18 +88,20 @@ tkn-codex-context projects list --json
 │   ├── project-registry.jsonl
 │   └── projects/
 │       └── <projectId>/
-│           └── sessions/
+│           ├── sessions/
+│           └── decisions/
 └── state/
     ├── projects/
     │   └── <projectId>/
-    │       └── chat-refresh-state.json
+    │       ├── chat-refresh-state.json
+    │       └── decision-build-state.json
     └── reports/
 
 ~/.cache/codex_context_pipeline/
 └── 中断した処理を再開するためのcache
 ```
 
-`data/`はProject registryとSession Noteなどの永続データ、`state/`はrefresh
+`data/`はProject registry、Session Note、Decision Recordなどの永続データ、`state/`はrefresh
 checkpointやrun reportなどの再作成可能な状態・履歴に使用します。
 cacheは既定で`~/.cache`へ分離し、`XDG_CACHE_HOME`が設定されている環境では
 その場所を使用します。実行中だけ必要なmodel入出力などは、Pythonの標準一時
@@ -113,7 +117,8 @@ directoryを使うため、Windowsでは通常`%TMP%`、Linuxでは通常`/tmp`�
 
 commitするのは`.tkn/config.example.yaml`だけです。実設定をcommitしないで
 ください。YAML中の相対パスは、そのYAMLファイルがあるfolderを基準に解決します。
-要約profileはapplication-ownedで、ユーザー向け設定keyはありません。旧設定の
+Session NoteとDecision Recordの生成profileはapplication-ownedで、ユーザー向け
+設定keyはありません。旧設定の
 `summary_prompt: null`は読み飛ばします。値を設定した`summary_prompt`が残っている
 場合は、現在のCLIを実行する前にそのkeyを削除してください。
 
@@ -309,9 +314,60 @@ source thread/ref、source fingerprint、必須見出し、本文とFrontmatter�
 tkn-codex-context validate <session-note.md>
 ```
 
+### Decision Recordを生成する
+
+`decisions build`は、1つのProjectに保存されたSession Note v2を一次入力として
+durableなdecisionを抽出します。通常経路では元のCodex chatを読み直しません。
+`Explicit Decision`を持つSession Noteだけを候補とし、既存Decision Recordのindexも
+モデルへ渡して、同じdecisionなら既存IDを参照します。
+
+最初に書き込みなしの計画を確認します。`decisions build`は既定でread-onlyです。
+生成AIを呼び出さず、registry、Session Note、Decision Record、state、run reportを
+変更しません。
+
+```powershell
+tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot>
+tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --full-output
+```
+
+`reportSummary.selectedCount`は生成対象のSession Note数、`createdCount`は新規record数、
+`referencedExistingCount`は既存recordへ紐付けた件数です。dry-runで個別のSession Noteを
+確認する場合は`--full-output`を使用します。
+
+確認後、`--write`を明示して生成・保存します。
+
+```powershell
+tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --write
+```
+
+新規recordは`data/projects/<projectId>/decisions/DR-NNNN-<slug>.md`に保存します。
+各recordは`Context`、`Decision`、`Rationale`、`Consequences`、`Applicability`、
+`Verification`、`Materialization`、`Supersession`を持ちます。明示的なuser acceptance
+または成立済みのoperational practiceが確認できる場合だけ`Accepted`とし、それ以外は
+`Proposed`にします。statusと実装・検証状態は別fieldで管理します。
+
+保存に成功すると、入力Session Noteの`distillationStatus`を`partial`にし、
+`distilledTo`へ`project:/decisions/...`を追加します。生成結果がno-actionの場合は、
+working contextなど後続のdistillationを妨げないようSession Noteをfinalizeせず、
+`decision-build-state.json`だけに処理済み状態を記録します。
+
+source hashとdecision生成profileが同じSession Noteは次回`unchanged`としてスキップします。
+再評価する場合は、書き込みを明示したうえで`--force`を指定します。既存Decision Recordを
+上書きせず、同一decisionは既存IDへ紐付けます。
+
+```powershell
+tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --write --force
+```
+
+生成したDecision Record v2は単独でvalidateできます。
+
+```powershell
+tkn-codex-context decisions validate <decision-record.md>
+```
+
 `projects list`の既定出力を除き、各コマンドはJSON結果を出力します。
-機械可読な一覧には`projects list --json`を使います。Session Note commandは既定で
-簡潔な要約を出力し、通常実行の完全なreportは`reportPath`へ保存します。
+機械可読な一覧には`projects list --json`を使います。Session NoteとDecision Recordの
+commandは既定で簡潔な要約を出力し、通常実行の完全なreportは`reportPath`へ保存します。
 完全なreport JSONもstdoutへ出す場合は`--full-output`を追加します。
 
 進捗ログは既定でstderrへ、最終JSONはstdoutへ出力します。そのため、対話実行では
@@ -335,8 +391,8 @@ tkn-codex-context -v session-notes pull
 
 ## 対象範囲
 
-初版はsession summary生成だけを扱います。decision、current working context、
-global contextは対象外です。
+現在はSession NoteとDecision Recordの生成を扱います。current working contextと
+global contextはまだ対象外です。
 
 Codex app ProjectのPrimary rootとSecondary rootは、どちらも現在有効なrootとして
 扱います。Secondaryをhistorical rootとはみなしません。複数rootが異なるGit
@@ -369,15 +425,21 @@ refresh stateは検証後にatomic反映し、通常のpullとrebuildの中断�
 
 ## 開発
 
-### Application-ownedな要約profile
+### Application-ownedな生成profile
 
-要約生成resourceはapplication-ownedな開発者向けassetです。ユーザーはprompt、
+Session NoteとDecision Recordの生成resourceはapplication-ownedな開発者向けassetです。ユーザーはprompt、
 schema、template、profileの選択・上書きを行えません。現在は1つのprofileをbundle
 として読み込み、将来、開発者が別の要約patternを追加するときは同階層へprofile
 directoryを追加します。
 
 ```text
 src/tkn_codex_context/summary_profiles/
+└── default/
+    ├── prompt.md
+    ├── output.schema.json
+    └── template.md
+
+src/tkn_codex_context/decision_profiles/
 └── default/
     ├── prompt.md
     ├── output.schema.json
@@ -397,6 +459,11 @@ source event + prompt + output schema
     -> 検証済みの中間JSON
     -> Python renderer + template
     -> Session Note
+
+Session Note + existing decision index + prompt + output schema
+    -> 検証済みのdecision中間JSON
+    -> Python renderer + template
+    -> Decision Record
 ```
 
 output schemaは完成したMarkdownではなく、生成AIが返す中間JSONの契約です。

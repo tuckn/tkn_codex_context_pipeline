@@ -45,6 +45,31 @@ def write_app_state(
     )
 
 
+def write_decision_session_note(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\n"
+        "type: summary\n"
+        "schemaVersion: 2\n"
+        "title: Decision source\n"
+        "status: done\n"
+        "distillationStatus: pending\n"
+        "distilledTo: []\n"
+        "sessionId: 20260803T090000+0900\n"
+        "sourceThreadIds:\n"
+        "  - thread-1\n"
+        "sourceRefs:\n"
+        "  - sessions/example.jsonl\n"
+        "---\n\n"
+        "# Session Note\n\n"
+        "## Summary\n\n- A decision was made.\n\n"
+        "## Key Developments\n\n"
+        "### Explicit Decision\n\n- Use Session Notes as the primary input.\n\n"
+        "## Last Known State\n\n- Work State: done — decided.\n",
+        encoding="utf-8",
+    )
+
+
 def test_logging_uses_readable_stderr_prefixes(
     capsys: CaptureFixture[str],
 ) -> None:
@@ -152,6 +177,14 @@ def test_config_show_reports_application_owned_summary_profile(
     assert profile["template"]["source"].endswith(
         "summary_profiles/default/template.md"
     )
+    decision_profile = output["decisionProfile"]
+    assert decision_profile["name"] == "default"
+    assert decision_profile["source"].endswith("decision_profiles/default")
+    assert decision_profile["prompt"]["version"] == "1.0"
+    assert decision_profile["schema"]["source"].endswith(
+        "decision_profiles/default/output.schema.json"
+    )
+    assert decision_profile["template"]["version"] == "1.0"
 
 
 def test_init_dry_run_has_no_files(
@@ -190,6 +223,7 @@ def test_init_creates_config_and_project_directories(
     assert target.is_file()
     app_root = target.parent
     assert (app_root / "data/projects/local-project/sessions").is_dir()
+    assert (app_root / "data/projects/local-project/decisions").is_dir()
     assert (app_root / "state/projects/local-project").is_dir()
     assert (home / ".cache/codex_context_pipeline").is_dir()
     assert not any((app_root / "data/projects/local-project/sessions").iterdir())
@@ -252,6 +286,48 @@ def test_session_notes_pull_replaces_run_and_backfill() -> None:
         with pytest.raises(SystemExit) as exc:
             parser.parse_args(["session-notes", removed_command])
         assert exc.value.code == 2
+
+
+def test_decisions_build_is_read_only_by_default_and_write_is_explicit() -> None:
+    parser = build_parser()
+
+    planned = parser.parse_args(
+        ["decisions", "build", "--project-id", "Project"]
+    )
+    writing = parser.parse_args(
+        ["decisions", "build", "--project-id", "Project", "--write"]
+    )
+
+    assert planned.decisions_command == "build"
+    assert planned.write is False
+    assert writing.write is True
+
+
+def test_decisions_build_dry_run_routes_and_emits_compact_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    write_app_state(home)
+    assert main(["init"]) == 0
+    capsys.readouterr()
+    app_root = home / ".tkn" / "codex_context_pipeline"
+    write_decision_session_note(
+        app_root / "data" / "projects" / "local-project" / "sessions" / "one.md"
+    )
+
+    result = main(["decisions", "build", "--project-id", "local-project"])
+
+    assert result == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["command"] == "decisions build"
+    assert output["reportPath"] is None
+    assert output["reportSummary"]["dryRun"] is True
+    assert output["reportSummary"]["selectedCount"] == 1
+    assert list((app_root / "data/projects/local-project/decisions").iterdir()) == []
 
 
 def test_user_summary_prompt_commands_and_override_are_not_public() -> None:

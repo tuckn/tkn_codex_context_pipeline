@@ -1,0 +1,191 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "decisions": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "disposition": {
+            "type": "string",
+            "enum": ["create", "existing"]
+          },
+          "existingDecisionId": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 160
+          },
+          "fileSlug": {
+            "type": "string",
+            "pattern": "^(?:|[a-z0-9]+(?:-[a-z0-9]+)*)$",
+            "maxLength": 72
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 360
+          },
+          "status": {
+            "type": "string",
+            "enum": ["", "Proposed", "Accepted", "Rejected", "Deprecated", "Superseded"]
+          },
+          "scope": {
+            "type": "string",
+            "enum": ["", "project", "global", "user", "mixed"]
+          },
+          "implementationStatus": {
+            "type": "string",
+            "enum": ["", "not-started", "partial", "implemented", "verified"]
+          },
+          "context": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {"type": "string", "maxLength": 420}
+          },
+          "decision": {
+            "type": "string",
+            "maxLength": 600
+          },
+          "rationale": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {"type": "string", "maxLength": 420}
+          },
+          "benefits": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {"type": "string", "maxLength": 420}
+          },
+          "costsAndRisks": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {"type": "string", "maxLength": 420}
+          },
+          "alternativesConsidered": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {"type": "string", "maxLength": 420}
+          },
+          "appliesWhen": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {"type": "string", "maxLength": 420}
+          },
+          "doesNotApplyWhen": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {"type": "string", "maxLength": 420}
+          },
+          "reusablePrinciples": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {"type": "string", "maxLength": 420}
+          },
+          "projectSpecificDetails": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {"type": "string", "maxLength": 420}
+          },
+          "verificationEvidence": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {"type": "string", "maxLength": 420}
+          },
+          "validationDate": {
+            "type": "string",
+            "pattern": "^(?:|[0-9]{4}-[0-9]{2}-[0-9]{2})$"
+          },
+          "relatedEvidence": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {"type": "string", "maxLength": 500}
+          },
+          "materialization": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "projectWorkingContext": {
+                "type": "array",
+                "maxItems": 4,
+                "items": {"type": "string", "maxLength": 420}
+              },
+              "repositoryDocumentation": {
+                "type": "array",
+                "maxItems": 4,
+                "items": {"type": "string", "maxLength": 420}
+              },
+              "globalContext": {
+                "type": "array",
+                "maxItems": 4,
+                "items": {"type": "string", "maxLength": 420}
+              },
+              "skillAutomation": {
+                "type": "array",
+                "maxItems": 4,
+                "items": {"type": "string", "maxLength": 420}
+              },
+              "followUp": {
+                "type": "array",
+                "maxItems": 4,
+                "items": {"type": "string", "maxLength": 420}
+              }
+            },
+            "required": [
+              "projectWorkingContext",
+              "repositoryDocumentation",
+              "globalContext",
+              "skillAutomation",
+              "followUp"
+            ]
+          },
+          "supersedes": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {"type": "string", "maxLength": 160}
+          },
+          "supersededBy": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {"type": "string", "maxLength": 160}
+          }
+        },
+        "required": [
+          "disposition",
+          "existingDecisionId",
+          "title",
+          "fileSlug",
+          "description",
+          "status",
+          "scope",
+          "implementationStatus",
+          "context",
+          "decision",
+          "rationale",
+          "benefits",
+          "costsAndRisks",
+          "alternativesConsidered",
+          "appliesWhen",
+          "doesNotApplyWhen",
+          "reusablePrinciples",
+          "projectSpecificDetails",
+          "verificationEvidence",
+          "validationDate",
+          "relatedEvidence",
+          "materialization",
+          "supersedes",
+          "supersededBy"
+        ]
+      }
+    },
+    "sourceLimitations": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {"type": "string", "maxLength": 420}
+    }
+  },
+  "required": ["decisions", "sourceLimitations"]
+}

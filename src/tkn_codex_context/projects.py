@@ -225,6 +225,10 @@ def create_fresh_projects(
     if not dry_run:
         for record in records:
             Path(str(record["sessionsPath"])).mkdir(parents=True, exist_ok=True)
+            (Path(str(record["projectDataPath"])) / "decisions").mkdir(
+                parents=True,
+                exist_ok=True,
+            )
             Path(str(record["projectStatePath"])).mkdir(parents=True, exist_ok=True)
         _write_registry(config.registry_path, records)
     results = [

@@ -1,7 +1,8 @@
 # Tkn Codex Context Pipeline
 
 An independent, local-first pipeline that reads Codex app Project state and
-`~/.codex/sessions` and generates durable Session Note v2 Markdown files.
+`~/.codex/sessions`, generates durable Session Note v2 Markdown files, and
+distills durable Decision Record v2 files from those notes.
 It never writes markers, configuration, or context into a Project folder.
 
 Japanese documentation: [README_ja.md](README_ja.md)
@@ -10,7 +11,7 @@ Japanese documentation: [README_ja.md](README_ja.md)
 
 - Python 3.11 or newer
 - [uv](https://docs.astral.sh/uv/)
-- `codex` on `PATH` for summary generation
+- `codex` on `PATH` for Session Note or Decision Record generation
   - For Windows, install using the following command: `powershell -ExecutionPolicy Bypass -c "irm https://chatgpt.com/codex/install.ps1 | iex"`
 
 ## Installation
@@ -55,9 +56,9 @@ tkn-codex-context init
 tkn-codex-context config show
 ```
 
-`init` creates the global configuration and Project registry, then creates an
-empty `sessions/` directory for each Project in the Codex app sidebar. It does
-not generate Session Notes. The command records the current time as
+`init` creates the global configuration and Project registry, then creates empty
+`sessions/` and `decisions/` directories for each Project in the Codex app
+sidebar. It does not generate Session Notes or Decision Records. The command records the current time as
 `installed_at`. A normal pull
 automatically processes only chats created or updated at or after that time.
 Older chats require an explicit `pull --backfill` or `rebuild`.
@@ -92,18 +93,20 @@ The application separates its own files by purpose:
 │   ├── project-registry.jsonl
 │   └── projects/
 │       └── <projectId>/
-│           └── sessions/
+│           ├── sessions/
+│           └── decisions/
 └── state/
     ├── projects/
     │   └── <projectId>/
-    │       └── chat-refresh-state.json
+    │       ├── chat-refresh-state.json
+    │       └── decision-build-state.json
     └── reports/
 
 ~/.cache/codex_context_pipeline/
 └── resumable work cache
 ```
 
-`data/` holds durable Project registry and Session Note data. `state/` holds
+`data/` holds durable Project registry, Session Note, and Decision Record data. `state/` holds
 refresh checkpoints and reproducible history such as run
 reports. Cache is kept separately under `~/.cache` by default;
 `XDG_CACHE_HOME` is honored when it is set. Model input and output needed only
@@ -120,7 +123,8 @@ Configuration is merged in this order:
 
 Only `.tkn/config.example.yaml` is versioned. Do not commit real configuration.
 Relative paths in a YAML layer are resolved relative to that YAML file.
-Summary profiles are application-owned and have no user configuration key.
+Session Note and Decision Record generation profiles are application-owned and
+have no user configuration key.
 Legacy `summary_prompt: null` is ignored; remove any non-null
 `summary_prompt` entry before running the current CLI.
 
@@ -329,9 +333,66 @@ call the generative AI.
 tkn-codex-context validate <session-note.md>
 ```
 
+### Generate Decision Records
+
+`decisions build` uses the stored Session Note v2 files for one Project as its
+primary input. The normal path does not reread the original Codex chat. Only
+Session Notes with an `Explicit Decision` section are candidates. The model
+also receives an index of existing Decision Records so the same decision can
+reference an existing ID instead of creating a duplicate.
+
+Start with the read-only plan. `decisions build` is read-only by default: it
+does not call the generative AI or change the registry, Session Notes, Decision
+Records, state, or run reports.
+
+```powershell
+tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot>
+tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --full-output
+```
+
+`reportSummary.selectedCount` is the number of selected Session Notes,
+`createdCount` is the number of new records, and `referencedExistingCount` is
+the number of links to existing records. Use `--full-output` to inspect the
+individual selected Session Notes during planning.
+
+After review, explicitly enable generation and writes:
+
+```powershell
+tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --write
+```
+
+New records are stored under
+`data/projects/<projectId>/decisions/DR-NNNN-<slug>.md`. Each record contains
+Context, Decision, Rationale, Consequences, Applicability, Verification,
+Materialization, and Supersession sections. A decision is `Accepted` only when
+the source establishes explicit user acceptance or an operational practice
+that is already in effect; otherwise it is `Proposed`. Decision status and
+implementation/verification status remain separate fields.
+
+After a successful write, the source Session Note becomes
+`distillationStatus: partial` and receives a `project:/decisions/...` entry in
+`distilledTo`. A no-action result is remembered only in
+`decision-build-state.json`, leaving the Session Note available for later
+working-context distillation.
+
+An unchanged Session Note with the same decision profile is skipped. Use
+`--force` together with the explicit write flag to re-evaluate it. Existing
+Decision Records are never overwritten; a matching decision links to the
+existing ID.
+
+```powershell
+tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --write --force
+```
+
+Validate one generated Decision Record v2 without changing it:
+
+```powershell
+tkn-codex-context decisions validate <decision-record.md>
+```
+
 Commands emit structured JSON results except for the human-readable default of
 `projects list`; use `projects list --json` when machine-readable output is
-needed. Session Note commands emit a compact summary by default and save the
+needed. Session Note and Decision Record commands emit a compact summary by default and save the
 complete non-dry-run report at `reportPath`; add `--full-output` to emit the
 complete report JSON.
 
@@ -358,8 +419,8 @@ tkn-codex-context -v session-notes pull
 
 ## Scope
 
-The first release generates session summaries only. Decisions, current working
-context, and global context are intentionally out of scope.
+The current implementation generates Session Notes and Decision Records.
+Current working context and global context remain out of scope.
 
 Codex app Projects may contain one primary root and multiple secondary roots.
 All configured roots are active and equal for chat attribution; secondary
@@ -395,15 +456,21 @@ normal and rebuild work is cached and resumable after an interrupted run.
 
 ## Development
 
-### Application-owned summary profiles
+### Application-owned generation profiles
 
-Summary generation resources are application-owned developer assets. Users
+Session Note and Decision Record generation resources are application-owned developer assets. Users
 cannot select or override a prompt, schema, template, or profile. The current
 profile is loaded as one bundle; additional developer-maintained patterns can
 be added later as sibling profile directories:
 
 ```text
 src/tkn_codex_context/summary_profiles/
+└── default/
+    ├── prompt.md
+    ├── output.schema.json
+    └── template.md
+
+src/tkn_codex_context/decision_profiles/
 └── default/
     ├── prompt.md
     ├── output.schema.json
@@ -423,6 +490,11 @@ source events + prompt + output schema
     -> validated intermediate JSON
     -> Python renderer + template
     -> Session Note
+
+Session Note + existing decision index + prompt + output schema
+    -> validated intermediate decision JSON
+    -> Python renderer + template
+    -> Decision Record
 ```
 
 The output schema governs the model's intermediate JSON, not the completed

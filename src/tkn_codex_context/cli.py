@@ -13,6 +13,12 @@ from typing import Any
 from .app_state import load_codex_app_state
 from .config import config_document, load_app_config
 from .console_logging import ColorFormatter, log_success, supports_color
+from .decision_resources import load_decision_profile
+from .decisions import (
+    CodexDecisionGenerator,
+    execute_decision_build,
+    validate_decision_record,
+)
 from .initialization import initialize_application
 from .projects import (
     fetch_projects,
@@ -131,6 +137,40 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit the full Project fetch and run report JSON",
     )
+
+    decisions = commands.add_parser("decisions", help="Distill durable decision records")
+    decision_commands = decisions.add_subparsers(dest="decisions_command", required=True)
+    decision_build = decision_commands.add_parser(
+        "build",
+        help="Build decision records from Session Notes",
+    )
+    decision_build.add_argument(
+        "--project-id",
+        metavar="PROJECT_ID_NAME_OR_ROOT",
+        required=True,
+        help="Select one active Project by ID, exact current Name, or CURRENT ROOT",
+    )
+    decision_build.add_argument(
+        "--write",
+        action="store_true",
+        help="Generate and write decision records; the default is a read-only plan",
+    )
+    decision_build.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-evaluate selected Session Notes even when decision state is unchanged",
+    )
+    decision_build.add_argument("--limit", type=int)
+    decision_build.add_argument(
+        "--full-output",
+        action="store_true",
+        help="Emit the full Project fetch and decision build report JSON",
+    )
+    decision_validate = decision_commands.add_parser(
+        "validate",
+        help="Validate one Decision Record v2 file",
+    )
+    decision_validate.add_argument("decision_record", type=Path)
 
     validate = commands.add_parser("validate", help="Validate a Session Note v2 file")
     validate.add_argument("session_note", type=Path)
@@ -272,6 +312,32 @@ def _progress(value: dict[str, Any]) -> None:
             value.get("threadId", "unknown"),
             value.get("error", "unknown error"),
         )
+    elif event_type == "decision-source-start":
+        LOGGER.info(
+            "Starting decision source %s/%s: %s",
+            value.get("index", "?"),
+            value.get("total", "?"),
+            value.get("sessionNote", "unknown"),
+        )
+    elif event_type == "decision-source-complete":
+        log_success(
+            LOGGER,
+            "Completed decision source %s/%s: %s (%s created, %s existing)%s",
+            value.get("index", "?"),
+            value.get("total", "?"),
+            value.get("sessionNote", "unknown"),
+            value.get("createdCount", 0),
+            value.get("referencedCount", 0),
+            _metric_summary(value),
+        )
+    elif event_type == "decision-source-failed":
+        LOGGER.error(
+            "Failed decision source %s/%s: %s — %s",
+            value.get("index", "?"),
+            value.get("total", "?"),
+            value.get("sessionNote", "unknown"),
+            value.get("error", "unknown error"),
+        )
 
 
 def _log_project_fetch(report: dict[str, Any]) -> None:
@@ -396,6 +462,56 @@ def _session_output(
     }
 
 
+def _decision_report_summary(report: dict[str, Any]) -> dict[str, Any]:
+    failed_count = _list_count(report.get("failed"))
+    summary: dict[str, Any] = {
+        "ok": failed_count == 0,
+        "dryRun": bool(report.get("dryRun")),
+        "projectId": report.get("projectId"),
+        "force": bool(report.get("force")),
+        "selectedCount": int(report.get("selectedCount") or 0),
+        "processedCount": _list_count(report.get("processed")),
+        "createdCount": _list_count(report.get("created")),
+        "referencedExistingCount": _list_count(report.get("referencedExisting")),
+        "noActionCount": _list_count(report.get("noAction")),
+        "failedCount": failed_count,
+        "deferredCount": _list_count(report.get("deferred")),
+        "existingDecisionCount": int(report.get("existingDecisionCount") or 0),
+    }
+    scan = report.get("scan")
+    if isinstance(scan, dict):
+        summary["scan"] = {
+            str(key): value
+            for key, value in scan.items()
+            if type(value) is int
+        }
+    return summary
+
+
+def _decision_output(
+    fetch_report: dict[str, Any],
+    report: dict[str, Any],
+    report_path: Path | None,
+    *,
+    full_output: bool,
+) -> dict[str, Any]:
+    if full_output:
+        return {
+            "command": "decisions build",
+            "projectFetch": fetch_report,
+            "reportPath": str(report_path) if report_path else None,
+            "report": report,
+        }
+    summary = _decision_report_summary(report)
+    return {
+        "command": "decisions build",
+        "ok": bool(summary["ok"]) and not bool(fetch_report.get("pendingCount")),
+        "reportPath": str(report_path) if report_path else None,
+        "projectFetchSummary": _project_fetch_summary(fetch_report),
+        "reportSummary": summary,
+    }
+
+
 def _prepare_projects(
     args: argparse.Namespace,
     *,
@@ -444,6 +560,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             try:
                 profile = load_summary_profile()
+                decision_profile = load_decision_profile()
             except (RuntimeError, ValueError) as exc:
                 raise PipelineError(str(exc)) from exc
             _emit(
@@ -469,6 +586,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                             "id": profile.template.template_id,
                             "version": profile.template.version,
                             "sha256": profile.template.sha256,
+                        },
+                    },
+                    "decisionProfile": {
+                        "name": decision_profile.name,
+                        "source": decision_profile.source,
+                        "sha256": decision_profile.sha256,
+                        "prompt": {
+                            "source": decision_profile.prompt.source,
+                            "id": decision_profile.prompt.prompt_id,
+                            "version": decision_profile.prompt.version,
+                            "sha256": decision_profile.prompt.sha256,
+                        },
+                        "schema": {
+                            "source": decision_profile.schema.source,
+                            "sha256": decision_profile.schema.sha256,
+                        },
+                        "template": {
+                            "source": decision_profile.template.source,
+                            "id": decision_profile.template.template_id,
+                            "version": decision_profile.template.version,
+                            "sha256": decision_profile.template.sha256,
                         },
                     },
                 }
@@ -507,6 +645,90 @@ def main(argv: Sequence[str] | None = None) -> int:
             _log_project_fetch(report)
             _emit({"command": "projects fetch", **report})
             return 2 if report["pendingCount"] else 0
+
+        if args.command == "decisions":
+            if args.decisions_command == "validate":
+                record = args.decision_record.expanduser().absolute()
+                LOGGER.info("Validating Decision Record: %s", record)
+                _emit(validate_decision_record(record))
+                log_success(LOGGER, "Validation succeeded: %s", record)
+                return 0
+            if args.force and not args.write:
+                raise PipelineError("--force requires --write for decisions build")
+            write = bool(args.write)
+            LOGGER.info(
+                "%s decision build for Project %s",
+                "Starting" if write else "Planning",
+                args.project_id,
+            )
+            (
+                config,
+                pipeline_config,
+                _state,
+                projects,
+                fetch_report,
+            ) = _prepare_projects(args, dry_run=not write)
+            _log_project_fetch(fetch_report)
+            decision_project = resolve_project_selector(projects, args.project_id)
+            if decision_project.project_id != args.project_id:
+                selector_kind = (
+                    "Name" if decision_project.title == args.project_id else "CURRENT ROOT"
+                )
+                LOGGER.info(
+                    "Resolved Project %s %r to ID %s",
+                    selector_kind,
+                    args.project_id,
+                    decision_project.project_id,
+                )
+            generator = (
+                CodexDecisionGenerator(pipeline_config, observer=_progress)
+                if write
+                else None
+            )
+            report, report_path = execute_decision_build(
+                pipeline_config,
+                decision_project,
+                generator=generator,
+                write=write,
+                force=args.force,
+                limit=args.limit,
+                cache_root=config.reports_root,
+                progress=_progress,
+            )
+            failed = _list_count(report.get("failed"))
+            if write:
+                message = (
+                    "Decision build complete: %s processed, %s created, "
+                    "%s existing, %s failed"
+                )
+                values = (
+                    _list_count(report.get("processed")),
+                    _list_count(report.get("created")),
+                    _list_count(report.get("referencedExisting")),
+                    failed,
+                )
+                if failed:
+                    LOGGER.error(message, *values)
+                else:
+                    log_success(LOGGER, message, *values)
+                if report_path:
+                    LOGGER.info("Run report: %s", report_path)
+            else:
+                LOGGER.info(
+                    "Dry run complete: %s selected, %s existing decisions, %s failed",
+                    report.get("selectedCount", 0),
+                    report.get("existingDecisionCount", 0),
+                    failed,
+                )
+            _emit(
+                _decision_output(
+                    fetch_report,
+                    report,
+                    report_path,
+                    full_output=args.full_output,
+                )
+            )
+            return 1 if failed else 0
 
         if args.notes_command == "pull":
             has_backfill_selector = bool(args.project_id or args.all)

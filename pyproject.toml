@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "tkn-codex-context-pipeline"
 version = "0.1.0"
-description = "Distill local Codex chats into durable Session Note v2 artifacts."
+description = "Distill local Codex chats into durable Session Note and Decision Record artifacts."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
