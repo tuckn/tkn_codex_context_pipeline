@@ -661,12 +661,14 @@ class SessionNotePipelineTests(unittest.TestCase):
             "---\ntype: session\ntitle: Legacy\n---\n\n# Legacy\n",
             encoding="utf-8",
         )
+        progress_events: list[dict] = []
 
         report, _path = execute_rebuild(
             self.config,
             self.project,
             summarizer=FakeSummarizer(),
             cache_root=self.cache,
+            progress=progress_events.append,
         )
 
         self.assertEqual([], report["failed"])
@@ -675,6 +677,11 @@ class SessionNotePipelineTests(unittest.TestCase):
         notes = sorted(self.project.sessions_path.glob("*.md"))
         self.assertEqual(2, len(notes))
         self.assertTrue(all("schemaVersion: 2" in path.read_text(encoding="utf-8") for path in notes))
+        completed = [event for event in progress_events if event["type"] == "thread-complete"]
+        self.assertEqual(
+            [str(path.absolute()) for path in notes],
+            sorted(event["sessionNotePath"] for event in completed),
+        )
 
         second, _path = execute_rebuild(
             self.config,

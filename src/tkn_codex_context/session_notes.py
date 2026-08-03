@@ -1991,6 +1991,7 @@ def execute_rebuild(
         reusable = reusable_generated_note(work_root, work_manifest, candidate, config)
         if reusable is not None:
             generated_by_thread[candidate.thread_id] = reusable
+            final_note_path = (candidate.project.sessions_path / reusable.name).absolute()
             report["resumedCount"] += 1
             report["processed"].append(
                 {
@@ -2008,6 +2009,7 @@ def execute_rebuild(
                         "index": index + 1,
                         "total": len(generate),
                         "threadId": candidate.thread_id,
+                        "sessionNotePath": str(final_note_path),
                     }
                 )
             continue
@@ -2058,6 +2060,7 @@ def execute_rebuild(
             }
             save_rebuild_work(work_root, work_manifest)
             generated_by_thread[candidate.thread_id] = note_path
+            final_note_path = (candidate.project.sessions_path / note_path.name).absolute()
             duration = round(time.monotonic() - thread_started, 3)
             metrics = deepcopy(getattr(summarizer, "last_metrics", {}))
             report["processed"].append(
@@ -2078,6 +2081,7 @@ def execute_rebuild(
                         "index": index + 1,
                         "total": len(generate),
                         "threadId": candidate.thread_id,
+                        "sessionNotePath": str(final_note_path),
                         "durationSeconds": duration,
                         **metrics,
                     }
@@ -2279,6 +2283,7 @@ def execute_pipeline(
                         "index": index + 1,
                         "total": len(candidates),
                         "threadId": candidate.thread_id,
+                        "sessionNotePath": str(note_path.absolute()),
                         "durationSeconds": duration,
                         **metrics,
                     }

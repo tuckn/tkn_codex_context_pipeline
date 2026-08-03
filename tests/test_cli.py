@@ -114,6 +114,7 @@ def test_progress_events_are_human_readable(
             "index": 2,
             "total": 7,
             "threadId": "thread-2",
+            "sessionNotePath": r"C:\notes\thread-2.md",
             "durationSeconds": 12.5,
             "chunkCount": 2,
             "modelCalls": 3,
@@ -124,7 +125,8 @@ def test_progress_events_are_human_readable(
     assert captured.out == ""
     assert captured.err.splitlines() == [
         "[INFO] Starting thread 2/7: thread-2",
-        "[SUCCESS] Completed thread 2/7: thread-2 (12.5s, 2 chunks, 3 model calls)",
+        "[SUCCESS] Completed thread 2/7: thread-2 "
+        r"(12.5s, 2 chunks, 3 model calls) — Session Note: C:\notes\thread-2.md",
     ]
 
 

@@ -262,6 +262,11 @@ def _metric_summary(value: dict[str, Any]) -> str:
     return f" ({', '.join(metrics)})" if metrics else ""
 
 
+def _session_note_path_summary(value: dict[str, Any]) -> str:
+    path = value.get("sessionNotePath")
+    return f" — Session Note: {path}" if isinstance(path, str) and path else ""
+
+
 def _progress(value: dict[str, Any]) -> None:
     LOGGER.debug(
         "Progress event: %s",
@@ -277,10 +282,11 @@ def _progress(value: dict[str, Any]) -> None:
         )
     elif event_type == "thread-resumed":
         LOGGER.info(
-            "Resuming completed thread %s/%s from cache: %s",
+            "Resuming completed thread %s/%s from cache: %s%s",
             value.get("index", "?"),
             value.get("total", "?"),
             value.get("threadId", "unknown"),
+            _session_note_path_summary(value),
         )
     elif event_type == "chunk-start":
         LOGGER.info(
@@ -298,11 +304,12 @@ def _progress(value: dict[str, Any]) -> None:
     elif event_type == "thread-complete":
         log_success(
             LOGGER,
-            "Completed thread %s/%s: %s%s",
+            "Completed thread %s/%s: %s%s%s",
             value.get("index", "?"),
             value.get("total", "?"),
             value.get("threadId", "unknown"),
             _metric_summary(value),
+            _session_note_path_summary(value),
         )
     elif event_type == "thread-failed":
         LOGGER.error(
