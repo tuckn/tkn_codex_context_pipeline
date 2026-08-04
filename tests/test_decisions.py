@@ -20,6 +20,7 @@ from tkn_codex_context.decisions import (
     validate_decision_output,
     validate_decision_record,
 )
+from tkn_codex_context.frontmatter import parse_simple_frontmatter
 from tkn_codex_context.session_notes import PipelineConfig, PipelineError, Project
 
 
@@ -58,12 +59,15 @@ def session_note(*, title: str = "Decision source", explicit: bool = True) -> st
     )
 
 
-def new_decision_output() -> dict:
+def new_decision_output(
+    source_refs: list[str] | None = None,
+) -> dict:
     return {
         "decisions": [
             {
                 "disposition": "create",
                 "existingDecisionId": "",
+                "sourceSessionRefs": source_refs or ["project:/sessions/one.md"],
                 "title": "Session Noteを一次入力にする",
                 "fileSlug": "use-session-notes-as-primary-input",
                 "description": "Decision生成ではSession Noteを一次入力として利用する。",
@@ -81,6 +85,7 @@ def new_decision_output() -> dict:
                 "reusablePrinciples": ["curated artifactを下流処理の入力にする。"],
                 "projectSpecificDetails": ["Session Note v2を利用する。"],
                 "verificationEvidence": ["Session Note pipelineが実装済み。"],
+                "verificationLimitations": [],
                 "validationDate": "2026-08-03",
                 "relatedEvidence": ["project:/README_ja.md"],
                 "materialization": {
@@ -98,13 +103,18 @@ def new_decision_output() -> dict:
     }
 
 
-def existing_decision_output(decision_id: str) -> dict:
-    item = new_decision_output()["decisions"][0]
+def existing_decision_output(
+    decision_id: str,
+    source_refs: list[str] | None = None,
+) -> dict:
+    item = new_decision_output(source_refs)["decisions"][0]
     for key, value in list(item.items()):
         if key == "disposition":
             item[key] = "existing"
         elif key == "existingDecisionId":
             item[key] = decision_id
+        elif key == "sourceSessionRefs":
+            continue
         elif key == "materialization":
             item[key] = {name: [] for name in value}
         elif isinstance(value, list):
@@ -114,18 +124,31 @@ def existing_decision_output(decision_id: str) -> dict:
     return {"decisions": [item], "sourceLimitations": []}
 
 
+def update_decision_output(
+    decision_id: str,
+    source_refs: list[str],
+) -> dict:
+    output = new_decision_output(source_refs)
+    item = output["decisions"][0]
+    item["disposition"] = "update"
+    item["existingDecisionId"] = decision_id
+    item["description"] = "複数のSession Noteを統合してDecisionを更新する。"
+    item["verificationLimitations"] = ["Direct validation remains incomplete."]
+    return output
+
+
 class FakeDecisionGenerator:
     def __init__(self, output: dict) -> None:
         self.output = output
-        self.calls: list[str] = []
+        self.calls: list[list[str]] = []
         self.last_metrics = {"modelCalls": 1, "transportRetries": 0, "semanticRetries": 0}
 
     def generate(
         self,
-        source: DecisionSource,
+        sources: list[DecisionSource],
         existing_decisions: list[ExistingDecision],
     ) -> dict:
-        self.calls.append(source.relative_path)
+        self.calls.append([source.relative_path for source in sources])
         return self.output
 
 
@@ -153,7 +176,7 @@ def decision_project(tmp_path: Path) -> tuple[Project, PipelineConfig]:
 
 def test_decision_profile_is_packaged_and_controls_heading_order() -> None:
     profile = load_decision_profile()
-    assert profile.source.endswith("decision_profiles/default")
+    assert profile.source.endswith("profiles/decision/default")
     assert profile.schema.value["additionalProperties"] is False
     assert set(profile.schema.value["required"]) == set(profile.schema.value["properties"])
     values = {field: field for field in REQUIRED_TEMPLATE_FIELDS}
@@ -165,8 +188,53 @@ def test_decision_profile_is_packaged_and_controls_heading_order() -> None:
 
 def test_decision_output_requires_known_existing_id() -> None:
     with pytest.raises(PipelineError, match="unknown decisionId"):
-        validate_decision_output(existing_decision_output("DR-0001"), set())
-    validate_decision_output(new_decision_output(), set())
+        validate_decision_output(
+            existing_decision_output("DR-0001"),
+            set(),
+            {"project:/sessions/one.md"},
+        )
+    validate_decision_output(
+        new_decision_output(),
+        set(),
+        {"project:/sessions/one.md"},
+    )
+
+
+def test_decision_output_rejects_context_artifacts_as_repository_documentation() -> None:
+    output = new_decision_output()
+    output["decisions"][0]["materialization"]["repositoryDocumentation"] = [
+        "DR-0011-prior-decision.md"
+    ]
+
+    with pytest.raises(PipelineError, match="evidence, not repository documentation"):
+        validate_decision_output(
+            output,
+            set(),
+            {"project:/sessions/one.md"},
+        )
+
+
+def test_old_unreviewed_decision_requires_quality_update() -> None:
+    with pytest.raises(PipelineError, match="must update decisionId"):
+        validate_decision_output(
+            existing_decision_output("DR-0001"),
+            {"DR-0001"},
+            {"project:/sessions/one.md"},
+            {"DR-0001"},
+            {"DR-0001"},
+        )
+
+
+def test_decision_output_rejects_unavailable_decision_evidence() -> None:
+    output = new_decision_output()
+    output["decisions"][0]["relatedEvidence"] = ["DR-0011-legacy-record.md"]
+
+    with pytest.raises(PipelineError, match="unavailable from the current index"):
+        validate_decision_output(
+            output,
+            set(),
+            {"project:/sessions/one.md"},
+        )
 
 
 def test_decision_dry_run_selects_only_explicit_decisions(
@@ -198,6 +266,7 @@ def test_decision_write_creates_record_updates_source_and_becomes_unchanged(
     source = project.sessions_path / "one.md"
     source.write_text(session_note(), encoding="utf-8")
     generator = FakeDecisionGenerator(new_decision_output())
+    progress_events: list[dict[str, object]] = []
 
     report, report_path = execute_decision_build(
         config,
@@ -205,6 +274,7 @@ def test_decision_write_creates_record_updates_source_and_becomes_unchanged(
         generator=generator,
         write=True,
         cache_root=tmp_path / "reports",
+        progress=progress_events.append,
     )
 
     assert report_path is not None and report_path.is_file()
@@ -213,6 +283,8 @@ def test_decision_write_creates_record_updates_source_and_becomes_unchanged(
     decision = project.context_path / report["created"][0]["decisionRecord"]
     validation = validate_decision_record(decision)
     assert validation["decisionId"] == "DR-0001"
+    completed = next(event for event in progress_events if event["type"] == "decision-batch-complete")
+    assert completed["decisionRecordPaths"] == [str(decision.absolute())]
     source_text = source.read_text(encoding="utf-8")
     assert 'distillationStatus: "partial"' in source_text
     assert "project:/decisions/DR-0001-use-session-notes-as-primary-input.md" in source_text
@@ -247,7 +319,12 @@ def test_existing_decision_is_referenced_without_creating_duplicate(
     report, _path = execute_decision_build(
         config,
         project,
-        generator=FakeDecisionGenerator(existing_decision_output("DR-0001")),
+        generator=FakeDecisionGenerator(
+            existing_decision_output(
+                "DR-0001",
+                ["project:/sessions/two.md"],
+            )
+        ),
         write=True,
         cache_root=tmp_path / "reports-two",
     )
@@ -255,6 +332,91 @@ def test_existing_decision_is_referenced_without_creating_duplicate(
     assert report["created"] == []
     assert report["referencedExisting"] == ["DR-0001"]
     assert len(list((project.context_path / "decisions").glob("*.md"))) == 1
+    assert "project:/decisions/DR-0001-use-session-notes-as-primary-input.md" in second.read_text(encoding="utf-8")
+    decision_text = (project.context_path / "decisions/DR-0001-use-session-notes-as-primary-input.md").read_text(
+        encoding="utf-8"
+    )
+    assert "project:/sessions/one.md" in decision_text
+    assert "project:/sessions/two.md" in decision_text
+
+
+def test_unreviewed_existing_decision_can_be_resynthesized_from_later_session(
+    decision_project: tuple[Project, PipelineConfig],
+    tmp_path: Path,
+) -> None:
+    project, config = decision_project
+    first = project.sessions_path / "one.md"
+    first.write_text(session_note(), encoding="utf-8")
+    execute_decision_build(
+        config,
+        project,
+        generator=FakeDecisionGenerator(new_decision_output()),
+        write=True,
+        cache_root=tmp_path / "reports-one",
+    )
+    decision = project.context_path / "decisions/DR-0001-use-session-notes-as-primary-input.md"
+    original_date = parse_simple_frontmatter(decision.read_text(encoding="utf-8"))["date"]
+    second = project.sessions_path / "two.md"
+    second.write_text(session_note(title="Improved evidence"), encoding="utf-8")
+
+    report, _path = execute_decision_build(
+        config,
+        project,
+        generator=FakeDecisionGenerator(
+            update_decision_output(
+                "DR-0001",
+                ["project:/sessions/two.md"],
+            )
+        ),
+        write=True,
+        cache_root=tmp_path / "reports-two",
+    )
+
+    assert report["created"] == []
+    assert [item["decisionId"] for item in report["updated"]] == ["DR-0001"]
+    assert len(list((project.context_path / "decisions").glob("*.md"))) == 1
+    decision_text = decision.read_text(encoding="utf-8")
+    metadata = parse_simple_frontmatter(decision_text)
+    assert metadata["date"] == original_date
+    assert "複数のSession Noteを統合してDecisionを更新する。" in decision_text
+    assert "- Limitations: Direct validation remains incomplete." in decision_text
+    assert "project:/sessions/one.md" in decision_text
+    assert "project:/sessions/two.md" in decision_text
+
+
+def test_multiple_session_notes_synthesize_one_decision(
+    decision_project: tuple[Project, PipelineConfig],
+    tmp_path: Path,
+) -> None:
+    project, config = decision_project
+    first = project.sessions_path / "one.md"
+    second = project.sessions_path / "two.md"
+    first.write_text(session_note(title="Initial choice"), encoding="utf-8")
+    second.write_text(session_note(title="Later verification"), encoding="utf-8")
+    source_refs = ["project:/sessions/one.md", "project:/sessions/two.md"]
+    output = new_decision_output(source_refs)
+    output["decisions"][0]["reusablePrinciples"] = []
+    output["decisions"][0]["verificationLimitations"] = ["Direct endpoint validation was incomplete."]
+    generator = FakeDecisionGenerator(output)
+
+    report, _path = execute_decision_build(
+        config,
+        project,
+        generator=generator,
+        write=True,
+        cache_root=tmp_path / "reports",
+    )
+
+    assert generator.calls == [["sessions/one.md", "sessions/two.md"]]
+    assert len(report["created"]) == 1
+    assert report["created"][0]["sourceSessionRefs"] == source_refs
+    decision = project.context_path / report["created"][0]["decisionRecord"]
+    decision_text = decision.read_text(encoding="utf-8")
+    assert decision_text.count("project:/sessions/one.md") == 2
+    assert decision_text.count("project:/sessions/two.md") == 2
+    assert "- Limitations: Direct endpoint validation was incomplete." in decision_text
+    assert 'promotionStatus: "no-action"' in decision_text
+    assert "project:/decisions/DR-0001-use-session-notes-as-primary-input.md" in first.read_text(encoding="utf-8")
     assert "project:/decisions/DR-0001-use-session-notes-as-primary-input.md" in second.read_text(encoding="utf-8")
 
 

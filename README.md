@@ -337,9 +337,12 @@ tkn-codex-context validate <session-note.md>
 
 `decisions build` uses the stored Session Note v2 files for one Project as its
 primary input. The normal path does not reread the original Codex chat. Only
-Session Notes with an `Explicit Decision` section are candidates. The model
-also receives an index of existing Decision Records so the same decision can
-reference an existing ID instead of creating a duplicate.
+Session Notes with an `Explicit Decision` section are candidates. Multiple
+notes are sent in bounded synthesis batches, and the output unit is a central
+decision rather than a Session Note. When several notes establish, refine, or
+verify the same decision, one record lists all supporting `sourceSessionRefs`.
+The model also receives an index of existing Decision Records so the same
+decision can reference an existing ID instead of creating a duplicate.
 
 Start with the read-only plan. `decisions build` is read-only by default: it
 does not call the generative AI or change the registry, Session Notes, Decision
@@ -351,7 +354,9 @@ tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --full-ou
 ```
 
 `reportSummary.selectedCount` is the number of selected Session Notes,
-`createdCount` is the number of new records, and `referencedExistingCount` is
+`synthesisBatchCount` is the number of model batches, `createdCount` is the
+number of new records, `updatedCount` is the number of resynthesized unreviewed
+records, and `referencedExistingCount` is
 the number of links to existing records. Use `--full-output` to inspect the
 individual selected Session Notes during planning.
 
@@ -367,7 +372,8 @@ Context, Decision, Rationale, Consequences, Applicability, Verification,
 Materialization, and Supersession sections. A decision is `Accepted` only when
 the source establishes explicit user acceptance or an operational practice
 that is already in effect; otherwise it is `Proposed`. Decision status and
-implementation/verification status remain separate fields.
+implementation/verification status remain separate fields. Incomplete or
+blocked verification is retained under `Verification` as `Limitations`.
 
 After a successful write, the source Session Note becomes
 `distillationStatus: partial` and receives a `project:/decisions/...` entry in
@@ -376,9 +382,12 @@ After a successful write, the source Session Note becomes
 working-context distillation.
 
 An unchanged Session Note with the same decision profile is skipped. Use
-`--force` together with the explicit write flag to re-evaluate it. Existing
-Decision Records are never overwritten; a matching decision links to the
-existing ID.
+`--force` together with the explicit write flag to re-evaluate it. A matching
+decision links to the existing ID. An unreviewed Codex-generated record may be
+resynthesized in place when combined sources materially correct or improve it,
+while preserving its ID and original date. Reviewed records do not have their
+central judgment rewritten automatically; only new `sourceSessionRefs` and
+`Related Evidence` are appended as provenance.
 
 ```powershell
 tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --write --force
@@ -464,17 +473,17 @@ profile is loaded as one bundle; additional developer-maintained patterns can
 be added later as sibling profile directories:
 
 ```text
-src/tkn_codex_context/summary_profiles/
-└── default/
-    ├── prompt.md
-    ├── output.schema.json
-    └── template.md
-
-src/tkn_codex_context/decision_profiles/
-└── default/
-    ├── prompt.md
-    ├── output.schema.json
-    └── template.md
+src/tkn_codex_context/profiles/
+├── summary/
+│   └── default/
+│       ├── prompt.md
+│       ├── output.schema.json
+│       └── template.md
+└── decision/
+    └── default/
+        ├── prompt.md
+        ├── output.schema.json
+        └── template.md
 ```
 
 | Resource | Role |

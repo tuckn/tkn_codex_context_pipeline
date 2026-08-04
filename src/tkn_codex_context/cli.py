@@ -319,6 +319,38 @@ def _progress(value: dict[str, Any]) -> None:
             value.get("threadId", "unknown"),
             value.get("error", "unknown error"),
         )
+    elif event_type == "decision-batch-start":
+        session_notes = value.get("sessionNotes")
+        source_count = len(session_notes) if isinstance(session_notes, list) else 0
+        LOGGER.info(
+            "Starting decision synthesis batch %s/%s: %s Session Notes",
+            value.get("index", "?"),
+            value.get("total", "?"),
+            source_count,
+        )
+    elif event_type == "decision-batch-complete":
+        log_success(
+            LOGGER,
+            "Completed decision synthesis batch %s/%s (%s created, %s updated, %s existing)%s",
+            value.get("index", "?"),
+            value.get("total", "?"),
+            value.get("createdCount", 0),
+            value.get("updatedCount", 0),
+            value.get("referencedCount", 0),
+            _metric_summary(value),
+        )
+        paths = value.get("decisionRecordPaths")
+        if isinstance(paths, list):
+            for path in paths:
+                if isinstance(path, str) and path:
+                    LOGGER.info("Decision Record: %s", path)
+    elif event_type == "decision-batch-failed":
+        LOGGER.error(
+            "Failed decision synthesis batch %s/%s: %s",
+            value.get("index", "?"),
+            value.get("total", "?"),
+            value.get("error", "unknown error"),
+        )
     elif event_type == "decision-source-start":
         LOGGER.info(
             "Starting decision source %s/%s: %s",
@@ -337,6 +369,11 @@ def _progress(value: dict[str, Any]) -> None:
             value.get("referencedCount", 0),
             _metric_summary(value),
         )
+        paths = value.get("decisionRecordPaths")
+        if isinstance(paths, list):
+            for path in paths:
+                if isinstance(path, str) and path:
+                    LOGGER.info("Decision Record: %s", path)
     elif event_type == "decision-source-failed":
         LOGGER.error(
             "Failed decision source %s/%s: %s — %s",
@@ -479,11 +516,13 @@ def _decision_report_summary(report: dict[str, Any]) -> dict[str, Any]:
         "selectedCount": int(report.get("selectedCount") or 0),
         "processedCount": _list_count(report.get("processed")),
         "createdCount": _list_count(report.get("created")),
+        "updatedCount": _list_count(report.get("updated")),
         "referencedExistingCount": _list_count(report.get("referencedExisting")),
         "noActionCount": _list_count(report.get("noAction")),
         "failedCount": failed_count,
         "deferredCount": _list_count(report.get("deferred")),
         "existingDecisionCount": int(report.get("existingDecisionCount") or 0),
+        "synthesisBatchCount": int(report.get("synthesisBatchCount") or 0),
     }
     scan = report.get("scan")
     if isinstance(scan, dict):
@@ -706,11 +745,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             if write:
                 message = (
                     "Decision build complete: %s processed, %s created, "
-                    "%s existing, %s failed"
+                    "%s updated, %s existing, %s failed"
                 )
                 values = (
                     _list_count(report.get("processed")),
                     _list_count(report.get("created")),
+                    _list_count(report.get("updated")),
                     _list_count(report.get("referencedExisting")),
                     failed,
                 )

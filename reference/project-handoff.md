@@ -225,10 +225,12 @@ chat is unchanged.
 
 `decisions build` scans current Session Note v2 files with an `Explicit
 Decision` development. Planning is read-only and does not call the model.
-`--write` generates strict structured output from one Session Note plus an
-existing-decision index. Each central decision becomes one `DR-NNNN-<slug>.md`
-file, or links to an existing decision ID when the model identifies the same
-decision.
+`--write` generates strict structured output from bounded batches of Session
+Notes plus an existing-decision index. The output unit is a central decision,
+not a Session Note. One decision may cite multiple `sourceSessionRefs`, and one
+Session Note may support multiple decisions. Each new central decision becomes
+one `DR-NNNN-<slug>.md` file, or links to an existing decision ID when the model
+identifies the same decision.
 
 Required body sections are `Context`, `Decision`, `Rationale`, `Consequences`,
 `Alternatives Considered`, `Applicability`, `Verification`, `Related Evidence`,
@@ -259,10 +261,11 @@ committed. A note and its refresh state are treated as one transaction:
 failures restore the previous note and state.
 
 Decision Records are rendered and validated before their source transaction is
-finalized. New records, the source Session Note distillation metadata, and
+finalized. New records, resynthesized unreviewed generated records, appended
+provenance, all source Session Note distillation metadata, and
 `decision-build-state.json` are committed together; failures remove new records
-and restore the source note and prior state. Existing Decision Records are not
-overwritten.
+and restore existing records, source notes, and prior state. Reviewed central
+judgment content is not automatically rewritten.
 
 Incomplete normal-run and rebuild artifacts remain resumable in the pipeline
 cache. Successful work removes its pending cache. Rebuild performs a staged,

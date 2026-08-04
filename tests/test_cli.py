@@ -130,6 +130,39 @@ def test_progress_events_are_human_readable(
     ]
 
 
+def test_decision_batch_progress_logs_created_record_paths(
+    capsys: CaptureFixture[str],
+) -> None:
+    args = build_parser().parse_args(["config", "show"])
+    _configure_logging(args)
+
+    _progress(
+        {
+            "type": "decision-batch-complete",
+            "index": 1,
+            "total": 2,
+            "sessionNotes": ["sessions/source.md", "sessions/verification.md"],
+            "createdCount": 2,
+            "decisionRecordPaths": [
+                r"C:\notes\decisions\DR-0001-first.md",
+                r"C:\notes\decisions\DR-0002-second.md",
+            ],
+            "referencedCount": 0,
+            "durationSeconds": 12.5,
+            "modelCalls": 1,
+        }
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.splitlines() == [
+        "[SUCCESS] Completed decision synthesis batch 1/2 "
+        "(2 created, 0 updated, 0 existing) (12.5s, 1 model call)",
+        r"[INFO] Decision Record: C:\notes\decisions\DR-0001-first.md",
+        r"[INFO] Decision Record: C:\notes\decisions\DR-0002-second.md",
+    ]
+
+
 @pytest.mark.parametrize(
     ("level", "name", "color"),
     [
@@ -167,24 +200,24 @@ def test_config_show_reports_application_owned_summary_profile(
 
     profile = output["summaryProfile"]
     assert profile["name"] == "default"
-    assert profile["source"].endswith("summary_profiles/default")
+    assert profile["source"].endswith("profiles/summary/default")
     assert len(profile["sha256"]) == 64
     assert profile["prompt"]["version"] == "2.0"
-    assert profile["prompt"]["source"].endswith("summary_profiles/default/prompt.md")
+    assert profile["prompt"]["source"].endswith("profiles/summary/default/prompt.md")
     assert profile["schema"]["source"].endswith(
-        "summary_profiles/default/output.schema.json"
+        "profiles/summary/default/output.schema.json"
     )
     assert len(profile["schema"]["sha256"]) == 64
     assert profile["template"]["version"] == "1.0"
     assert profile["template"]["source"].endswith(
-        "summary_profiles/default/template.md"
+        "profiles/summary/default/template.md"
     )
     decision_profile = output["decisionProfile"]
     assert decision_profile["name"] == "default"
-    assert decision_profile["source"].endswith("decision_profiles/default")
-    assert decision_profile["prompt"]["version"] == "1.0"
+    assert decision_profile["source"].endswith("profiles/decision/default")
+    assert decision_profile["prompt"]["version"] == "2.1"
     assert decision_profile["schema"]["source"].endswith(
-        "decision_profiles/default/output.schema.json"
+        "profiles/decision/default/output.schema.json"
     )
     assert decision_profile["template"]["version"] == "1.0"
 

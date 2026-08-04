@@ -15,7 +15,7 @@ import yaml
 from .prompting import SummaryPrompt, parse_summary_prompt
 
 DEFAULT_DECISION_PROFILE = "default"
-DECISION_PROFILES_ROOT = "decision_profiles"
+DECISION_PROFILES_ROOT = "profiles/decision"
 PROMPT_FILENAME = "prompt.md"
 SCHEMA_FILENAME = "output.schema.json"
 TEMPLATE_FILENAME = "template.md"

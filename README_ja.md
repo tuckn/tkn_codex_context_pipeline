@@ -318,8 +318,11 @@ tkn-codex-context validate <session-note.md>
 
 `decisions build`は、1つのProjectに保存されたSession Note v2を一次入力として
 durableなdecisionを抽出します。通常経路では元のCodex chatを読み直しません。
-`Explicit Decision`を持つSession Noteだけを候補とし、既存Decision Recordのindexも
-モデルへ渡して、同じdecisionなら既存IDを参照します。
+`Explicit Decision`を持つ複数のSession Noteをbounded synthesis batchとしてモデルへ
+まとめて渡します。生成単位はSession Noteではなくcentral decisionです。複数のNoteが
+同じ判断の成立・修正・検証を示す場合は、`sourceSessionRefs`に根拠をまとめた1つの
+Decision Recordを生成します。既存Decision Recordのindexも渡し、同じdecisionなら
+既存IDを参照します。
 
 最初に書き込みなしの計画を確認します。`decisions build`は既定でread-onlyです。
 生成AIを呼び出さず、registry、Session Note、Decision Record、state、run reportを
@@ -330,8 +333,9 @@ tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot>
 tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --full-output
 ```
 
-`reportSummary.selectedCount`は生成対象のSession Note数、`createdCount`は新規record数、
-`referencedExistingCount`は既存recordへ紐付けた件数です。dry-runで個別のSession Noteを
+`reportSummary.selectedCount`は生成対象のSession Note数、`synthesisBatchCount`はmodelへ
+渡すbatch数、`createdCount`は新規record数、`updatedCount`は未review recordの
+再構成数、`referencedExistingCount`は既存recordへ紐付けた件数です。dry-runで個別のSession Noteを
 確認する場合は`--full-output`を使用します。
 
 確認後、`--write`を明示して生成・保存します。
@@ -344,7 +348,8 @@ tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --write
 各recordは`Context`、`Decision`、`Rationale`、`Consequences`、`Applicability`、
 `Verification`、`Materialization`、`Supersession`を持ちます。明示的なuser acceptance
 または成立済みのoperational practiceが確認できる場合だけ`Accepted`とし、それ以外は
-`Proposed`にします。statusと実装・検証状態は別fieldで管理します。
+`Proposed`にします。statusと実装・検証状態は別fieldで管理します。検証できなかった
+事項は`Verification`の`Limitations`に残し、format検証の成功と事実確認を区別します。
 
 保存に成功すると、入力Session Noteの`distillationStatus`を`partial`にし、
 `distilledTo`へ`project:/decisions/...`を追加します。生成結果がno-actionの場合は、
@@ -352,8 +357,10 @@ working contextなど後続のdistillationを妨げないようSession Noteをfi
 `decision-build-state.json`だけに処理済み状態を記録します。
 
 source hashとdecision生成profileが同じSession Noteは次回`unchanged`としてスキップします。
-再評価する場合は、書き込みを明示したうえで`--force`を指定します。既存Decision Recordを
-上書きせず、同一decisionは既存IDへ紐付けます。
+再評価する場合は、書き込みを明示したうえで`--force`を指定します。同一decisionは既存IDへ
+紐付けます。`reviewStatus: unreviewed`のCodex生成recordは、複数Noteから得た訂正や重要な
+追加根拠がある場合、IDと初回dateを保って再構成できます。review済みrecordのcentral
+judgmentは自動更新せず、新しい`sourceSessionRefs`と`Related Evidence`だけを追記します。
 
 ```powershell
 tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --write --force
@@ -433,17 +440,17 @@ schema、template、profileの選択・上書きを行えません。現在は1�
 directoryを追加します。
 
 ```text
-src/tkn_codex_context/summary_profiles/
-└── default/
-    ├── prompt.md
-    ├── output.schema.json
-    └── template.md
-
-src/tkn_codex_context/decision_profiles/
-└── default/
-    ├── prompt.md
-    ├── output.schema.json
-    └── template.md
+src/tkn_codex_context/profiles/
+├── summary/
+│   └── default/
+│       ├── prompt.md
+│       ├── output.schema.json
+│       └── template.md
+└── decision/
+    └── default/
+        ├── prompt.md
+        ├── output.schema.json
+        └── template.md
 ```
 
 | resource | 役割 |

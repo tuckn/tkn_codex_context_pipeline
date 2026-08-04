@@ -15,7 +15,7 @@ import yaml
 from .prompting import SummaryPrompt, parse_summary_prompt
 
 DEFAULT_SUMMARY_PROFILE = "default"
-SUMMARY_PROFILES_ROOT = "summary_profiles"
+SUMMARY_PROFILES_ROOT = "profiles/summary"
 PROMPT_FILENAME = "prompt.md"
 SCHEMA_FILENAME = "output.schema.json"
 TEMPLATE_FILENAME = "template.md"
