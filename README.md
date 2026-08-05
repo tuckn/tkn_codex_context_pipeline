@@ -16,35 +16,29 @@ Japanese documentation: [README_ja.md](README_ja.md)
 
 ## Installation
 
-The default is an editable installation so repository source changes are
-reflected without reinstalling the CLI:
+Install the repository with the following command. Replace `C:\path\to\tkn_codex_context_pipeline` with the actual path to this repository.
 
 ```console
-uv tool install -e "C:\path\to\tkn_codex_context_pipeline"
+uv tool install "C:\path\to\tkn_codex_context_pipeline"
 tkn-codex-context --help
 ```
 
-Replace the example path with the actual repository folder. With an
-editable installation (`-e`), Python source changes from `git pull` are immediately
-used by `tkn-codex-context`.
+The second command confirms that `tkn-codex-context` can be run after installation. This installation uses the code as it existed when the command was run and does not automatically track later repository changes.
 
-To replace an existing installation with an editable installation:
+Reinstall after every repository update, such as after `git pull`, to make the updated code and dependencies available to the installed command:
+
+```console
+uv tool install "C:\path\to\tkn_codex_context_pipeline" --force
+tkn-codex-context --help
+```
+
+For development, an editable installation can be used instead:
 
 ```console
 uv tool install -e "C:\path\to\tkn_codex_context_pipeline" --force
 ```
 
-Run the command again after changing dependencies, package metadata, or entry
-points, or after moving the repository to another folder.
-
-To use a non-editable installation:
-
-```console
-uv tool install "C:\path\to\tkn_codex_context_pipeline" --force
-```
-
-A non-editable installation does not follow later repository changes. Run the
-same installation command again after `git pull` to update the installed CLI.
+The `-e` (`--editable`) option makes the installed command reference the repository source code directly, so source-code edits take effect without reinstallation. If an update adds or changes dependencies in `pyproject.toml` or `uv.lock`, reinstall with the same editable command and `--force` so that the tool environment is updated too.
 
 ## Configuration
 
@@ -375,11 +369,18 @@ that is already in effect; otherwise it is `Proposed`. Decision status and
 implementation/verification status remain separate fields. Incomplete or
 blocked verification is retained under `Verification` as `Limitations`.
 
-After a successful write, the source Session Note becomes
-`distillationStatus: partial` and receives a `project:/decisions/...` entry in
-`distilledTo`. A no-action result is remembered only in
-`decision-build-state.json`, leaving the Session Note available for later
-working-context distillation.
+Decision generation does not modify its input Session Notes. The Decision
+Record keeps the forward dependency in `sourceSessionRefs`, while
+`decision-build-state.json` owns per-source processing state and the reverse
+`decisionIds` index. Run reports expose the current mapping as `decisionRefs`.
+A no-action result is also state-only, leaving the same Session Note available
+for later working-context distillation.
+
+Legacy `project:/decisions/...` back-references in Session Notes are detected by
+the next `decisions build`. A read-only run reports the plan under
+`sessionBackrefCleanup.plannedSessionCount`; a `--write` run removes only those
+references and transactionally refreshes the Session Note hash, Decision
+provenance, and state.
 
 An unchanged Session Note with the same decision profile is skipped. Use
 `--force` together with the explicit write flag to re-evaluate it. A matching

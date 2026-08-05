@@ -237,10 +237,12 @@ Required body sections are `Context`, `Decision`, `Rationale`, `Consequences`,
 `Materialization`, and `Supersession`. New records use `schemaVersion: 2` and
 keep decision status, implementation status, and promotion status separate.
 
-After an accepted durable destination exists, the source Session Note receives
-`distillationStatus: partial` and a logical `project:/decisions/...` reference.
-A no-action result is remembered only in `decision-build-state.json` because
-the same Session Note may still contribute to a future working context.
+Decision generation leaves source Session Notes unchanged. Decision Records
+own forward provenance through `sourceSessionRefs`; reverse `decisionIds`,
+source fingerprints, and no-action outcomes live in
+`decision-build-state.json`. A compatibility migration removes legacy
+`project:/decisions/...` Session Note back-references on a write run and updates
+affected provenance and state atomically.
 
 ## Generation and commit safety
 
@@ -260,11 +262,11 @@ Generated notes are completed and validated in the pipeline cache before being
 committed. A note and its refresh state are treated as one transaction:
 failures restore the previous note and state.
 
-Decision Records are rendered and validated before their source transaction is
+Decision Records are rendered and validated before their transaction is
 finalized. New records, resynthesized unreviewed generated records, appended
-provenance, all source Session Note distillation metadata, and
-`decision-build-state.json` are committed together; failures remove new records
-and restore existing records, source notes, and prior state. Reviewed central
+provenance, and `decision-build-state.json` are committed together; failures
+remove new records and restore existing records and prior state. Source Session
+Notes are not part of normal Decision generation writes. Reviewed central
 judgment content is not automatically rewritten.
 
 Incomplete normal-run and rebuild artifacts remain resumable in the pipeline

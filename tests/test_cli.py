@@ -362,6 +362,11 @@ def test_decisions_build_dry_run_routes_and_emits_compact_summary(
     assert output["reportPath"] is None
     assert output["reportSummary"]["dryRun"] is True
     assert output["reportSummary"]["selectedCount"] == 1
+    assert output["reportSummary"]["sessionBackrefCleanup"] == {
+        "plannedSessionCount": 0,
+        "changedSessionCount": 0,
+        "removedRefCount": 0,
+    }
     assert list((app_root / "data/projects/local-project/decisions").iterdir()) == []
 
 

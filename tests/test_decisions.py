@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,6 +16,7 @@ from tkn_codex_context.decisions import (
     DECISION_STATE_FILENAME,
     DecisionSource,
     ExistingDecision,
+    cleanup_session_decision_backrefs,
     execute_decision_build,
     scan_decision_sources,
     validate_decision_output,
@@ -258,13 +260,14 @@ def test_decision_dry_run_selects_only_explicit_decisions(
     assert not (project.state_directory / DECISION_STATE_FILENAME).exists()  # type: ignore[operator]
 
 
-def test_decision_write_creates_record_updates_source_and_becomes_unchanged(
+def test_decision_write_creates_record_without_mutating_source_and_becomes_unchanged(
     decision_project: tuple[Project, PipelineConfig],
     tmp_path: Path,
 ) -> None:
     project, config = decision_project
     source = project.sessions_path / "one.md"
-    source.write_text(session_note(), encoding="utf-8")
+    original_source = session_note()
+    source.write_text(original_source, encoding="utf-8")
     generator = FakeDecisionGenerator(new_decision_output())
     progress_events: list[dict[str, object]] = []
 
@@ -285,9 +288,10 @@ def test_decision_write_creates_record_updates_source_and_becomes_unchanged(
     assert validation["decisionId"] == "DR-0001"
     completed = next(event for event in progress_events if event["type"] == "decision-batch-complete")
     assert completed["decisionRecordPaths"] == [str(decision.absolute())]
-    source_text = source.read_text(encoding="utf-8")
-    assert 'distillationStatus: "partial"' in source_text
-    assert "project:/decisions/DR-0001-use-session-notes-as-primary-input.md" in source_text
+    assert source.read_text(encoding="utf-8") == original_source
+    assert report["processed"][0]["decisionRefs"] == [
+        "project:/decisions/DR-0001-use-session-notes-as-primary-input.md"
+    ]
     state = json.loads(
         (project.state_directory / DECISION_STATE_FILENAME).read_text(encoding="utf-8")  # type: ignore[operator]
     )
@@ -332,7 +336,7 @@ def test_existing_decision_is_referenced_without_creating_duplicate(
     assert report["created"] == []
     assert report["referencedExisting"] == ["DR-0001"]
     assert len(list((project.context_path / "decisions").glob("*.md"))) == 1
-    assert "project:/decisions/DR-0001-use-session-notes-as-primary-input.md" in second.read_text(encoding="utf-8")
+    assert "project:/decisions/" not in second.read_text(encoding="utf-8")
     decision_text = (project.context_path / "decisions/DR-0001-use-session-notes-as-primary-input.md").read_text(
         encoding="utf-8"
     )
@@ -416,8 +420,60 @@ def test_multiple_session_notes_synthesize_one_decision(
     assert decision_text.count("project:/sessions/two.md") == 2
     assert "- Limitations: Direct endpoint validation was incomplete." in decision_text
     assert 'promotionStatus: "no-action"' in decision_text
-    assert "project:/decisions/DR-0001-use-session-notes-as-primary-input.md" in first.read_text(encoding="utf-8")
-    assert "project:/decisions/DR-0001-use-session-notes-as-primary-input.md" in second.read_text(encoding="utf-8")
+    assert "project:/decisions/" not in first.read_text(encoding="utf-8")
+    assert "project:/decisions/" not in second.read_text(encoding="utf-8")
+
+
+def test_session_decision_backref_cleanup_is_explicit_and_updates_state_hash(
+    decision_project: tuple[Project, PipelineConfig],
+) -> None:
+    project, _config = decision_project
+    source = project.sessions_path / "one.md"
+    legacy = session_note().replace(
+        "distillationStatus: pending\ndistilledTo: []\n",
+        "distillationStatus: partial\n"
+        "distilledTo:\n"
+        '  - "project:/decisions/DR-0001-old.md"\n',
+    )
+    source.write_text(legacy, encoding="utf-8")
+    assert project.state_directory is not None
+    state_path = project.state_directory / DECISION_STATE_FILENAME
+    state_path.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "projectId": project.project_id,
+                "lastBuildAt": "2026-08-03T10:00:00+09:00",
+                "sources": {
+                    "sessions/one.md": {
+                        "sourceSha256": "0" * 64,
+                        "generationFingerprint": "fingerprint",
+                        "decisionIds": ["DR-0001"],
+                        "noAction": False,
+                        "processedAt": "2026-08-03T10:00:00+09:00",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    planned = cleanup_session_decision_backrefs(project, write=False)
+
+    assert planned["plannedSessionCount"] == 1
+    assert planned["changedSessionCount"] == 0
+    assert source.read_text(encoding="utf-8") == legacy
+
+    changed = cleanup_session_decision_backrefs(project, write=True)
+
+    assert changed["changedSessionCount"] == 1
+    cleaned = source.read_text(encoding="utf-8")
+    assert "project:/decisions/" not in cleaned
+    assert 'distillationStatus: "pending"' in cleaned
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["sources"]["sessions/one.md"]["decisionIds"] == ["DR-0001"]
+    assert state["sources"]["sessions/one.md"]["sourceSha256"] == sha256(source.read_bytes()).hexdigest()
+    assert state["lastSessionBackrefCleanupAt"]
 
 
 def test_no_action_is_remembered_without_finalizing_session(
@@ -445,7 +501,7 @@ def test_no_action_is_remembered_without_finalizing_session(
     assert scan["unchanged"] == 1
 
 
-def test_transaction_rolls_back_decision_and_session_when_state_write_fails(
+def test_transaction_rolls_back_decision_when_state_write_fails(
     decision_project: tuple[Project, PipelineConfig],
     tmp_path: Path,
 ) -> None:

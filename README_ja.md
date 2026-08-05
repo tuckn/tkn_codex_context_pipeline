@@ -14,35 +14,29 @@ Project folderにはmarker・設定・contextを一切書きません。
 
 ## インストール
 
-リポジトリ内のソースコードの変更を再インストールなしで反映するeditable
-installationを既定とします。
+次のコマンドでインストールします。例示している`C:\path\to\tkn_codex_context_pipeline`は、このリポジトリの実際のフォルダパスに置き換えてください。
 
 ```console
-uv tool install -e "C:\path\to\tkn_codex_context_pipeline"
+uv tool install "C:\path\to\tkn_codex_context_pipeline"
 tkn-codex-context --help
 ```
 
-例示したパスは、このリポジトリの実際のフォルダパスに置き換えてください。
-`-e` オプション editable installationでは、`git pull`後のPythonソースコードの変更が
-`tkn-codex-context`へそのまま反映されます。
+2つ目のコマンドは、インストール後に`tkn-codex-context`を実行できることを確認します。この方式では、インストール時点のコードが使用され、その後のリポジトリの変更は自動的に反映されません。
 
-既存installationをeditableへ切り替える場合:
+`git pull`などでリポジトリを更新するたびに、更新後のコードと依存モジュールをインストール済みのコマンドへ反映するため、次のコマンドで再インストールしてください。
+
+```console
+uv tool install "C:\path\to\tkn_codex_context_pipeline" --force
+tkn-codex-context --help
+```
+
+開発時には、代わりにeditable installationを使用できます。
 
 ```console
 uv tool install -e "C:\path\to\tkn_codex_context_pipeline" --force
 ```
 
-dependency、package metadata、entry pointを変更した場合、またはリポジトリを別の
-folderへ移動した場合は、editable installationでも上記コマンドを再実行してください。
-
-non-editable installationを使用する場合:
-
-```console
-uv tool install "C:\path\to\tkn_codex_context_pipeline" --force
-```
-
-non-editable installationは、その後のリポジトリ変更を追従しません。`git pull`後の
-変更をCLIへ反映するには、同じinstallコマンドを再実行する必要があります。
+`-e`（`--editable`）を指定すると、インストールされたコマンドはリポジトリ内のソースコードを直接参照するため、ソースコードの変更は再インストールせずに反映されます。ただし、更新によって`pyproject.toml`または`uv.lock`の依存モジュールが追加・変更された場合は、tool環境にも反映するため、同じeditable installationのコマンドを`--force`付きで再実行してください。
 
 ## 設定
 
@@ -351,10 +345,17 @@ tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --write
 `Proposed`にします。statusと実装・検証状態は別fieldで管理します。検証できなかった
 事項は`Verification`の`Limitations`に残し、format検証の成功と事実確認を区別します。
 
-保存に成功すると、入力Session Noteの`distillationStatus`を`partial`にし、
-`distilledTo`へ`project:/decisions/...`を追加します。生成結果がno-actionの場合は、
-working contextなど後続のdistillationを妨げないようSession Noteをfinalizeせず、
-`decision-build-state.json`だけに処理済み状態を記録します。
+Decision生成は入力Session Noteを変更しません。生成依存はDecision Record側の
+`sourceSessionRefs`に保持し、Session Noteごとの処理済み状態と逆引き`decisionIds`は
+`decision-build-state.json`へ記録します。run reportの`decisionRefs`でも今回の対応を
+確認できます。生成結果がno-actionの場合もstateだけに記録するため、同じSession Noteを
+working contextなど別の下流処理で利用できます。
+
+旧versionがSession Noteへ書いた`project:/decisions/...` back-referenceは、次回の
+`decisions build`で検出されます。read-only実行では
+`sessionBackrefCleanup.plannedSessionCount`として計画だけを表示し、`--write`実行時に
+その参照だけを除去します。除去後のSession Note hash、Decision provenance、stateは
+transactionとして揃えて更新します。
 
 source hashとdecision生成profileが同じSession Noteは次回`unchanged`としてスキップします。
 再評価する場合は、書き込みを明示したうえで`--force`を指定します。同一decisionは既存IDへ
