@@ -531,13 +531,6 @@ def _decision_report_summary(report: dict[str, Any]) -> dict[str, Any]:
             for key, value in scan.items()
             if type(value) is int
         }
-    cleanup = report.get("sessionBackrefCleanup")
-    if isinstance(cleanup, dict):
-        summary["sessionBackrefCleanup"] = {
-            "plannedSessionCount": int(cleanup.get("plannedSessionCount") or 0),
-            "changedSessionCount": int(cleanup.get("changedSessionCount") or 0),
-            "removedRefCount": int(cleanup.get("removedRefCount") or 0),
-        }
     return summary
 
 

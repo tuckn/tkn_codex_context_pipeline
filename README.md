@@ -376,12 +376,6 @@ Record keeps the forward dependency in `sourceSessionRefs`, while
 A no-action result is also state-only, leaving the same Session Note available
 for later working-context distillation.
 
-Legacy `project:/decisions/...` back-references in Session Notes are detected by
-the next `decisions build`. A read-only run reports the plan under
-`sessionBackrefCleanup.plannedSessionCount`; a `--write` run removes only those
-references and transactionally refreshes the Session Note hash, Decision
-provenance, and state.
-
 An unchanged Session Note with the same decision profile is skipped. Use
 `--force` together with the explicit write flag to re-evaluate it. A matching
 decision links to the existing ID. An unreviewed Codex-generated record may be

@@ -351,12 +351,6 @@ Decision生成は入力Session Noteを変更しません。生成依存はDecisi
 確認できます。生成結果がno-actionの場合もstateだけに記録するため、同じSession Noteを
 working contextなど別の下流処理で利用できます。
 
-旧versionがSession Noteへ書いた`project:/decisions/...` back-referenceは、次回の
-`decisions build`で検出されます。read-only実行では
-`sessionBackrefCleanup.plannedSessionCount`として計画だけを表示し、`--write`実行時に
-その参照だけを除去します。除去後のSession Note hash、Decision provenance、stateは
-transactionとして揃えて更新します。
-
 source hashとdecision生成profileが同じSession Noteは次回`unchanged`としてスキップします。
 再評価する場合は、書き込みを明示したうえで`--force`を指定します。同一decisionは既存IDへ
 紐付けます。`reviewStatus: unreviewed`のCodex生成recordは、複数Noteから得た訂正や重要な

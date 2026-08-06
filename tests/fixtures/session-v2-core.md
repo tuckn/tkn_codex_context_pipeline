@@ -5,8 +5,6 @@ title: Core Factual Session
 description: A session fixture containing only the required factual sections.
 generator: Codex
 status: done
-distillationStatus: no-action
-distilledTo: []
 date: 2026-02-02T09:00:00+09:00
 updated: 2026-02-02T10:00:00+09:00
 sessionId: 20260202T090000+0900

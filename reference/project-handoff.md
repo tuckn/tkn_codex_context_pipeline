@@ -213,6 +213,9 @@ Automatically generated notes include:
 - prompt and renderer versions
 - automated validation status
 
+Session Notes do not store downstream processing status or references. Each
+consumer owns its processing state and provenance independently.
+
 The parser includes user and assistant messages, tool actions/results,
 validation evidence, and cwd changes. Secret-like text is redacted and large
 event text is truncated before model input.
@@ -240,9 +243,7 @@ keep decision status, implementation status, and promotion status separate.
 Decision generation leaves source Session Notes unchanged. Decision Records
 own forward provenance through `sourceSessionRefs`; reverse `decisionIds`,
 source fingerprints, and no-action outcomes live in
-`decision-build-state.json`. A compatibility migration removes legacy
-`project:/decisions/...` Session Note back-references on a write run and updates
-affected provenance and state atomically.
+`decision-build-state.json`.
 
 ## Generation and commit safety
 

@@ -277,14 +277,12 @@ def scan_decision_sources(
         "eligible": 0,
         "unchanged": 0,
         "withoutExplicitDecision": 0,
-        "alreadyDistilled": 0,
         "invalid": 0,
     }
     for path in sorted(project.sessions_path.glob("*.md")):
         counts["total"] += 1
         try:
             source = _session_source(path, project)
-            lines, _body = split_frontmatter_lines(source.text)
         except (OSError, PipelineError, SystemExit) as exc:
             counts["invalid"] += 1
             failures.append({"sessionNote": path.name, "error": str(exc)})
@@ -300,14 +298,6 @@ def scan_decision_sources(
             ):
                 counts["unchanged"] += 1
                 continue
-        distilled_to = frontmatter_list_value(lines, "distilledTo")
-        if (
-            not force
-            and not isinstance(source_state, dict)
-            and any(re.match(r"^project:/decisions/DR-[0-9]{4}-", value) for value in distilled_to)
-        ):
-            counts["alreadyDistilled"] += 1
-            continue
         counts["eligible"] += 1
         candidates.append(source)
     return candidates, counts, failures
@@ -864,98 +854,6 @@ def validate_decision_record(path: Path) -> dict[str, Any]:
     }
 
 
-def _is_decision_backref(value: str) -> bool:
-    return re.match(r"^project:/decisions/DR-[0-9]{4}-", value) is not None
-
-
-def cleanup_session_decision_backrefs(
-    project: Project,
-    *,
-    write: bool = False,
-) -> dict[str, Any]:
-    timestamp = now_iso()
-    planned: list[dict[str, Any]] = []
-    rendered_sessions: dict[Path, str] = {}
-    for path in sorted(project.sessions_path.glob("*.md")):
-        text = path.read_text(encoding="utf-8-sig")
-        lines, body = split_frontmatter_lines(text)
-        existing_refs = frontmatter_list_value(lines, "distilledTo")
-        removed_refs = [value for value in existing_refs if _is_decision_backref(value)]
-        if not removed_refs:
-            continue
-        remaining_refs = [value for value in existing_refs if not _is_decision_backref(value)]
-        updated_lines = replace_frontmatter_list(lines, "distilledTo", remaining_refs)
-        if not remaining_refs:
-            updated_lines = replace_frontmatter_scalar(updated_lines, "distillationStatus", "pending")
-        updated_lines = replace_frontmatter_scalar(updated_lines, "updated", timestamp)
-        relative_path = path.relative_to(project.context_path).as_posix()
-        planned.append(
-            {
-                "sessionNote": relative_path,
-                "removedDecisionRefs": removed_refs,
-                "remainingDistilledTo": remaining_refs,
-            }
-        )
-        rendered_sessions[path] = "".join(updated_lines) + body
-
-    report: dict[str, Any] = {
-        "dryRun": not write,
-        "plannedSessionCount": len(planned),
-        "changedSessionCount": 0,
-        "removedRefCount": sum(len(item["removedDecisionRefs"]) for item in planned),
-        "sessions": planned,
-    }
-    if not write or not rendered_sessions:
-        return report
-
-    state = load_decision_state(project)
-    state_path = decision_state_path(project)
-    old_state = state_path.read_bytes() if state_path.exists() else None
-    old_sessions = {path: path.read_bytes() for path in rendered_sessions}
-    changed_source_refs = {
-        f"project:/{path.relative_to(project.context_path).as_posix()}" for path in rendered_sessions
-    }
-    affected_decisions = [
-        decision
-        for decision in load_existing_decisions(project)
-        if changed_source_refs.intersection(decision.source_refs)
-    ]
-    old_decisions = {decision.path: decision.path.read_bytes() for decision in affected_decisions}
-    try:
-        for path, rendered in rendered_sessions.items():
-            atomic_write_text(path, rendered)
-            relative_path = path.relative_to(project.context_path).as_posix()
-            source_state = state["sources"].get(relative_path)
-            if isinstance(source_state, dict):
-                source_state["sourceSha256"] = sha256(path.read_bytes()).hexdigest()
-        for decision in affected_decisions:
-            text = decision.path.read_text(encoding="utf-8-sig")
-            lines, body = split_frontmatter_lines(text)
-            updated_lines = replace_frontmatter_scalar(
-                lines,
-                "sourceSessionSha256",
-                _source_refs_fingerprint(project, decision.source_refs),
-            )
-            updated_lines = replace_frontmatter_scalar(updated_lines, "updated", timestamp)
-            atomic_write_text(decision.path, "".join(updated_lines) + body)
-            validate_decision_record(decision.path)
-        state["lastSessionBackrefCleanupAt"] = timestamp
-        atomic_write_json(state_path, state)
-    except Exception:
-        for path, content in old_decisions.items():
-            atomic_write_text(path, content.decode("utf-8-sig"))
-        for path, content in old_sessions.items():
-            atomic_write_text(path, content.decode("utf-8-sig"))
-        if old_state is None:
-            if state_path.exists():
-                state_path.unlink()
-        else:
-            atomic_write_text(state_path, old_state.decode("utf-8-sig"))
-        raise
-    report["changedSessionCount"] = len(rendered_sessions)
-    return report
-
-
 def _next_decision_number(existing: Sequence[ExistingDecision]) -> int:
     numbers = [int(item.decision_id.removeprefix("DR-")) for item in existing]
     return max(numbers, default=0) + 1
@@ -1201,7 +1099,6 @@ def execute_decision_build(
     started = now_local()
     start_deadline = started + timedelta(minutes=config.runtime_minutes)
     hard_deadline = start_deadline + timedelta(minutes=IN_FLIGHT_GRACE_MINUTES)
-    backref_cleanup = cleanup_session_decision_backrefs(project, write=write)
     candidates, scan, scan_failures = scan_decision_sources(project, config, force=force)
     if limit is not None:
         if limit <= 0:
@@ -1217,7 +1114,6 @@ def execute_decision_build(
         "projectId": project.project_id,
         "dryRun": not write,
         "force": force,
-        "sessionBackrefCleanup": backref_cleanup,
         "scan": scan,
         "existingDecisionCount": len(existing),
         "selectedCount": len(candidates),

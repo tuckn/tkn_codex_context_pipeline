@@ -5,8 +5,6 @@ title: Legacy V1 Session
 description: An explicit v1 session fixture.
 generator: Codex
 status: done
-distillationStatus: pending
-distilledTo: []
 date: 2026-01-11T09:00:00+09:00
 updated: 2026-01-11T10:00:00+09:00
 sessionId: 20260111T090000+0900

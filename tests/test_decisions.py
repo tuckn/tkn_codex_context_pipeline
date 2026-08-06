@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,7 +15,6 @@ from tkn_codex_context.decisions import (
     DECISION_STATE_FILENAME,
     DecisionSource,
     ExistingDecision,
-    cleanup_session_decision_backrefs,
     execute_decision_build,
     scan_decision_sources,
     validate_decision_output,
@@ -41,8 +39,6 @@ def session_note(*, title: str = "Decision source", explicit: bool = True) -> st
         "generator: Codex\n"
         "status: done\n"
         "reviewStatus: unreviewed\n"
-        "distillationStatus: pending\n"
-        "distilledTo: []\n"
         "date: 2026-08-03T09:00:00+09:00\n"
         "updated: 2026-08-03T10:00:00+09:00\n"
         "sessionId: 20260803T090000+0900\n"
@@ -422,58 +418,6 @@ def test_multiple_session_notes_synthesize_one_decision(
     assert 'promotionStatus: "no-action"' in decision_text
     assert "project:/decisions/" not in first.read_text(encoding="utf-8")
     assert "project:/decisions/" not in second.read_text(encoding="utf-8")
-
-
-def test_session_decision_backref_cleanup_is_explicit_and_updates_state_hash(
-    decision_project: tuple[Project, PipelineConfig],
-) -> None:
-    project, _config = decision_project
-    source = project.sessions_path / "one.md"
-    legacy = session_note().replace(
-        "distillationStatus: pending\ndistilledTo: []\n",
-        "distillationStatus: partial\n"
-        "distilledTo:\n"
-        '  - "project:/decisions/DR-0001-old.md"\n',
-    )
-    source.write_text(legacy, encoding="utf-8")
-    assert project.state_directory is not None
-    state_path = project.state_directory / DECISION_STATE_FILENAME
-    state_path.write_text(
-        json.dumps(
-            {
-                "schemaVersion": 1,
-                "projectId": project.project_id,
-                "lastBuildAt": "2026-08-03T10:00:00+09:00",
-                "sources": {
-                    "sessions/one.md": {
-                        "sourceSha256": "0" * 64,
-                        "generationFingerprint": "fingerprint",
-                        "decisionIds": ["DR-0001"],
-                        "noAction": False,
-                        "processedAt": "2026-08-03T10:00:00+09:00",
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    planned = cleanup_session_decision_backrefs(project, write=False)
-
-    assert planned["plannedSessionCount"] == 1
-    assert planned["changedSessionCount"] == 0
-    assert source.read_text(encoding="utf-8") == legacy
-
-    changed = cleanup_session_decision_backrefs(project, write=True)
-
-    assert changed["changedSessionCount"] == 1
-    cleaned = source.read_text(encoding="utf-8")
-    assert "project:/decisions/" not in cleaned
-    assert 'distillationStatus: "pending"' in cleaned
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    assert state["sources"]["sessions/one.md"]["decisionIds"] == ["DR-0001"]
-    assert state["sources"]["sessions/one.md"]["sourceSha256"] == sha256(source.read_bytes()).hexdigest()
-    assert state["lastSessionBackrefCleanupAt"]
 
 
 def test_no_action_is_remembered_without_finalizing_session(

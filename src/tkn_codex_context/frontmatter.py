@@ -139,34 +139,6 @@ def ensure_artifact_schema_version(
     return lines[:insert_at] + [f"schemaVersion: {version}\n"] + lines[insert_at:]
 
 
-def normalized_context_ref(value: str) -> str:
-    return value.strip().replace("\\", "/")
-
-
-def validate_distilled_to_ref(value: str) -> str:
-    ref = normalized_context_ref(value)
-    if not ref:
-        raise SystemExit("distilledTo path cannot be empty.")
-    if re.match(r"^[A-Za-z]:/", ref):
-        raise SystemExit(f"Refusing Windows absolute distilledTo path: {value}")
-    if ref.startswith("//"):
-        raise SystemExit(f"Refusing UNC distilledTo path: {value}")
-    if ref.startswith("/"):
-        raise SystemExit(f"Refusing absolute distilledTo path: {value}")
-    allowed_home_refs = (
-        "~/.tkn/codex-context/",
-        "~/.codex-working/",
-    )
-    if ref == "~" or (ref.startswith("~/") and not ref.startswith(allowed_home_refs)):
-        raise SystemExit(
-            "Only ~/.tkn/codex-context or explicit ~/.codex-working paths are allowed "
-            f"for home-relative distilledTo refs: {value}"
-        )
-    if ref == ".." or ref.startswith("../") or "/../" in ref:
-        raise SystemExit(f"Refusing parent-traversal distilledTo path: {value}")
-    return ref
-
-
 def unique_ordered(values: Iterable[str]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []

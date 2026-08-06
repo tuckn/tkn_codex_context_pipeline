@@ -4,8 +4,6 @@ title: Legacy Unversioned Session
 description: A realistic unversioned v1 session fixture.
 generator: Codex
 status: done
-distillationStatus: pending
-distilledTo: []
 date: 2026-01-10T09:00:00+09:00
 updated: 2026-01-10T10:00:00+09:00
 sessionId: 20260110T090000+0900

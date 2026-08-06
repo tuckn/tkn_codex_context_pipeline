@@ -5,8 +5,6 @@ title: Factual Session Contract
 description: The session writer was rebuilt as a source-near factual digest.
 generator: Codex
 status: done
-distillationStatus: pending
-distilledTo: []
 date: 2026-02-01T09:00:00+09:00
 updated: 2026-02-01T10:00:00+09:00
 sessionId: 20260201T090000+0900
