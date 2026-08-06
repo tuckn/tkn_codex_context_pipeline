@@ -26,17 +26,26 @@ tkn-codex-context --help
 `git pull`などでリポジトリを更新するたびに、更新後のコードと依存モジュールをインストール済みのコマンドへ反映するため、次のコマンドで再インストールしてください。
 
 ```console
-uv tool install "C:\path\to\tkn_codex_context_pipeline" --force
+uv tool install "C:\path\to\tkn_codex_context_pipeline"
 tkn-codex-context --help
 ```
 
 開発時には、代わりにeditable installationを使用できます。
 
 ```console
-uv tool install -e "C:\path\to\tkn_codex_context_pipeline" --force
+uv tool install -e "C:\path\to\tkn_codex_context_pipeline"
 ```
 
-`-e`（`--editable`）を指定すると、インストールされたコマンドはリポジトリ内のソースコードを直接参照するため、ソースコードの変更は再インストールせずに反映されます。ただし、更新によって`pyproject.toml`または`uv.lock`の依存モジュールが追加・変更された場合は、tool環境にも反映するため、同じeditable installationのコマンドを`--force`付きで再実行してください。
+`-e`（`--editable`）を指定すると、インストールされたコマンドはリポジトリ内のソースコードを直接参照するため、ソースコードの変更は再インストールせずに反映されます。ただし、更新によって`pyproject.toml`の依存関係、package metadata、entry pointが変更された場合は、tool環境にも反映するため、同じeditable installationのコマンドを再実行してください。
+
+通常の再インストールが失敗する、インストール済みコマンドが古い依存関係を使い続ける、またはtool環境やentry pointが壊れている場合は、`--force`を指定してtool環境を再作成してください。
+
+```console
+uv tool install "C:\path\to\tkn_codex_context_pipeline" --force
+tkn-codex-context --help
+```
+
+editable installationをeditableのまま修復する場合は、`--force`付きのインストールコマンドに`-e`も指定してください。
 
 ## 設定
 

@@ -28,17 +28,26 @@ The second command confirms that `tkn-codex-context` can be run after installati
 Reinstall after every repository update, such as after `git pull`, to make the updated code and dependencies available to the installed command:
 
 ```console
-uv tool install "C:\path\to\tkn_codex_context_pipeline" --force
+uv tool install "C:\path\to\tkn_codex_context_pipeline"
 tkn-codex-context --help
 ```
 
 For development, an editable installation can be used instead:
 
 ```console
-uv tool install -e "C:\path\to\tkn_codex_context_pipeline" --force
+uv tool install -e "C:\path\to\tkn_codex_context_pipeline"
 ```
 
-The `-e` (`--editable`) option makes the installed command reference the repository source code directly, so source-code edits take effect without reinstallation. If an update adds or changes dependencies in `pyproject.toml` or `uv.lock`, reinstall with the same editable command and `--force` so that the tool environment is updated too.
+The `-e` (`--editable`) option makes the installed command reference the repository source code directly, so source-code edits take effect without reinstallation. If an update changes dependencies in `pyproject.toml`, package metadata, or entry points, run the same editable installation command again to update the tool environment.
+
+If a normal reinstall fails, the installed command still uses stale dependencies, or the tool environment or entry point is damaged, recreate the tool environment with `--force`:
+
+```console
+uv tool install "C:\path\to\tkn_codex_context_pipeline" --force
+tkn-codex-context --help
+```
+
+To repair an editable installation while preserving editable mode, add `-e` to the forced installation command.
 
 ## Configuration
 
