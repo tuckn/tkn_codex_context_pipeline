@@ -19,27 +19,23 @@ DECISION_PROFILES_ROOT = "profiles/decision"
 PROMPT_FILENAME = "prompt.md"
 SCHEMA_FILENAME = "output.schema.json"
 TEMPLATE_FILENAME = "template.md"
-REQUIRED_TEMPLATE_FIELDS = frozenset(
+ALWAYS_TEMPLATE_FIELDS = frozenset({"frontmatter", "title", "decision"})
+OPTIONAL_TEMPLATE_FIELDS = frozenset(
     {
-        "frontmatter",
-        "title",
-        "context",
-        "decision",
-        "rationale",
-        "benefits",
-        "costs_and_risks",
-        "alternatives_considered",
-        "applies_when",
-        "does_not_apply_when",
-        "reusable_principle",
-        "project_specific_details",
+        "why",
+        "consequences",
+        "alternatives",
+        "scope",
         "verification",
         "related_evidence",
-        "materialization",
+        "follow_up",
         "supersession",
     }
 )
+REQUIRED_TEMPLATE_FIELDS = ALWAYS_TEMPLATE_FIELDS | OPTIONAL_TEMPLATE_FIELDS
 _PLACEHOLDER = re.compile(r"\{\{([a-z][a-z0-9_]*)\}\}")
+_OPTIONAL_BLOCK_START = re.compile(r"\{\{\?([a-z][a-z0-9_]*)\}\}")
+_OPTIONAL_BLOCK_END = re.compile(r"\{\{/([a-z][a-z0-9_]*)\}\}")
 
 
 @dataclass(frozen=True)
@@ -151,6 +147,18 @@ def load_decision_template(profile_name: str = DEFAULT_DECISION_PROFILE) -> Deci
         raise RuntimeError(
             f"decision template must contain each required placeholder exactly once ({expected}): {source}"
         )
+    optional_starts = _OPTIONAL_BLOCK_START.findall(body)
+    optional_ends = _OPTIONAL_BLOCK_END.findall(body)
+    if (
+        set(optional_starts) != OPTIONAL_TEMPLATE_FIELDS
+        or set(optional_ends) != OPTIONAL_TEMPLATE_FIELDS
+        or any(optional_starts.count(field) != 1 for field in OPTIONAL_TEMPLATE_FIELDS)
+        or any(optional_ends.count(field) != 1 for field in OPTIONAL_TEMPLATE_FIELDS)
+    ):
+        expected = ", ".join(sorted(OPTIONAL_TEMPLATE_FIELDS))
+        raise RuntimeError(
+            f"decision template must wrap each optional placeholder in one matching block ({expected}): {source}"
+        )
     return DecisionTemplate(
         template_id=template_id,
         version=version.strip(),
@@ -196,8 +204,18 @@ def render_decision_template(template: DecisionTemplate, values: dict[str, str])
             details.append("extra=" + ",".join(extra))
         raise ValueError("invalid decision template values: " + "; ".join(details))
     rendered = template.body
+    for field in OPTIONAL_TEMPLATE_FIELDS:
+        pattern = re.compile(
+            rf"\{{\{{\?{re.escape(field)}\}}\}}(.*?)\{{\{{/{re.escape(field)}\}}\}}",
+            re.DOTALL,
+        )
+        match = pattern.search(rendered)
+        if match is None:
+            raise ValueError(f"decision template is missing optional block: {field}")
+        replacement = match.group(1) if values[field].strip() else ""
+        rendered = rendered[: match.start()] + replacement + rendered[match.end() :]
     for field in REQUIRED_TEMPLATE_FIELDS:
         rendered = rendered.replace(f"{{{{{field}}}}}", values[field])
-    if _PLACEHOLDER.search(rendered):
+    if _PLACEHOLDER.search(rendered) or _OPTIONAL_BLOCK_START.search(rendered) or _OPTIONAL_BLOCK_END.search(rendered):
         raise ValueError("decision template contains unresolved placeholders")
-    return rendered.rstrip() + "\n"
+    return re.sub(r"\n{3,}", "\n\n", rendered).rstrip() + "\n"

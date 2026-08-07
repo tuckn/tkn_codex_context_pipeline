@@ -1,7 +1,7 @@
 ---
 type: prompt
 id: 3eb50b1e-aac2-4e98-9b54-f284179d3d77
-version: "2.1"
+version: "3.0"
 ---
 
 # Default decision distillation instructions
@@ -30,6 +30,10 @@ normal knowledge note.
   checks in `verificationLimitations`; do not hide them behind other evidence.
 - Prefer corrections and later source statements over superseded statements.
 - Use an empty array or empty string when a field is not established.
+- Keep fields non-redundant. Do not repeat the decision as rationale, a context
+  fact as a consequence, or verification evidence as a project-specific detail.
+- The Decision Record v3 renderer omits empty optional sections. Do not add
+  filler merely to make an optional field visible.
 - Write natural Japanese except for headings, paths, commands, identifiers, and
   product names.
 
@@ -105,7 +109,8 @@ quality contract.
   decision. Session Notes and Decision Records are evidence artifacts, not
   repository documentation destinations. Do not place input session refs,
   `DR-NNNN` files, or this generated record in `repositoryDocumentation`. Use
-  empty arrays when no downstream destination is stated.
+  empty arrays when no downstream destination is stated. The v3 artifact stores
+  destination arrays in Frontmatter and renders only `followUp` in the body.
 - `supersedes` and `supersededBy`: exact known decision IDs or durable artifact
   references only.
 

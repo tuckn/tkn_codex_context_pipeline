@@ -1,68 +1,52 @@
 ---
 type: template
 id: f4d74218-1ae8-43c0-b03c-6620b4698560
-version: "1.0"
+version: "2.0"
 ---
 {{frontmatter}}
 
 # {{title}}
 
-## Context
-
-{{context}}
-
 ## Decision
 
 {{decision}}
+{{?why}}
+## Why
 
-## Rationale
-
-{{rationale}}
-
+{{why}}
+{{/why}}
+{{?consequences}}
 ## Consequences
 
-### Benefits
+{{consequences}}
+{{/consequences}}
+{{?alternatives}}
+## Alternatives
 
-{{benefits}}
+{{alternatives}}
+{{/alternatives}}
+{{?scope}}
+## Scope
 
-### Costs And Risks
-
-{{costs_and_risks}}
-
-## Alternatives Considered
-
-{{alternatives_considered}}
-
-## Applicability
-
-### Applies When
-
-{{applies_when}}
-
-### Does Not Apply When
-
-{{does_not_apply_when}}
-
-### Reusable Principle
-
-{{reusable_principle}}
-
-### Project-Specific Details
-
-{{project_specific_details}}
-
+{{scope}}
+{{/scope}}
+{{?verification}}
 ## Verification
 
 {{verification}}
-
+{{/verification}}
+{{?related_evidence}}
 ## Related Evidence
 
 {{related_evidence}}
+{{/related_evidence}}
+{{?follow_up}}
+## Follow-up
 
-## Materialization
-
-{{materialization}}
-
+{{follow_up}}
+{{/follow_up}}
+{{?supersession}}
 ## Supersession
 
 {{supersession}}
+{{/supersession}}

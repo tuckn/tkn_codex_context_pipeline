@@ -14,6 +14,7 @@ SUPPORTED_ARTIFACT_SCHEMA_VERSIONS = {
     LEGACY_ARTIFACT_SCHEMA_VERSION,
     ARTIFACT_SCHEMA_VERSION,
 }
+DECISION_ARTIFACT_SCHEMA_VERSION = "3"
 
 
 def strip_frontmatter(text: str) -> str:
@@ -119,8 +120,11 @@ def require_supported_artifact_schema(
 ) -> str:
     """Treat unversioned artifacts as v1 and reject unknown versions."""
     version = metadata.get("schemaVersion") or LEGACY_ARTIFACT_SCHEMA_VERSION
-    if version not in SUPPORTED_ARTIFACT_SCHEMA_VERSIONS:
-        supported = ", ".join(sorted(SUPPORTED_ARTIFACT_SCHEMA_VERSIONS))
+    supported_versions = set(SUPPORTED_ARTIFACT_SCHEMA_VERSIONS)
+    if artifact_label == "decision record":
+        supported_versions.add(DECISION_ARTIFACT_SCHEMA_VERSION)
+    if version not in supported_versions:
+        supported = ", ".join(sorted(supported_versions))
         raise SystemExit(f"Unsupported {artifact_label} schemaVersion: {version}. Supported versions: {supported}.")
     return version
 

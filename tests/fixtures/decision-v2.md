@@ -9,6 +9,12 @@ scope: mixed
 implementationStatus: verified
 promotionStatus: pending
 promotedTo: []
+promptVersion: "2.1"
+reviewStatus: reviewed
+automatedValidation: passed
+sourceSessionRefs:
+  - project:/sessions/example.md
+sourceSessionSha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 date: 2026-02-02T09:00:00+09:00
 updated: 2026-02-02T10:00:00+09:00
 decisionId: DR-0003
@@ -63,6 +69,7 @@ The version must describe the actual artifact contract.
 ## Verification
 
 - Evidence: Compatibility tests.
+- Limitations: None.
 - Validation Date: 2026-02-02
 
 ## Related Evidence

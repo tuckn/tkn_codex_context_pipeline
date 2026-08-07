@@ -1,7 +1,7 @@
 # Tkn Codex Context Pipeline
 
 Codex appのProject状態と`~/.codex/sessions`を読み、chatを再利用可能な
-Session Note v2へ変換し、そこからdurableなDecision Record v2を生成する、
+Session Note v2へ変換し、そこから簡潔なDecision Record v3を生成する、
 独立したローカルデータパイプラインです。
 Project folderにはmarker・設定・contextを一切書きません。
 
@@ -26,26 +26,19 @@ tkn-codex-context --help
 `git pull`などでリポジトリを更新するたびに、更新後のコードと依存モジュールをインストール済みのコマンドへ反映するため、次のコマンドで再インストールしてください。
 
 ```console
-uv tool install "C:\path\to\tkn_codex_context_pipeline"
+uv tool install "C:\path\to\tkn_codex_context_pipeline" --reinstall
 tkn-codex-context --help
 ```
+
+リポジトリ更新後は`--reinstall`を使用し、tool環境内のすべてのpackageを再インストールして、cacheされたpackage dataも更新します。`--force`は既存tool環境の再作成や競合するentry pointの置き換えに使用するoptionであり、通常のリポジトリ更新には使用しません。
 
 開発時には、代わりにeditable installationを使用できます。
 
 ```console
-uv tool install -e "C:\path\to\tkn_codex_context_pipeline"
+uv tool install -e "C:\path\to\tkn_codex_context_pipeline" --reinstall
 ```
 
-`-e`（`--editable`）を指定すると、インストールされたコマンドはリポジトリ内のソースコードを直接参照するため、ソースコードの変更は再インストールせずに反映されます。ただし、更新によって`pyproject.toml`の依存関係、package metadata、entry pointが変更された場合は、tool環境にも反映するため、同じeditable installationのコマンドを再実行してください。
-
-通常の再インストールが失敗する、インストール済みコマンドが古い依存関係を使い続ける、またはtool環境やentry pointが壊れている場合は、`--force`を指定してtool環境を再作成してください。
-
-```console
-uv tool install "C:\path\to\tkn_codex_context_pipeline" --force
-tkn-codex-context --help
-```
-
-editable installationをeditableのまま修復する場合は、`--force`付きのインストールコマンドに`-e`も指定してください。
+`-e`（`--editable`）を指定すると、インストールされたコマンドはリポジトリ内のソースコードを直接参照するため、ソースコードだけの変更は再インストールせずに反映されます。`pyproject.toml`または`uv.lock`の依存関係を変更した場合、package metadataやentry pointを変更した場合、リポジトリfolderを移動・renameした場合、またはeditable installationが古い場所を参照している可能性がある場合は、同じeditable installationのコマンドを`--reinstall`付きで再実行してください。
 
 ## 設定
 
@@ -348,11 +341,47 @@ tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --write
 ```
 
 新規recordは`data/projects/<projectId>/decisions/DR-NNNN-<slug>.md`に保存します。
-各recordは`Context`、`Decision`、`Rationale`、`Consequences`、`Applicability`、
-`Verification`、`Materialization`、`Supersession`を持ちます。明示的なuser acceptance
-または成立済みのoperational practiceが確認できる場合だけ`Accepted`とし、それ以外は
-`Proposed`にします。statusと実装・検証状態は別fieldで管理します。検証できなかった
-事項は`Verification`の`Limitations`に残し、format検証の成功と事実確認を区別します。
+新規生成するDecision Record v3は`Decision`だけを常設し、それ以外のsectionは
+source-backedな内容がある場合だけ表示します。空のsectionや`None.` placeholderは出力しません。
+明示的なuser acceptanceまたは成立済みのoperational practiceが確認できる場合だけ
+`Accepted`とし、それ以外は`Proposed`にします。statusと実装・検証状態は別fieldで
+管理します。検証できなかった事項は`Verification`の`Limitations`に残し、format検証の
+成功と事実確認を区別します。
+
+#### Decision Recordの読み方
+
+Decision Recordは議事録ではなく、後続作業を導く1つの判断を保存する記録です。
+最初に`Decision`を読み、表示されている任意sectionだけを必要に応じて確認します。
+
+| section | 読み取る内容 |
+| --- | --- |
+| `Decision` | 後続の作業を導く中心的な判断 |
+| `Why` | 判断が必要になった背景と、その判断を選んだ理由 |
+| `Consequences` | benefitと、同時に受け入れたcost・risk |
+| `Alternatives` | 検討したが採用しなかった選択肢 |
+| `Scope` | 適用条件、適用外、再利用できる原則、Project固有の詳細 |
+| `Verification` | 確認済みの根拠、未確認事項・制約、確認日 |
+| `Related Evidence` | 判断の根拠となったSession Note、file、specなど |
+| `Follow-up` | 判断後に残っている具体的な作業 |
+| `Supersession` | 置き換えた判断、またはこの判断を置き換えた新しい判断 |
+
+先頭のFrontmatterは主に検索、状態管理、再現性確認のためのmetadataです。通常は
+`description`、`status`、`implementationStatus`、`reviewStatus`だけ確認すれば十分です。
+`status`は判断自体が`Proposed`、`Accepted`などのどの状態か、
+`implementationStatus`は未着手、途中、実装済み、検証済みのどこまで進んだかを示します。
+`reviewStatus`は人が内容をreviewしたか、`automatedValidation`は必須fieldや構造の自動検証に
+通ったかを示します。`automatedValidation: passed`は、記載された事実や実環境を人が確認した
+という意味ではありません。`sourceSessionRefs`は根拠となったSession Note、
+`promotionStatus`と`promotedTo`は再利用可能な原則やglobal contextなど、Project内の
+Decision Recordより広い範囲への昇格状態です。model、prompt、schema、hash、生成日時などの
+fieldは生成条件の追跡用なので、通常の初読では読み飛ばせます。working context、repository
+文書、global context、Skillへの反映先もFrontmatterの`*Targets` fieldで管理し、本文には
+表示しません。
+
+既存のDecision Record v1とreview済みv2はそのまま読み取り、自動上書きしません。
+Codex生成かつ`reviewStatus: unreviewed`のv2は、対象を確認して
+`decisions build --write`を実行したときに、IDと初回dateを保ってv3へ再構成できます。
+書き込みなしの計画確認だけでは変更しません。
 
 Decision生成は入力Session Noteを変更しません。生成依存はDecision Record側の
 `sourceSessionRefs`に保持し、Session Noteごとの処理済み状態と逆引き`decisionIds`は
@@ -370,7 +399,7 @@ judgmentは自動更新せず、新しい`sourceSessionRefs`と`Related Evidence
 tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --write --force
 ```
 
-生成したDecision Record v2は単独でvalidateできます。
+生成したDecision Record v3と既存のv2は単独でvalidateできます。
 
 ```powershell
 tkn-codex-context decisions validate <decision-record.md>

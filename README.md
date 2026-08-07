@@ -2,7 +2,7 @@
 
 An independent, local-first pipeline that reads Codex app Project state and
 `~/.codex/sessions`, generates durable Session Note v2 Markdown files, and
-distills durable Decision Record v2 files from those notes.
+distills concise Decision Record v3 files from those notes.
 It never writes markers, configuration, or context into a Project folder.
 
 Japanese documentation: [README_ja.md](README_ja.md)
@@ -28,26 +28,19 @@ The second command confirms that `tkn-codex-context` can be run after installati
 Reinstall after every repository update, such as after `git pull`, to make the updated code and dependencies available to the installed command:
 
 ```console
-uv tool install "C:\path\to\tkn_codex_context_pipeline"
+uv tool install "C:\path\to\tkn_codex_context_pipeline" --reinstall
 tkn-codex-context --help
 ```
+
+Use `--reinstall` after a repository update to reinstall all packages in the tool environment and refresh cached package data. `--force` is intended to recreate an existing tool environment and replace conflicting entry points; it is not the normal repository-update option.
 
 For development, an editable installation can be used instead:
 
 ```console
-uv tool install -e "C:\path\to\tkn_codex_context_pipeline"
+uv tool install -e "C:\path\to\tkn_codex_context_pipeline" --reinstall
 ```
 
-The `-e` (`--editable`) option makes the installed command reference the repository source code directly, so source-code edits take effect without reinstallation. If an update changes dependencies in `pyproject.toml`, package metadata, or entry points, run the same editable installation command again to update the tool environment.
-
-If a normal reinstall fails, the installed command still uses stale dependencies, or the tool environment or entry point is damaged, recreate the tool environment with `--force`:
-
-```console
-uv tool install "C:\path\to\tkn_codex_context_pipeline" --force
-tkn-codex-context --help
-```
-
-To repair an editable installation while preserving editable mode, add `-e` to the forced installation command.
+The `-e` (`--editable`) option makes the installed command reference the repository source code directly, so source-code-only edits take effect without reinstallation. Run the same editable installation command with `--reinstall` after changing dependencies in `pyproject.toml` or `uv.lock`, changing package metadata or entry points, moving or renaming the repository folder, or when the editable installation may still reference an old location.
 
 ## Configuration
 
@@ -370,13 +363,55 @@ tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --write
 ```
 
 New records are stored under
-`data/projects/<projectId>/decisions/DR-NNNN-<slug>.md`. Each record contains
-Context, Decision, Rationale, Consequences, Applicability, Verification,
-Materialization, and Supersession sections. A decision is `Accepted` only when
-the source establishes explicit user acceptance or an operational practice
-that is already in effect; otherwise it is `Proposed`. Decision status and
-implementation/verification status remain separate fields. Incomplete or
-blocked verification is retained under `Verification` as `Limitations`.
+`data/projects/<projectId>/decisions/DR-NNNN-<slug>.md`. A newly generated
+Decision Record v3 always contains `Decision` and renders every other section
+only when it has source-backed content. Empty sections and `None.` placeholders
+are omitted. A decision is `Accepted` only when the source establishes explicit
+user acceptance or an operational practice that is already in effect;
+otherwise it is `Proposed`. Decision status and implementation/verification
+status remain separate fields. Incomplete or blocked verification is retained
+under `Verification` as `Limitations`.
+
+#### How to read a Decision Record
+
+A Decision Record is not a meeting transcript. It preserves one judgment that
+should guide later work. Read `Decision` first, then inspect only the optional
+sections that are present and relevant.
+
+| Section | What it tells you |
+| --- | --- |
+| `Decision` | The central judgment that should guide later work |
+| `Why` | Why the decision was needed and the explicit reasons for choosing it |
+| `Consequences` | Benefits together with accepted costs and risks |
+| `Alternatives` | Options considered but not selected |
+| `Scope` | Applicability boundaries, reusable principles, and Project-specific details |
+| `Verification` | Supporting checks, limitations, and the validation date |
+| `Related Evidence` | Supporting Session Notes, files, specifications, or other evidence |
+| `Follow-up` | Concrete work that remains after the decision |
+| `Supersession` | Earlier decisions replaced by this one, or a later decision that replaces it |
+
+The frontmatter primarily supports search, state management, and reproducible
+generation. For ordinary reading, `description`, `status`,
+`implementationStatus`, and `reviewStatus` are usually enough. `status` says
+whether the decision itself is `Proposed`, `Accepted`, or in another lifecycle
+state. `implementationStatus` separately shows whether it is not started,
+partial, implemented, or verified. `reviewStatus` says whether a person has
+reviewed the content. `automatedValidation` only reports structural validation
+of required fields and formatting; `passed` does not mean that a person verified
+the stated facts or the live environment. `sourceSessionRefs` identifies the
+supporting Session Notes, while `promotionStatus` and `promotedTo` track
+promotion beyond the Project Decision Record into reusable principles, global
+context, or other wider context. Model, prompt, schema, hash, and
+generation-time fields can normally be skipped on a first read because they
+record generation provenance. Targets for working context, repository
+documentation, global context, and Skills are also kept in `*Targets`
+frontmatter fields instead of the body.
+
+Existing Decision Record v1 and reviewed v2 files remain readable and are not
+automatically rewritten. A Codex-generated v2 record with
+`reviewStatus: unreviewed` can be resynthesized as v3 while preserving its ID
+and original date when the user reviews the selection and explicitly runs
+`decisions build --write`. Read-only planning does not change it.
 
 Decision generation does not modify its input Session Notes. The Decision
 Record keeps the forward dependency in `sourceSessionRefs`, while
@@ -397,7 +432,8 @@ central judgment rewritten automatically; only new `sourceSessionRefs` and
 tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --write --force
 ```
 
-Validate one generated Decision Record v2 without changing it:
+Validate a generated Decision Record v3 or an existing v2 record without
+changing it:
 
 ```powershell
 tkn-codex-context decisions validate <decision-record.md>

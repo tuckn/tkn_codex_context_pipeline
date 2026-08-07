@@ -1,19 +1,19 @@
 # Project Handoff: Session Note and Decision Record CLI
 
-Updated: 2026-08-03
+Updated: 2026-08-08
 
 ## Project purpose
 
 This repository contains an independent, local-first data pipeline that turns
 Codex app chats into durable Session Note v2 artifacts and distills durable
-Decision Record v2 artifacts from those notes.
+Decision Record v3 artifacts from those notes.
 
 The larger context-engineering flow is:
 
 ```text
 raw Codex chat
   -> factual Session Note v2
-  -> durable Decision Record v2
+  -> concise Decision Record v3
   -> current working context
   -> cross-project knowledge
 ```
@@ -224,7 +224,7 @@ Unchanged source and generator fingerprints are a no-op and do not call the
 model. A changed generator fingerprint causes regeneration even if the source
 chat is unchanged.
 
-## Decision Record v2 contract
+## Decision Record v3 contract
 
 `decisions build` scans current Session Note v2 files with an `Explicit
 Decision` development. Planning is read-only and does not call the model.
@@ -235,10 +235,18 @@ Session Note may support multiple decisions. Each new central decision becomes
 one `DR-NNNN-<slug>.md` file, or links to an existing decision ID when the model
 identifies the same decision.
 
-Required body sections are `Context`, `Decision`, `Rationale`, `Consequences`,
-`Alternatives Considered`, `Applicability`, `Verification`, `Related Evidence`,
-`Materialization`, and `Supersession`. New records use `schemaVersion: 2` and
-keep decision status, implementation status, and promotion status separate.
+`Decision` is the only body section rendered for every record. `Why`,
+`Consequences`, `Alternatives`, `Scope`, `Verification`, `Related Evidence`,
+`Follow-up`, and `Supersession` are rendered only when they contain
+source-backed content. Empty values remain available to structured processing
+but do not become `None.` placeholders in human-readable Markdown. New records
+use `schemaVersion: 3` and keep decision status, implementation status, and
+promotion status separate. Materialization targets for working context,
+repository documentation, global context, and Skills are stored in Frontmatter
+instead of the body. Existing v1 and reviewed v2 records remain readable and
+are not automatically rewritten. Codex-generated unreviewed v2 records are
+quality-upgrade candidates and can be resynthesized as v3 only during an
+explicit write run while preserving their ID and original date.
 
 Decision generation leaves source Session Notes unchanged. Decision Records
 own forward provenance through `sourceSessionRefs`; reverse `decisionIds`,
@@ -297,7 +305,8 @@ Tests cover:
 - historical aliases and unknown registry-field preservation
 - explicit assignment, cwd fallback, projectless, and ambiguous exclusion
 - Session Note v2 schema and WI hierarchy
-- Decision Record v2 structure, deduplication references, no-action state, and
+- Decision Record v3 conditional structure, v2 compatibility, deduplication
+  references, no-action state, and
   Session Note distillation metadata
 - source provenance, redaction, size limits, and status consistency
 - unchanged no-op and stale-generator regeneration

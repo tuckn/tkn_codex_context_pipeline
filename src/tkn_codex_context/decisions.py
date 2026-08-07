@@ -45,9 +45,9 @@ from .session_notes import (
 )
 from .summary_resources import validate_summary_output_schema
 
-DECISION_SCHEMA_VERSION = 2
+DECISION_SCHEMA_VERSION = 3
 DECISION_STATE_SCHEMA_VERSION = 1
-DECISION_RENDERER_VERSION = 2
+DECISION_RENDERER_VERSION = 3
 DECISION_STATE_FILENAME = "decision-build-state.json"
 MAX_EXISTING_DECISION_INDEX = 200
 MAX_SOURCE_NOTE_CHARACTERS = 20_000
@@ -89,14 +89,17 @@ class ExistingDecision:
     @property
     def update_allowed(self) -> bool:
         return (
-            self.schema_version == str(DECISION_SCHEMA_VERSION)
+            self.schema_version in {"2", str(DECISION_SCHEMA_VERSION)}
             and self.generator == "Codex"
             and self.review_status == "unreviewed"
         )
 
     @property
     def quality_upgrade_required(self) -> bool:
-        return self.update_allowed and self.prompt_version != DECISION_PROFILE.prompt.version
+        return self.update_allowed and (
+            self.schema_version != str(DECISION_SCHEMA_VERSION)
+            or self.prompt_version != DECISION_PROFILE.prompt.version
+        )
 
     def as_prompt_dict(self) -> dict[str, Any]:
         return {
@@ -204,7 +207,7 @@ def load_existing_decisions(project: Project) -> list[ExistingDecision]:
         text = path.read_text(encoding="utf-8-sig")
         metadata = parse_simple_frontmatter(text)
         version = metadata.get("schemaVersion") or "1"
-        if version not in {"1", "2"}:
+        if version not in {"1", "2", "3"}:
             raise PipelineError(f"unsupported decision schemaVersion {version}: {path.name}")
         decision_id = metadata.get("decisionId") or f"DR-{match.group(1)}"
         if decision_id != f"DR-{match.group(1)}":
@@ -624,12 +627,16 @@ class CodexDecisionGenerator:
 
 def _bullets(values: Sequence[str]) -> str:
     items = [str(value).strip() for value in values if str(value).strip()]
-    return "\n".join(f"- {value}" for value in items) if items else "None."
+    return "\n".join(f"- {value}" for value in items)
 
 
-def _labeled_value(label: str, values: Sequence[str]) -> str:
-    items = [str(value).strip() for value in values if str(value).strip()]
-    return f"- {label}: {' / '.join(items) if items else 'None.'}"
+def _labeled_block(label: str, values: Sequence[str]) -> str:
+    bullets = _bullets(values)
+    return f"**{label}**\n\n{bullets}" if bullets else ""
+
+
+def _join_blocks(*blocks: str) -> str:
+    return "\n\n".join(block for block in blocks if block.strip())
 
 
 def _source_set_sha256(sources: Sequence[DecisionSource]) -> str:
@@ -663,7 +670,9 @@ def render_decision(
     source_refs = unique_ordered(
         list(source_refs_override) if source_refs_override is not None else [source.source_ref for source in sources]
     )
-    related_evidence = unique_ordered([*source_refs, *[str(value) for value in data["relatedEvidence"]]])
+    related_evidence = unique_ordered(
+        [str(value) for value in data["relatedEvidence"] if str(value) not in source_refs]
+    )
     promotion_status = (
         "no-action"
         if data["scope"] == "project"
@@ -682,6 +691,10 @@ def render_decision(
         ("implementationStatus", str(data["implementationStatus"])),
         ("promotionStatus", promotion_status),
         ("promotedTo", []),
+        ("projectWorkingContextTargets", data["materialization"]["projectWorkingContext"]),
+        ("repositoryDocumentationTargets", data["materialization"]["repositoryDocumentation"]),
+        ("globalContextTargets", data["materialization"]["globalContext"]),
+        ("skillAutomationTargets", data["materialization"]["skillAutomation"]),
         ("generatorModel", config.model),
         ("generatorReasoningEffort", config.reasoning_effort),
         ("promptId", DECISION_PROFILE.prompt.prompt_id),
@@ -704,47 +717,43 @@ def render_decision(
         ("updated", timestamp),
         ("decisionId", decision_id),
     ]
-    verification = "\n".join(
-        (
-            _labeled_value("Evidence", data["verificationEvidence"]),
-            _labeled_value("Limitations", data["verificationLimitations"]),
-            f"- Validation Date: {data['validationDate'] or 'None.'}",
-        )
+    why = _join_blocks(
+        _labeled_block("Context", data["context"]),
+        _labeled_block("Rationale", data["rationale"]),
+    )
+    consequences = _join_blocks(
+        _labeled_block("Benefits", data["benefits"]),
+        _labeled_block("Costs And Risks", data["costsAndRisks"]),
+    )
+    scope = _join_blocks(
+        _labeled_block("Applies When", data["appliesWhen"]),
+        _labeled_block("Does Not Apply When", data["doesNotApplyWhen"]),
+        _labeled_block("Reusable Principle", data["reusablePrinciples"]),
+        _labeled_block("Project-Specific Details", data["projectSpecificDetails"]),
+    )
+    verification = _join_blocks(
+        _labeled_block("Evidence", data["verificationEvidence"]),
+        _labeled_block("Limitations", data["verificationLimitations"]),
+        f"**Validation Date:** {data['validationDate']}" if data["validationDate"] else "",
     )
     materialization = data["materialization"]
-    materialization_text = "\n".join(
-        (
-            _labeled_value("Project Working Context", materialization["projectWorkingContext"]),
-            _labeled_value("Repository Documentation", materialization["repositoryDocumentation"]),
-            _labeled_value("Global Context", materialization["globalContext"]),
-            _labeled_value("Skill / Automation", materialization["skillAutomation"]),
-            _labeled_value("Follow-up", materialization["followUp"]),
-        )
-    )
-    supersession = "\n".join(
-        (
-            _labeled_value("Supersedes", data["supersedes"]),
-            _labeled_value("Superseded By", data["supersededBy"]),
-        )
+    supersession = _join_blocks(
+        _labeled_block("Supersedes", data["supersedes"]),
+        _labeled_block("Superseded By", data["supersededBy"]),
     )
     return render_decision_template(
         template,
         {
             "frontmatter": frontmatter(fields),
             "title": f"{decision_id}: {data['title']}",
-            "context": _bullets(data["context"]),
             "decision": str(data["decision"]).strip(),
-            "rationale": _bullets(data["rationale"]),
-            "benefits": _bullets(data["benefits"]),
-            "costs_and_risks": _bullets(data["costsAndRisks"]),
-            "alternatives_considered": _bullets(data["alternativesConsidered"]),
-            "applies_when": _bullets(data["appliesWhen"]),
-            "does_not_apply_when": _bullets(data["doesNotApplyWhen"]),
-            "reusable_principle": _bullets(data["reusablePrinciples"]),
-            "project_specific_details": _bullets(data["projectSpecificDetails"]),
+            "why": why,
+            "consequences": consequences,
+            "alternatives": _bullets(data["alternativesConsidered"]),
+            "scope": scope,
             "verification": verification,
             "related_evidence": _bullets(related_evidence),
-            "materialization": materialization_text,
+            "follow_up": _bullets(materialization["followUp"]),
             "supersession": supersession,
         },
     )
@@ -758,9 +767,12 @@ def validate_decision_record(path: Path) -> dict[str, Any]:
         raise PipelineError(f"invalid decision filename: {path.name}")
     text = path.read_text(encoding="utf-8-sig")
     metadata = parse_simple_frontmatter(text)
+    schema_version = metadata.get("schemaVersion") or "1"
+    if schema_version not in {"2", "3"}:
+        raise PipelineError(f"unsupported decision schemaVersion {schema_version}: {path.name}")
     required = {
         "type": "decision",
-        "schemaVersion": str(DECISION_SCHEMA_VERSION),
+        "schemaVersion": schema_version,
         "generator": "Codex",
         "automatedValidation": "passed",
     }
@@ -796,7 +808,7 @@ def validate_decision_record(path: Path) -> dict[str, Any]:
         "no-action",
     }:
         raise PipelineError(f"decision record has invalid promotionStatus: {path}")
-    lines, _body = split_frontmatter_lines(text)
+    lines, body = split_frontmatter_lines(text)
     if not frontmatter_list_value(lines, "sourceSessionRefs"):
         raise PipelineError(f"decision record has no sourceSessionRefs: {path}")
     if not re.fullmatch(r"[0-9a-f]{64}", metadata.get("sourceSessionSha256") or ""):
@@ -804,50 +816,91 @@ def validate_decision_record(path: Path) -> dict[str, Any]:
     title = metadata.get("title") or ""
     if f"# {decision_id}: {title}" not in text:
         raise PipelineError(f"decision record title does not match frontmatter: {path}")
-    headings = (
-        "## Context",
-        "## Decision",
-        "## Rationale",
-        "## Consequences",
-        "### Benefits",
-        "### Costs And Risks",
-        "## Alternatives Considered",
-        "## Applicability",
-        "### Applies When",
-        "### Does Not Apply When",
-        "### Reusable Principle",
-        "### Project-Specific Details",
-        "## Verification",
-        "## Related Evidence",
-        "## Materialization",
-        "## Supersession",
-    )
-    missing = [heading for heading in headings if heading not in text]
-    if missing:
-        raise PipelineError(f"decision record is missing headings ({', '.join(missing)}): {path}")
-    required_labels = [
-        "Evidence",
-        "Validation Date",
-        "Project Working Context",
-        "Repository Documentation",
-        "Global Context",
-        "Skill / Automation",
-        "Follow-up",
-        "Supersedes",
-        "Superseded By",
-    ]
-    if metadata.get("promptVersion") == DECISION_PROFILE.prompt.version:
-        required_labels.insert(1, "Limitations")
-    for label in required_labels:
-        if f"- {label}:" not in text:
-            raise PipelineError(f"decision record is missing {label}: {path}")
+    if schema_version == "2":
+        headings = (
+            "## Context",
+            "## Decision",
+            "## Rationale",
+            "## Consequences",
+            "### Benefits",
+            "### Costs And Risks",
+            "## Alternatives Considered",
+            "## Applicability",
+            "### Applies When",
+            "### Does Not Apply When",
+            "### Reusable Principle",
+            "### Project-Specific Details",
+            "## Verification",
+            "## Related Evidence",
+            "## Materialization",
+            "## Supersession",
+        )
+        missing = [heading for heading in headings if heading not in text]
+        if missing:
+            raise PipelineError(f"decision record is missing headings ({', '.join(missing)}): {path}")
+        required_labels = [
+            "Evidence",
+            "Validation Date",
+            "Project Working Context",
+            "Repository Documentation",
+            "Global Context",
+            "Skill / Automation",
+            "Follow-up",
+            "Supersedes",
+            "Superseded By",
+        ]
+        if metadata.get("promptVersion") == "2.1":
+            required_labels.insert(1, "Limitations")
+        for label in required_labels:
+            if f"- {label}:" not in text:
+                raise PipelineError(f"decision record is missing {label}: {path}")
+    else:
+        target_fields = (
+            "projectWorkingContextTargets",
+            "repositoryDocumentationTargets",
+            "globalContextTargets",
+            "skillAutomationTargets",
+        )
+        missing_target_fields = [field for field in target_fields if field not in metadata]
+        if missing_target_fields:
+            raise PipelineError(
+                f"decision record is missing materialization targets ({', '.join(missing_target_fields)}): {path}"
+            )
+        allowed_headings = (
+            "Decision",
+            "Why",
+            "Consequences",
+            "Alternatives",
+            "Scope",
+            "Verification",
+            "Related Evidence",
+            "Follow-up",
+            "Supersession",
+        )
+        present_headings = re.findall(r"(?m)^## ([^\r\n]+?)\s*$", text)
+        if not present_headings or present_headings[0] != "Decision":
+            raise PipelineError(f"decision record must start with ## Decision: {path}")
+        unknown = [heading for heading in present_headings if heading not in allowed_headings]
+        if unknown:
+            raise PipelineError(f"decision record has unsupported headings ({', '.join(unknown)}): {path}")
+        duplicates = sorted({heading for heading in present_headings if present_headings.count(heading) > 1})
+        if duplicates:
+            raise PipelineError(f"decision record repeats headings ({', '.join(duplicates)}): {path}")
+        expected_order = [heading for heading in allowed_headings if heading in present_headings]
+        if present_headings != expected_order:
+            raise PipelineError(f"decision record headings are out of order: {path}")
+        empty = [heading for heading in present_headings if not _section(text, heading)]
+        if empty:
+            raise PipelineError(f"decision record has empty sections ({', '.join(empty)}): {path}")
+        if re.search(r"(?m)(?:^|:\s+)None\.$", body):
+            raise PipelineError(f"decision record v3 must omit empty values instead of rendering None: {path}")
     secrets = has_secret_like_content(text)
     if secrets:
         raise PipelineError(f"decision record contains secret-like content ({', '.join(secrets)}): {path}")
     return {
         "valid": True,
         "path": str(path.absolute()),
-        "schemaVersion": DECISION_SCHEMA_VERSION,
+        "schemaVersion": int(schema_version),
         "decisionId": decision_id,
         "status": metadata["status"],
         "implementationStatus": metadata["implementationStatus"],
@@ -878,20 +931,6 @@ def _source_refs_fingerprint(project: Project, source_refs: Sequence[str]) -> st
     ).hexdigest()
 
 
-def _append_related_evidence(text: str, source_refs: Sequence[str]) -> str:
-    match = re.search(r"(?ms)(^## Related Evidence\s*\n+)(.*?)(?=^## |\Z)", text)
-    if match is None:
-        raise PipelineError("Decision Record is missing Related Evidence")
-    existing = [
-        item.group(1).strip()
-        for line in match.group(2).splitlines()
-        if (item := re.match(r"^-\s+(.+?)\s*$", line)) and item.group(1).strip() != "None."
-    ]
-    values = unique_ordered([*existing, *source_refs])
-    replacement = match.group(1) + _bullets(values) + "\n\n"
-    return text[: match.start()] + replacement + text[match.end() :]
-
-
 def _extend_existing_decision_sources(
     decision: ExistingDecision,
     sources: Sequence[DecisionSource],
@@ -916,10 +955,7 @@ def _extend_existing_decision_sources(
         _source_refs_fingerprint(sources[0].project, merged_refs),
     )
     updated_lines = replace_frontmatter_scalar(updated_lines, "updated", timestamp)
-    return _append_related_evidence(
-        "".join(updated_lines) + body,
-        [source.source_ref for source in sources],
-    )
+    return "".join(updated_lines) + body
 
 
 def _commit_batch(

@@ -27,7 +27,7 @@ class ArtifactSchemaCompatibilityTests(unittest.TestCase):
     def fixture_text(self, name: str) -> str:
         return (FIXTURES / name).read_text(encoding="utf-8")
 
-    def test_fixture_matrix_classifies_unversioned_v1_and_v2(self) -> None:
+    def test_fixture_matrix_classifies_supported_versions(self) -> None:
         for prefix, label in self.artifact_cases:
             with self.subTest(artifact=prefix, version="unversioned"):
                 metadata = parse_simple_frontmatter(self.fixture_text(f"{prefix}-v1-unversioned.md"))
@@ -50,6 +50,9 @@ class ArtifactSchemaCompatibilityTests(unittest.TestCase):
                     require_supported_artifact_schema(metadata, label),
                 )
 
+        decision_v3 = parse_simple_frontmatter(self.fixture_text("decision-v3.md"))
+        self.assertEqual("3", require_supported_artifact_schema(decision_v3, "decision record"))
+
     def test_unversioned_fixtures_become_explicit_v1_without_body_changes(self) -> None:
         for prefix, label in self.artifact_cases:
             with self.subTest(artifact=prefix):
@@ -65,9 +68,10 @@ class ArtifactSchemaCompatibilityTests(unittest.TestCase):
                 )
                 self.assertEqual(body, split_frontmatter_lines(updated)[1])
 
-    def test_explicit_v1_and_v2_fixtures_keep_their_declared_schema(self) -> None:
+    def test_explicit_supported_fixtures_keep_their_declared_schema(self) -> None:
         for prefix, label in self.artifact_cases:
-            for version in ("1", "2"):
+            versions = ("1", "2", "3") if prefix == "decision" else ("1", "2")
+            for version in versions:
                 with self.subTest(artifact=prefix, version=version):
                     original = self.fixture_text(f"{prefix}-v{version}.md")
                     header, body = split_frontmatter_lines(original)
@@ -125,6 +129,25 @@ class ArtifactSchemaCompatibilityTests(unittest.TestCase):
         self.assertIn("## Effective Decisions", working_context)
         self.assertIn("## Key Files And Evidence", working_context)
         self.assertIn("## Resumption", working_context)
+
+    def test_decision_v3_fixture_is_concise_and_omits_empty_sections(self) -> None:
+        decision = self.fixture_text("decision-v3.md")
+        metadata = parse_simple_frontmatter(decision)
+        self.assertEqual("3", metadata["schemaVersion"])
+        for field in (
+            "projectWorkingContextTargets",
+            "repositoryDocumentationTargets",
+            "globalContextTargets",
+            "skillAutomationTargets",
+        ):
+            self.assertIn(field, metadata)
+        self.assertIn("## Decision", decision)
+        self.assertIn("## Why", decision)
+        self.assertIn("## Verification", decision)
+        self.assertNotIn("## Consequences", decision)
+        self.assertNotIn("## Materialization", decision)
+        self.assertNotIn("## Supersession", decision)
+        self.assertNotIn("None.", decision)
 
     def test_session_v2_core_fixture_omits_empty_optional_sections(self) -> None:
         session = self.fixture_text("session-v2-core.md")

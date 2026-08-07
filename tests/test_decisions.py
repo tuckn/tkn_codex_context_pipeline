@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -179,9 +180,93 @@ def test_decision_profile_is_packaged_and_controls_heading_order() -> None:
     assert set(profile.schema.value["required"]) == set(profile.schema.value["properties"])
     values = {field: field for field in REQUIRED_TEMPLATE_FIELDS}
     rendered = render_decision_template(profile.template, values)
-    assert rendered.index("## Context") < rendered.index("## Decision")
-    assert rendered.index("## Decision") < rendered.index("## Rationale")
-    assert rendered.index("## Rationale") < rendered.index("## Materialization")
+    assert rendered.index("## Decision") < rendered.index("## Why")
+    assert rendered.index("## Why") < rendered.index("## Consequences")
+    assert rendered.index("## Consequences") < rendered.index("## Follow-up")
+
+
+def test_decision_template_omits_empty_optional_sections() -> None:
+    profile = load_decision_profile()
+    values = {field: "" for field in REQUIRED_TEMPLATE_FIELDS}
+    values.update(
+        {
+            "frontmatter": "---\ntype: decision\n---",
+            "title": "DR-0001: Concise decision",
+            "decision": "Keep only sections with content.",
+        }
+    )
+
+    rendered = render_decision_template(profile.template, values)
+
+    assert "## Decision" in rendered
+    assert "## Why" not in rendered
+    assert "## Consequences" not in rendered
+    assert "## Follow-up" not in rendered
+    assert "None." not in rendered
+
+
+def test_decision_validator_keeps_generated_v2_compatibility(tmp_path: Path) -> None:
+    fixture = Path(__file__).parent / "fixtures" / "decision-v2.md"
+    record = tmp_path / "DR-0003-use-semantic-schema-migration.md"
+    record.write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
+
+    validation = validate_decision_record(record)
+
+    assert validation["schemaVersion"] == 2
+    assert validation["decisionId"] == "DR-0003"
+
+
+def test_unreviewed_codex_v2_is_a_v3_quality_upgrade_candidate(tmp_path: Path) -> None:
+    decision = ExistingDecision(
+        decision_id="DR-0003",
+        path=tmp_path / "DR-0003-example.md",
+        title="Example",
+        status="Accepted",
+        decision="Keep the decision.",
+        review_status="unreviewed",
+        generator="Codex",
+        schema_version="2",
+        prompt_version="2.1",
+    )
+
+    assert decision.update_allowed is True
+    assert decision.quality_upgrade_required is True
+
+    reviewed = replace(decision, review_status="reviewed")
+    assert reviewed.update_allowed is False
+    assert reviewed.quality_upgrade_required is False
+
+
+def test_unreviewed_v2_can_be_resynthesized_as_v3(
+    decision_project: tuple[Project, PipelineConfig],
+    tmp_path: Path,
+) -> None:
+    project, config = decision_project
+    source = project.sessions_path / "one.md"
+    source.write_text(session_note(), encoding="utf-8")
+    directory = project.context_path / "decisions"
+    directory.mkdir(parents=True)
+    fixture = (Path(__file__).parent / "fixtures" / "decision-v2.md").read_text(encoding="utf-8")
+    fixture = fixture.replace("reviewStatus: reviewed", "reviewStatus: unreviewed")
+    record = directory / "DR-0003-use-semantic-schema-migration.md"
+    record.write_text(fixture, encoding="utf-8")
+    original_date = parse_simple_frontmatter(fixture)["date"]
+
+    report, _report_path = execute_decision_build(
+        config,
+        project,
+        generator=FakeDecisionGenerator(
+            update_decision_output("DR-0003", ["project:/sessions/one.md"])
+        ),
+        write=True,
+        cache_root=tmp_path / "reports",
+    )
+
+    assert [item["decisionId"] for item in report["updated"]] == ["DR-0003"]
+    metadata = parse_simple_frontmatter(record.read_text(encoding="utf-8"))
+    assert metadata["schemaVersion"] == "3"
+    assert metadata["date"] == original_date
+    assert "None." not in record.read_text(encoding="utf-8")
 
 
 def test_decision_output_requires_known_existing_id() -> None:
@@ -282,6 +367,15 @@ def test_decision_write_creates_record_without_mutating_source_and_becomes_uncha
     decision = project.context_path / report["created"][0]["decisionRecord"]
     validation = validate_decision_record(decision)
     assert validation["decisionId"] == "DR-0001"
+    assert validation["schemaVersion"] == 3
+    decision_text = decision.read_text(encoding="utf-8")
+    assert "schemaVersion: 3" in decision_text
+    assert "## Decision" in decision_text
+    assert "## Why" in decision_text
+    assert "## Follow-up" in decision_text
+    assert "## Materialization" not in decision_text
+    assert "## Supersession" not in decision_text
+    assert "None." not in decision_text
     completed = next(event for event in progress_events if event["type"] == "decision-batch-complete")
     assert completed["decisionRecordPaths"] == [str(decision.absolute())]
     assert source.read_text(encoding="utf-8") == original_source
@@ -379,7 +473,7 @@ def test_unreviewed_existing_decision_can_be_resynthesized_from_later_session(
     metadata = parse_simple_frontmatter(decision_text)
     assert metadata["date"] == original_date
     assert "複数のSession Noteを統合してDecisionを更新する。" in decision_text
-    assert "- Limitations: Direct validation remains incomplete." in decision_text
+    assert "**Limitations**\n\n- Direct validation remains incomplete." in decision_text
     assert "project:/sessions/one.md" in decision_text
     assert "project:/sessions/two.md" in decision_text
 
@@ -412,9 +506,9 @@ def test_multiple_session_notes_synthesize_one_decision(
     assert report["created"][0]["sourceSessionRefs"] == source_refs
     decision = project.context_path / report["created"][0]["decisionRecord"]
     decision_text = decision.read_text(encoding="utf-8")
-    assert decision_text.count("project:/sessions/one.md") == 2
-    assert decision_text.count("project:/sessions/two.md") == 2
-    assert "- Limitations: Direct endpoint validation was incomplete." in decision_text
+    assert decision_text.count("project:/sessions/one.md") == 1
+    assert decision_text.count("project:/sessions/two.md") == 1
+    assert "**Limitations**\n\n- Direct endpoint validation was incomplete." in decision_text
     assert 'promotionStatus: "no-action"' in decision_text
     assert "project:/decisions/" not in first.read_text(encoding="utf-8")
     assert "project:/decisions/" not in second.read_text(encoding="utf-8")

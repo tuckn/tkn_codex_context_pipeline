@@ -168,7 +168,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     decision_validate = decision_commands.add_parser(
         "validate",
-        help="Validate one Decision Record v2 file",
+        help="Validate one Decision Record v2 or v3 file",
     )
     decision_validate.add_argument("decision_record", type=Path)
 

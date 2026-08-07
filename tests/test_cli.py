@@ -213,11 +213,11 @@ def test_config_show_reports_application_owned_summary_profile(
     decision_profile = output["decisionProfile"]
     assert decision_profile["name"] == "default"
     assert decision_profile["source"].endswith("profiles/decision/default")
-    assert decision_profile["prompt"]["version"] == "2.1"
+    assert decision_profile["prompt"]["version"] == "3.0"
     assert decision_profile["schema"]["source"].endswith(
         "profiles/decision/default/output.schema.json"
     )
-    assert decision_profile["template"]["version"] == "1.0"
+    assert decision_profile["template"]["version"] == "2.0"
 
 
 def test_init_dry_run_has_no_files(
