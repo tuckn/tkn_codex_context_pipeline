@@ -11,8 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from tkn_codex_context.chat_logs import ChatEvent, read_session_events
-from tkn_codex_context.session_notes import (
+from tkn_codex_context.chat_logs import ChatEvent, read_thread_events
+from tkn_codex_context.thread_notes import (
     Candidate,
     CodexSummarizer,
     PipelineConfig,
@@ -93,12 +93,12 @@ def write_chat(path: Path, *, thread_id: str, cwd: Path, request: str = "do work
     os.utime(path, (old, old))
 
 
-def note_data(candidate: Candidate, *, title: str = "Automated session") -> dict:
+def note_data(candidate: Candidate, *, title: str = "Automated Thread Note") -> dict:
     ids = [event.id for event in candidate.events]
     return {
         "title": title,
-        "fileSlug": "automated-session",
-        "description": "A factual session digest.",
+        "fileSlug": "automated-thread-note",
+        "description": "A factual Thread Note.",
         "summaryItems": [
             {
                 "text": "The requested work was completed.",
@@ -158,7 +158,7 @@ class MutatingSummarizer:
         return note_data(candidate)
 
 
-class SessionNotePipelineTests(unittest.TestCase):
+class ThreadNotePipelineTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -193,7 +193,7 @@ class SessionNotePipelineTests(unittest.TestCase):
     def test_event_parser_deduplicates_messages_and_keeps_tool_evidence(self) -> None:
         path = self.sessions / "2026" / "07" / "01" / "chat.jsonl"
         write_chat(path, thread_id="thread-1", cwd=self.repo)
-        events = read_session_events(path)
+        events = read_thread_events(path)
 
         self.assertEqual(1, sum(event.kind == "user_message" for event in events))
         self.assertEqual(1, sum(event.kind == "assistant_message" for event in events))
@@ -207,7 +207,7 @@ class SessionNotePipelineTests(unittest.TestCase):
     def test_chunking_preserves_event_boundaries(self) -> None:
         path = self.sessions / "chat.jsonl"
         write_chat(path, thread_id="thread-1", cwd=self.repo)
-        prepared = prepare_events(read_session_events(path))
+        prepared = prepare_events(read_thread_events(path))
         chunks = chunk_events(prepared, target_characters=150)
 
         self.assertGreater(len(chunks), 1)
@@ -383,12 +383,12 @@ class SessionNotePipelineTests(unittest.TestCase):
         )
 
         self.assertEqual(1, len(first["processed"]))
-        notes = list(self.project.sessions_path.glob("*.md"))
+        notes = list(self.project.thread_notes_path.glob("*.md"))
         self.assertEqual(1, len(notes))
         text = notes[0].read_text(encoding="utf-8")
         self.assertIn('reviewStatus: "unreviewed"', text)
         self.assertIn('sourceThreadIds:\n  - "thread-1"', text)
-        self.assertIn("# Session Note", text)
+        self.assertIn("# Thread Note", text)
         self.assertIn("### Request", text)
         self.assertIn("### Reported Result", text)
         state = json.loads(self.project.state_path.read_text(encoding="utf-8"))
@@ -413,7 +413,7 @@ class SessionNotePipelineTests(unittest.TestCase):
         )
 
         self.assertEqual(1, len(second["processed"]))
-        self.assertEqual(1, len(list(self.project.sessions_path.glob("*.md"))))
+        self.assertEqual(1, len(list(self.project.thread_notes_path.glob("*.md"))))
         self.assertIn('reviewStatus: "unreviewed"', notes[0].read_text(encoding="utf-8"))
 
     def test_stale_generator_fingerprint_is_regenerated(self) -> None:
@@ -463,9 +463,9 @@ class SessionNotePipelineTests(unittest.TestCase):
             summarizer=FakeSummarizer(),
             cache_root=self.cache,
         )
-        note = next(self.project.sessions_path.glob("*.md"))
+        note = next(self.project.thread_notes_path.glob("*.md"))
         note.write_text(
-            note.read_text(encoding="utf-8").replace("schemaVersion: 2", "schemaVersion: 1"),
+            note.read_text(encoding="utf-8").replace("schemaVersion: 3", "schemaVersion: 2"),
             encoding="utf-8",
         )
 
@@ -507,7 +507,7 @@ class SessionNotePipelineTests(unittest.TestCase):
             summarizer=FakeSummarizer(),
             cache_root=self.cache,
         )
-        note = next(self.project.sessions_path.glob("*.md"))
+        note = next(self.project.thread_notes_path.glob("*.md"))
         old_note = note.read_bytes()
         old_state = self.project.state_path.read_bytes()
         with source.open("a", encoding="utf-8") as handle:
@@ -523,7 +523,7 @@ class SessionNotePipelineTests(unittest.TestCase):
         os.utime(source, (old, old))
 
         with patch(
-            "tkn_codex_context.session_notes.update_refresh_state",
+            "tkn_codex_context.thread_notes.update_refresh_state",
             side_effect=OSError("simulated state failure"),
         ):
             report, _path = execute_pipeline(
@@ -573,7 +573,7 @@ class SessionNotePipelineTests(unittest.TestCase):
 
         self.assertEqual([], report["processed"])
         self.assertEqual(1, len(report["failed"]))
-        self.assertFalse(self.project.sessions_path.exists())
+        self.assertFalse(self.project.thread_notes_path.exists())
         self.assertFalse(self.project.state_path.exists())
 
     def test_duplicate_exact_note_matches_fail_without_overwrite(self) -> None:
@@ -585,7 +585,7 @@ class SessionNotePipelineTests(unittest.TestCase):
             summarizer=FakeSummarizer(),
             cache_root=self.cache,
         )
-        note = next(self.project.sessions_path.glob("*.md"))
+        note = next(self.project.thread_notes_path.glob("*.md"))
         duplicate = note.with_name("duplicate.md")
         shutil.copy2(note, duplicate)
         before = {path.name: path.read_bytes() for path in (note, duplicate)}
@@ -624,7 +624,7 @@ class SessionNotePipelineTests(unittest.TestCase):
         self.assertEqual(1, report["selectedCount"])
         self.assertIsNone(report_path)
         self.assertFalse(self.cache.exists())
-        self.assertFalse(self.project.sessions_path.exists())
+        self.assertFalse(self.project.thread_notes_path.exists())
         self.assertFalse(self.project.state_path.exists())
 
     def test_codex_runner_uses_ephemeral_fixed_model_and_schema(self) -> None:
@@ -642,10 +642,10 @@ class SessionNotePipelineTests(unittest.TestCase):
             return SimpleNamespace(returncode=0, stderr="", stdout="")
 
         runner = CodexSummarizer(self.config, sleeper=lambda _seconds: None)
-        with patch("tkn_codex_context.session_notes.subprocess.run", side_effect=fake_run):
+        with patch("tkn_codex_context.thread_notes.subprocess.run", side_effect=fake_run):
             result = runner.generate(candidate)
 
-        self.assertEqual("Automated session", result["title"])
+        self.assertEqual("Automated Thread Note", result["title"])
         self.assertIn("--ephemeral", captured)
         self.assertIn("--ignore-user-config", captured)
         self.assertEqual("gpt-5.6-sol", captured[captured.index("--model") + 1])
@@ -656,9 +656,9 @@ class SessionNotePipelineTests(unittest.TestCase):
     def test_rebuild_success_replaces_legacy_notes_and_is_idempotent(self) -> None:
         for thread in ("thread-1", "thread-2"):
             write_chat(self.sessions / f"{thread}.jsonl", thread_id=thread, cwd=self.repo)
-        self.project.sessions_path.mkdir(parents=True)
-        (self.project.sessions_path / "legacy.md").write_text(
-            "---\ntype: session\ntitle: Legacy\n---\n\n# Legacy\n",
+        self.project.thread_notes_path.mkdir(parents=True)
+        (self.project.thread_notes_path / "legacy.md").write_text(
+            "---\ntype: threadNote\nschemaVersion: 2\ntitle: Legacy\n---\n\n# Legacy\n",
             encoding="utf-8",
         )
         progress_events: list[dict] = []
@@ -674,13 +674,13 @@ class SessionNotePipelineTests(unittest.TestCase):
         self.assertEqual([], report["failed"])
         self.assertEqual(2, report["generationCount"])
         self.assertEqual(["legacy.md"], [item["file"] for item in report["deletedLegacy"]])
-        notes = sorted(self.project.sessions_path.glob("*.md"))
+        notes = sorted(self.project.thread_notes_path.glob("*.md"))
         self.assertEqual(2, len(notes))
-        self.assertTrue(all("schemaVersion: 2" in path.read_text(encoding="utf-8") for path in notes))
+        self.assertTrue(all("schemaVersion: 3" in path.read_text(encoding="utf-8") for path in notes))
         completed = [event for event in progress_events if event["type"] == "thread-complete"]
         self.assertEqual(
             [str(path.absolute()) for path in notes],
-            sorted(event["sessionNotePath"] for event in completed),
+            sorted(event["threadNotePath"] for event in completed),
         )
 
         second, _path = execute_rebuild(
@@ -697,9 +697,12 @@ class SessionNotePipelineTests(unittest.TestCase):
     def test_rebuild_failure_keeps_legacy_notes_and_state(self) -> None:
         for thread in ("thread-1", "thread-2"):
             write_chat(self.sessions / f"{thread}.jsonl", thread_id=thread, cwd=self.repo)
-        self.project.sessions_path.mkdir(parents=True)
-        legacy = self.project.sessions_path / "legacy.md"
-        legacy.write_text("---\ntype: session\n---\n\n# Legacy\n", encoding="utf-8")
+        self.project.thread_notes_path.mkdir(parents=True)
+        legacy = self.project.thread_notes_path / "legacy.md"
+        legacy.write_text(
+            "---\ntype: threadNote\nschemaVersion: 2\n---\n\n# Legacy\n",
+            encoding="utf-8",
+        )
         before = legacy.read_bytes()
 
         report, _path = execute_rebuild(
@@ -711,10 +714,10 @@ class SessionNotePipelineTests(unittest.TestCase):
 
         self.assertEqual(1, len(report["failed"]))
         self.assertEqual(before, legacy.read_bytes())
-        self.assertEqual(["legacy.md"], [path.name for path in self.project.sessions_path.glob("*.md")])
+        self.assertEqual(["legacy.md"], [path.name for path in self.project.thread_notes_path.glob("*.md")])
         self.assertFalse(self.project.state_path.exists())
 
-    def test_rebuild_force_regenerates_existing_v2(self) -> None:
+    def test_rebuild_force_regenerates_existing_current_note(self) -> None:
         write_chat(self.sessions / "chat.jsonl", thread_id="thread-1", cwd=self.repo)
         first_summarizer = FakeSummarizer()
         execute_rebuild(
@@ -749,7 +752,7 @@ class SessionNotePipelineTests(unittest.TestCase):
         historical.mkdir()
         write_chat(self.sessions / "chat.jsonl", thread_id="thread-1", cwd=historical)
         with patch(
-            "tkn_codex_context.session_notes.verify_historical_root",
+            "tkn_codex_context.thread_notes.verify_historical_root",
             return_value=historical,
         ):
             report, _path = execute_rebuild(
@@ -764,14 +767,14 @@ class SessionNotePipelineTests(unittest.TestCase):
         self.assertEqual(1, report["selectedCount"])
         self.assertFalse(self.project.state_path.exists())
 
-    def test_rebuild_rejects_future_session_schema(self) -> None:
-        self.project.sessions_path.mkdir(parents=True)
-        (self.project.sessions_path / "future.md").write_text(
-            "---\ntype: session\nschemaVersion: 99\n---\n\n# Session Note\n",
+    def test_rebuild_rejects_future_thread_note_schema(self) -> None:
+        self.project.thread_notes_path.mkdir(parents=True)
+        (self.project.thread_notes_path / "future.md").write_text(
+            "---\ntype: threadNote\nschemaVersion: 99\n---\n\n# Thread Note\n",
             encoding="utf-8",
         )
 
-        with self.assertRaisesRegex(Exception, "unsupported session schemaVersion 99"):
+        with self.assertRaisesRegex(Exception, "unsupported Thread Note schemaVersion 99"):
             execute_rebuild(
                 self.config,
                 self.project,
@@ -788,9 +791,9 @@ class SessionNotePipelineTests(unittest.TestCase):
             summarizer=FakeSummarizer(),
             cache_root=self.cache,
         )
-        note = next(self.project.sessions_path.glob("*.md"))
+        note = next(self.project.thread_notes_path.glob("*.md"))
 
-        with patch("tkn_codex_context.session_notes.SESSION_SCHEMA_VERSION", 3):
+        with patch("tkn_codex_context.thread_notes.THREAD_NOTE_SCHEMA_VERSION", 4):
             report, _path = execute_rebuild(
                 self.config,
                 self.project,
@@ -825,13 +828,13 @@ class SessionNotePipelineTests(unittest.TestCase):
 
         self.assertEqual(["thread-old-root"], [item.thread_id for item in candidates])
 
-    def test_rebuild_preserves_v2_without_source_thread_ids(self) -> None:
+    def test_rebuild_preserves_current_note_without_source_thread_ids(self) -> None:
         write_chat(self.sessions / "chat.jsonl", thread_id="thread-1", cwd=self.repo)
-        self.project.sessions_path.mkdir(parents=True)
-        manual = self.project.sessions_path / "manual-v2.md"
+        self.project.thread_notes_path.mkdir(parents=True)
+        manual = self.project.thread_notes_path / "manual-v3.md"
         manual.write_text(
-            "---\ntype: session\nschemaVersion: 2\nstatus: done\n---\n\n"
-            "# Session Note\n\n## Summary\n\n- Manual.\n\n"
+            "---\ntype: threadNote\nschemaVersion: 3\nstatus: done\n---\n\n"
+            "# Thread Note\n\n## Summary\n\n- Manual.\n\n"
             "## Key Developments\n\n### Action\n\n- Manual.\n\n"
             "## Last Known State\n\n- Work State: done — manual.\n"
             "- Latest User Direction: 追加指示なし。\n",
@@ -846,8 +849,8 @@ class SessionNotePipelineTests(unittest.TestCase):
         )
 
         self.assertEqual([], report["failed"])
-        self.assertTrue((self.project.sessions_path / "manual-v2.md").is_file())
-        self.assertEqual(2, len(list(self.project.sessions_path.glob("*.md"))))
+        self.assertTrue((self.project.thread_notes_path / "manual-v3.md").is_file())
+        self.assertEqual(2, len(list(self.project.thread_notes_path.glob("*.md"))))
 
     def test_multiple_work_items_render_h3_and_h4_labels(self) -> None:
         write_chat(self.sessions / "chat.jsonl", thread_id="thread-1", cwd=self.repo)
@@ -875,12 +878,15 @@ class SessionNotePipelineTests(unittest.TestCase):
         self.assertNotIn("distillationStatus", text)
         self.assertNotIn("distilledTo", text)
 
-    def test_rebuild_state_write_failure_restores_legacy_sessions(self) -> None:
+    def test_rebuild_state_write_failure_restores_legacy_thread_notes(self) -> None:
         write_chat(self.sessions / "chat.jsonl", thread_id="thread-1", cwd=self.repo)
-        self.project.sessions_path.mkdir(parents=True)
-        legacy = self.project.sessions_path / "legacy.md"
-        legacy.write_text("---\ntype: session\n---\n\n# Legacy\n", encoding="utf-8")
-        import tkn_codex_context.session_notes as module
+        self.project.thread_notes_path.mkdir(parents=True)
+        legacy = self.project.thread_notes_path / "legacy.md"
+        legacy.write_text(
+            "---\ntype: threadNote\nschemaVersion: 2\n---\n\n# Legacy\n",
+            encoding="utf-8",
+        )
+        import tkn_codex_context.thread_notes as module
 
         original_write = module.atomic_write_json
 
@@ -890,7 +896,7 @@ class SessionNotePipelineTests(unittest.TestCase):
             return original_write(path, value)
 
         with patch(
-            "tkn_codex_context.session_notes.atomic_write_json",
+            "tkn_codex_context.thread_notes.atomic_write_json",
             side_effect=fail_state,
         ):
             report, _path = execute_rebuild(
@@ -902,7 +908,7 @@ class SessionNotePipelineTests(unittest.TestCase):
 
         self.assertEqual(1, len(report["failed"]))
         self.assertTrue(legacy.is_file())
-        self.assertEqual(["legacy.md"], [path.name for path in self.project.sessions_path.glob("*.md")])
+        self.assertEqual(["legacy.md"], [path.name for path in self.project.thread_notes_path.glob("*.md")])
 
     def test_rebuild_resumes_completed_generation_after_failure(self) -> None:
         for thread in ("thread-1", "thread-2"):
@@ -932,7 +938,7 @@ class SessionNotePipelineTests(unittest.TestCase):
         self.assertEqual(1, resumed["resumedCount"])
         self.assertEqual(["thread-2"], second.calls)
         self.assertFalse((self.cache / "rebuild" / self.project.project_id / "work").exists())
-        self.assertEqual(2, len(list(self.project.sessions_path.glob("*.md"))))
+        self.assertEqual(2, len(list(self.project.thread_notes_path.glob("*.md"))))
 
     def test_rebuild_preserves_state_for_missing_source_thread(self) -> None:
         write_chat(self.sessions / "chat.jsonl", thread_id="thread-new", cwd=self.repo)
@@ -952,7 +958,7 @@ class SessionNotePipelineTests(unittest.TestCase):
                             "threads": {
                                 "thread-missing": {
                                     "fingerprint": "old",
-                                    "sessionNotes": ["sessions/old.md"],
+                                    "threadNotes": ["thread-notes/old.md"],
                                 }
                             },
                         }
@@ -976,20 +982,20 @@ class SessionNotePipelineTests(unittest.TestCase):
 
     def test_backup_cleanup_failure_is_warning_after_successful_commit(self) -> None:
         write_chat(self.sessions / "chat.jsonl", thread_id="thread-1", cwd=self.repo)
-        self.project.sessions_path.mkdir(parents=True)
-        (self.project.sessions_path / "legacy.md").write_text(
-            "---\ntype: session\n---\n\n# Legacy\n",
+        self.project.thread_notes_path.mkdir(parents=True)
+        (self.project.thread_notes_path / "legacy.md").write_text(
+            "---\ntype: threadNote\nschemaVersion: 2\n---\n\n# Legacy\n",
             encoding="utf-8",
         )
         original_rmtree = shutil.rmtree
 
         def fail_backup_cleanup(path, *args, **kwargs):
-            if Path(path).name.startswith(".sessions-rebuild-backup-"):
+            if Path(path).name.startswith(".thread-notes-rebuild-backup-"):
                 raise OSError("simulated backup cleanup failure")
             return original_rmtree(path, *args, **kwargs)
 
         with patch(
-            "tkn_codex_context.session_notes.shutil.rmtree",
+            "tkn_codex_context.thread_notes.shutil.rmtree",
             side_effect=fail_backup_cleanup,
         ):
             report, _path = execute_rebuild(
@@ -1001,8 +1007,8 @@ class SessionNotePipelineTests(unittest.TestCase):
 
         self.assertEqual([], report["failed"])
         self.assertEqual(1, len(report["warnings"]))
-        self.assertEqual(1, len(list(self.project.sessions_path.glob("*.md"))))
-        for backup in self.context.glob(".sessions-rebuild-backup-*"):
+        self.assertEqual(1, len(list(self.project.thread_notes_path.glob("*.md"))))
+        for backup in self.context.glob(".thread-notes-rebuild-backup-*"):
             original_rmtree(backup)
 
     def test_generated_note_records_generator_and_validation_metadata(self) -> None:
@@ -1015,10 +1021,10 @@ class SessionNotePipelineTests(unittest.TestCase):
         )
 
         self.assertEqual([], report["failed"])
-        note = next(self.project.sessions_path.glob("*.md")).read_text(encoding="utf-8")
+        note = next(self.project.thread_notes_path.glob("*.md")).read_text(encoding="utf-8")
         self.assertIn('generatorModel: "gpt-5.6-sol"', note)
         self.assertIn('generatorReasoningEffort: "high"', note)
-        self.assertIn('type: "summary"', note)
+        self.assertIn('type: "threadNote"', note)
         self.assertIn('promptId: "f5dfc679-13d3-4fcc-9736-b7d4e6bb5c11"', note)
         self.assertIn('promptVersion: "2.0"', note)
         self.assertIn(
@@ -1026,11 +1032,11 @@ class SessionNotePipelineTests(unittest.TestCase):
             note,
         )
         self.assertIn('templateId: "4d19c51c-0d02-43a5-b6ad-6d67f9739b75"', note)
-        self.assertIn('templateVersion: "1.0"', note)
+        self.assertIn('templateVersion: "2.0"', note)
         self.assertIn("generatorPromptVersion: 4", note)
-        self.assertIn("rendererVersion: 5", note)
+        self.assertIn("rendererVersion: 6", note)
         self.assertIn("generatedAt:", note)
-        self.assertIn('fileSlug: "automated-session"', note)
+        self.assertIn('fileSlug: "automated-thread-note"', note)
         self.assertIn('automatedValidation: "passed"', note)
         state = json.loads(self.project.state_path.read_text(encoding="utf-8"))
         thread = state["sources"]["windows"]["threads"]["thread-1"]

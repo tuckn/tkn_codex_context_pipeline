@@ -1,15 +1,43 @@
 # Tkn Codex Context Pipeline
 
 Codex appのProject状態と`~/.codex/sessions`を読み、chatを再利用可能な
-Session Note v2へ変換し、そこから簡潔なDecision Record v3を生成する、
+Thread Note v3へ変換し、そこから簡潔なDecision Record v4とWorking Context v3を生成する、
 独立したローカルデータパイプラインです。
 Project folderにはmarker・設定・contextを一切書きません。
+
+## 用語
+
+本Projectでは、ユーザーから見た会話、その技術的な識別単位、そこから生成する
+artifactを区別します。Codex chatとthreadは異なるレイヤーから見た同じsourceを
+表しますが、それ以外の用語は同義語として扱いません。
+
+| 用語 | 本Projectでの定義 |
+| --- | --- |
+| Codex chat | Codex appに表示される、ユーザー向けの1つの会話。ユーザー向け文書では`chat`を使用する。 |
+| thread | Codex chatの永続的な技術識別単位。`threadId`を持ち、複数のturnを含む。コード、state、report、帰属判定では`thread`を使用する。 |
+| turn | thread内の1回のCodex処理サイクル。通常はuser inputで始まり、完了または中断で終わり、messageやtool itemを含み得る。 |
+| user message | ユーザーが送信した1つのmessage。ユーザーが送信したtextやmultimodal contentを表す標準のデータ用語。 |
+| user instruction | user messageに含まれる依頼または指示。1つのuser messageに複数のinstructionを含められる。 |
+| assistant message | assistant roleを持つCodex生成message。 |
+| final answer | turnを完了する最後のassistant message。中間報告とは区別する。 |
+| item | message、tool call、tool output、reasoning itemなど、turn内の下位要素。 |
+| prompt | model生成を導くinputまたはinstruction。`user message`の固定的な同義語にはしない。 |
+| session | runtimeやlifecycle上の期間、またはCodex session tree。chatやthreadの同義語にはしない。 |
+| rollout file | Codexがthreadごとに保存する内部JSONL log。source evidenceであり、公開互換形式でも会話の同義語でもない。 |
+| Thread Note | 本applicationが1つのsource threadから生成する、source-nearで事実中心の永続Markdown artifact。 |
+| Decision Record | 1つ以上のThread Noteから合成する、再利用可能で永続的な判断。 |
+| Working Context | 1つのProjectで現在真であることを示す、source-backedな短いorientation dashboard。 |
+
+両レイヤーを示す必要がある文章では、初出を**Codex chat（source thread）**とします。
+製品利用者向けの説明では`chat`、技術識別には`thread`または`threadId`を使用します。
+raw Codex inputの保存先`~/.codex/sessions`は維持しますが、そのdirectory名によって
+source objectの標準名がsessionになるわけではありません。
 
 ## 必要なもの
 
 - Python 3.11以上
 - [uv](https://docs.astral.sh/uv/)
-- Session NoteまたはDecision Record生成時に`PATH`から実行できる`codex`
+- Thread Note、Decision Record、Working Context生成時に`PATH`から実行できる`codex`
   - Windowsの場合、次のコマンドでインストールします。`powershell -ExecutionPolicy Bypass -c "irm https://chatgpt.com/codex/install.ps1 | iex"`
 
 ## インストール
@@ -17,11 +45,12 @@ Project folderにはmarker・設定・contextを一切書きません。
 次のコマンドでインストールします。例示している`C:\path\to\tkn_codex_context_pipeline`は、このリポジトリの実際のフォルダパスに置き換えてください。
 
 ```console
-uv tool install "C:\path\to\tkn_codex_context_pipeline"
+cd "C:\path\to\tkn_codex_context_pipeline"
+uv tool install .
 tkn-codex-context --help
 ```
 
-2つ目のコマンドは、インストール後に`tkn-codex-context`を実行できることを確認します。この方式では、インストール時点のコードが使用され、その後のリポジトリの変更は自動的に反映されません。
+最後のコマンドは、インストール後に`tkn-codex-context`を実行できることを確認します。この方式では、インストール時点のコードが使用され、その後のリポジトリの変更は自動的に反映されません。
 
 `git pull`などでリポジトリを更新するたびに、更新後のコードと依存モジュールをインストール済みのコマンドへ反映するため、次のコマンドで再インストールしてください。
 
@@ -31,6 +60,8 @@ tkn-codex-context --help
 ```
 
 リポジトリ更新後は`--reinstall`を使用し、tool環境内のすべてのpackageを再インストールして、cacheされたpackage dataも更新します。`--force`は既存tool環境の再作成や競合するentry pointの置き換えに使用するoptionであり、通常のリポジトリ更新には使用しません。
+
+### 開発用のeditable installation
 
 開発時には、代わりにeditable installationを使用できます。
 
@@ -51,8 +82,8 @@ tkn-codex-context config show
 ```
 
 `init`はグローバル設定とProject registryを作成し、Codex app左ペインの
-Projectごとに空の`sessions/`と`decisions/`を用意します。Session Noteや
-Decision Recordは生成しません。
+Projectごとに空の`thread-notes/`と`decisions/`を用意します。Thread Noteや
+Decision Record、Working Contextは生成しません。
 実行日時は`installed_at`として保存され、通常実行が
 自動処理するのは、この日時以後に作成または更新されたchatだけです。それ以前の
 chatは、明示的な`pull --backfill`または`rebuild`で処理します。
@@ -84,20 +115,22 @@ tkn-codex-context projects list --json
 │   ├── project-registry.jsonl
 │   └── projects/
 │       └── <projectId>/
-│           ├── sessions/
+│           ├── working-context.md
+│           ├── thread-notes/
 │           └── decisions/
 └── state/
     ├── projects/
     │   └── <projectId>/
     │       ├── chat-refresh-state.json
-    │       └── decision-build-state.json
+    │       ├── decision-build-state.json
+    │       └── working-context-build-state.json
     └── reports/
 
 ~/.cache/codex_context_pipeline/
 └── 中断した処理を再開するためのcache
 ```
 
-`data/`はProject registry、Session Note、Decision Recordなどの永続データ、`state/`はrefresh
+`data/`はProject registry、Thread Note、Decision Record、Working Contextなどの永続データ、`state/`はrefresh
 checkpointやrun reportなどの再作成可能な状態・履歴に使用します。
 cacheは既定で`~/.cache`へ分離し、`XDG_CACHE_HOME`が設定されている環境では
 その場所を使用します。実行中だけ必要なmodel入出力などは、Pythonの標準一時
@@ -113,7 +146,7 @@ directoryを使うため、Windowsでは通常`%TMP%`、Linuxでは通常`/tmp`�
 
 commitするのは`.tkn/config.example.yaml`だけです。実設定をcommitしないで
 ください。YAML中の相対パスは、そのYAMLファイルがあるfolderを基準に解決します。
-Session NoteとDecision Recordの生成profileはapplication-ownedで、ユーザー向け
+Thread Note、Decision Record、Working Contextの生成profileはapplication-ownedで、ユーザー向け
 設定keyはありません。旧設定の
 `summary_prompt: null`は読み飛ばします。値を設定した`summary_prompt`が残っている
 場合は、現在のCLIを実行する前にそのkeyを削除してください。
@@ -138,7 +171,7 @@ tkn-codex-context projects fetch
 
 ### Project fetch結果の読み方
 
-`projects fetch`および`session-notes pull`の`projectFetch.projects`には、
+`projects fetch`および`thread-notes pull`の`projectFetch.projects`には、
 現在Codex appに存在するProjectごとに次の情報が出力されます。
 
 | field | 意味 |
@@ -159,7 +192,7 @@ Codex appから消えたProjectは`projectFetch.projects`には含まれませ�
 Projectも含めた状態は`projects list`で確認します。こちらの`status`は次の意味です。
 
 - `active`: 直近のfetch時点で、同じ内部IDのProjectがCodex appに存在する。
-- `inactive`: Codex appからProjectが消えている。registry、Session Note、stateは
+- `inactive`: Codex appからProjectが消えている。registry、Thread Note、stateは
   削除されず、同じIDが戻れば次回fetchで`active`へ戻る。
 - `unknown`: registry recordにstatusがない非標準状態。通常の`init`または
   `projects fetch`が作成したrecordでは発生しない。
@@ -174,21 +207,21 @@ Projectも含めた状態は`projects list`で確認します。こちらの`sta
 `projects list --json`の`roots[*].status`では、現在のrootを`active`、以前のrootを
 帰属判定用に保持したaliasを`historical`と表示します。
 
-### Session Noteを生成する
+### Thread Noteを生成する
 
-`session-notes pull`は、通常処理の対象となるCodex chatを取り込み、Session Noteを
+`thread-notes pull`は、通常処理の対象となるCodex chatを取り込み、Thread Noteを
 作成または更新します。実行前にProject metadataのfetchも自動的に行うため、
 既定のJSON出力は簡潔です。`projectFetchSummary`と`reportSummary`に真偽値と件数を
 表示し、`reportPath`で保存済みの完全なrun reportを示します。Project・thread単位の
 詳細をstdoutにも表示したい場合だけ`--full-output`を使います。
-生成ノートのFrontmatterは`type: summary`です。Project context layoutとの互換性の
-ため、directory名とcommand名は引き続き`sessions`と`session-notes`を使用します。
+生成ノートのFrontmatterは`type: threadNote`です。`thread-notes/`へ保存し、
+`thread-notes` commandで管理します。
 
 最初にdry-runで対象を確認します。dry-runは生成AIを呼び出さず、registry、
-Session Note、refresh state、cache、run reportのいずれも変更しません。
+Thread Note、refresh state、cache、run reportのいずれも変更しません。
 
 ```powershell
-tkn-codex-context session-notes pull --dry-run
+tkn-codex-context thread-notes pull --dry-run
 ```
 
 既定の簡潔な出力に含まれる主なfieldは次の意味です。
@@ -202,8 +235,8 @@ tkn-codex-context session-notes pull --dry-run
 | `projectFetchSummary.newCount` | 新しく検出したProject数 |
 | `projectFetchSummary.pendingCount` | rootの紐付けが必要なProject数 |
 | `reportSummary.mode` | 通常pullは`daily`、過去分は`backfill`、再構築は`rebuild` |
-| `reportSummary.selectedCount` | `--limit`適用後、作成・更新予定のSession Note件数 |
-| `reportSummary.processedCount` | 作成・更新に成功したSession Note件数 |
+| `reportSummary.selectedCount` | `--limit`適用後、作成・更新予定のThread Note件数 |
+| `reportSummary.processedCount` | 作成・更新に成功したThread Note件数 |
 | `reportSummary.failedCount` | 失敗したthread数 |
 | `reportSummary.deferredCount` | runtime上限により次回へ延期したthread数 |
 | `reportSummary.warningCount` | run warningの件数 |
@@ -215,10 +248,10 @@ dry-runはreportを保存しないため、選択されたProject、thread、sou
 確認するときは`--full-output`を使います。
 
 ```powershell
-tkn-codex-context session-notes pull --dry-run --full-output
+tkn-codex-context thread-notes pull --dry-run --full-output
 ```
 
-dry-runで`reportSummary.selectedCount: 0`なら、今回作成・更新するSession Noteは
+dry-runで`reportSummary.selectedCount: 0`なら、今回作成・更新するThread Noteは
 ありません。`reportPath: null`と`reportSummary.processedCount: 0`はdry-runの
 通常動作です。
 
@@ -230,37 +263,37 @@ dry-runで`reportSummary.selectedCount: 0`なら、今回作成・更新するSe
 確認後に生成します。
 
 ```powershell
-tkn-codex-context session-notes pull
+tkn-codex-context thread-notes pull
 ```
 
 通常のpullは30分以上idleのchatだけを処理します。過去分は明示的に実行します。
 
-#### 既存Session Noteの更新判定
+#### 既存Thread Noteの更新判定
 
-既存Session Noteについてsource fingerprint、artifact schema、model、
+既存Thread Noteについてsource fingerprint、artifact schema、model、
 reasoning effort、要約prompt、出力schema、Markdown template、generator prompt
 envelope、renderer versionが現在の条件とすべて一致する場合は
-`scan.unchanged`としてスキップします。生成AIは呼び出さず、Session Noteとstateも
+`scan.unchanged`としてスキップします。生成AIは呼び出さず、Thread Noteとstateも
 変更しません。
 
 sourceが更新された場合、現在より古いschemaの場合、またはmodelなどの生成条件が
 異なる場合は、自動的に作成・更新候補になります。現在より新しい未対応schemaは、
 誤って上書きせずエラーで停止します。
 
-条件が同じSession Noteも再生成する場合は`--force`を指定します。
+条件が同じThread Noteも再生成する場合は`--force`を指定します。
 
 ```powershell
-tkn-codex-context session-notes pull --force --dry-run
-tkn-codex-context session-notes pull --force
+tkn-codex-context thread-notes pull --force --dry-run
+tkn-codex-context thread-notes pull --force
 ```
 
 通常の`pull --force`が対象にするのは`installed_at`以後のchatです。全履歴を
 強制再生成する場合は、過去分と通常分をそれぞれ実行します。
 
 ```powershell
-tkn-codex-context session-notes pull --backfill --all --force --dry-run
-tkn-codex-context session-notes pull --backfill --all --force
-tkn-codex-context session-notes pull --force
+tkn-codex-context thread-notes pull --backfill --all --force --dry-run
+tkn-codex-context thread-notes pull --backfill --all --force
+tkn-codex-context thread-notes pull --force
 ```
 
 #### 過去chatをbackfillする
@@ -270,9 +303,9 @@ tkn-codex-context session-notes pull --force
 スキップします。dry-runでは生成AIも書き込みも発生しません。
 
 ```powershell
-tkn-codex-context session-notes pull --backfill --project-id <projectIdOrNameOrRoot> --dry-run
-tkn-codex-context session-notes pull --backfill --all --dry-run
-tkn-codex-context session-notes pull --backfill --all
+tkn-codex-context thread-notes pull --backfill --project-id <projectIdOrNameOrRoot> --dry-run
+tkn-codex-context thread-notes pull --backfill --all --dry-run
+tkn-codex-context thread-notes pull --backfill --all
 ```
 
 `--backfill`には、誤って全履歴を処理しないよう`--project-id`または`--all`が
@@ -286,42 +319,42 @@ tkn-codex-context session-notes pull --backfill --all
 #### 1つのProjectをrebuildする
 
 `rebuild`は、1つのProjectに帰属する全chatを`installed_at`やidle時間に関係なく
-再評価し、Session Note directoryとrefresh stateを整合した状態へ再構築します。
+再評価し、Thread Note directoryとrefresh stateを整合した状態へ再構築します。
 生成と検証がすべて成功してから新しい構成へ切り替えるため、途中失敗時は既存の
-Session Noteとstateを維持します。
+Thread Noteとstateを維持します。
 
 現在より古いすべての数値schema versionは再生成対象です。最新schemaかつsourceと
 生成条件が同じノートは再利用します。現在より新しいschemaは未対応形式として
 停止します。`--force`を付けると、最新のノートも含めて全対象を再生成します。
 
 ```powershell
-tkn-codex-context session-notes rebuild --project-id <projectIdOrNameOrRoot> --dry-run
-tkn-codex-context session-notes rebuild --project-id <projectIdOrNameOrRoot>
-tkn-codex-context session-notes rebuild --project-id <projectIdOrNameOrRoot> --force
+tkn-codex-context thread-notes rebuild --project-id <projectIdOrNameOrRoot> --dry-run
+tkn-codex-context thread-notes rebuild --project-id <projectIdOrNameOrRoot>
+tkn-codex-context thread-notes rebuild --project-id <projectIdOrNameOrRoot> --force
 ```
 
-#### Session Noteをvalidateする
+#### Thread Noteをvalidateする
 
-`validate`は、指定した1つのSession Noteについて、現在のschema、必須Frontmatter、
+`validate`は、指定した1つのThread Noteについて、現在のschema、必須Frontmatter、
 source thread/ref、source fingerprint、必須見出し、本文とFrontmatterのstatus一致を
 検証します。ファイルを変更せず、生成AIも呼び出しません。
 
 ```powershell
-tkn-codex-context validate <session-note.md>
+tkn-codex-context validate <thread-note.md>
 ```
 
 ### Decision Recordを生成する
 
-`decisions build`は、1つのProjectに保存されたSession Note v2を一次入力として
+`decisions build`は、1つのProjectに保存されたThread Note v3を一次入力として
 durableなdecisionを抽出します。通常経路では元のCodex chatを読み直しません。
-`Explicit Decision`を持つ複数のSession Noteをbounded synthesis batchとしてモデルへ
-まとめて渡します。生成単位はSession Noteではなくcentral decisionです。複数のNoteが
-同じ判断の成立・修正・検証を示す場合は、`sourceSessionRefs`に根拠をまとめた1つの
+`Explicit Decision`を持つ複数のThread Noteをbounded synthesis batchとしてモデルへ
+まとめて渡します。生成単位はThread Noteではなくcentral decisionです。複数のNoteが
+同じ判断の成立・修正・検証を示す場合は、`sourceThreadNoteRefs`に根拠をまとめた1つの
 Decision Recordを生成します。既存Decision Recordのindexも渡し、同じdecisionなら
 既存IDを参照します。
 
 最初に書き込みなしの計画を確認します。`decisions build`は既定でread-onlyです。
-生成AIを呼び出さず、registry、Session Note、Decision Record、state、run reportを
+生成AIを呼び出さず、registry、Thread Note、Decision Record、state、run reportを
 変更しません。
 
 ```powershell
@@ -329,9 +362,9 @@ tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot>
 tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --full-output
 ```
 
-`reportSummary.selectedCount`は生成対象のSession Note数、`synthesisBatchCount`はmodelへ
+`reportSummary.selectedCount`は生成対象のThread Note数、`synthesisBatchCount`はmodelへ
 渡すbatch数、`createdCount`は新規record数、`updatedCount`は未review recordの
-再構成数、`referencedExistingCount`は既存recordへ紐付けた件数です。dry-runで個別のSession Noteを
+再構成数、`referencedExistingCount`は既存recordへ紐付けた件数です。dry-runで個別のThread Noteを
 確認する場合は`--full-output`を使用します。
 
 確認後、`--write`を明示して生成・保存します。
@@ -341,7 +374,7 @@ tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --write
 ```
 
 新規recordは`data/projects/<projectId>/decisions/DR-NNNN-<slug>.md`に保存します。
-新規生成するDecision Record v3は`Decision`だけを常設し、それ以外のsectionは
+新規生成するDecision Record v4は`Decision`だけを常設し、それ以外のsectionは
 source-backedな内容がある場合だけ表示します。空のsectionや`None.` placeholderは出力しません。
 明示的なuser acceptanceまたは成立済みのoperational practiceが確認できる場合だけ
 `Accepted`とし、それ以外は`Proposed`にします。statusと実装・検証状態は別fieldで
@@ -361,7 +394,7 @@ Decision Recordは議事録ではなく、後続作業を導く1つの判断を�
 | `Alternatives` | 検討したが採用しなかった選択肢 |
 | `Scope` | 適用条件、適用外、再利用できる原則、Project固有の詳細 |
 | `Verification` | 確認済みの根拠、未確認事項・制約、確認日 |
-| `Related Evidence` | 判断の根拠となったSession Note、file、specなど |
+| `Related Evidence` | 判断の根拠となったThread Note、file、specなど |
 | `Follow-up` | 判断後に残っている具体的な作業 |
 | `Supersession` | 置き換えた判断、またはこの判断を置き換えた新しい判断 |
 
@@ -371,42 +404,84 @@ Decision Recordは議事録ではなく、後続作業を導く1つの判断を�
 `implementationStatus`は未着手、途中、実装済み、検証済みのどこまで進んだかを示します。
 `reviewStatus`は人が内容をreviewしたか、`automatedValidation`は必須fieldや構造の自動検証に
 通ったかを示します。`automatedValidation: passed`は、記載された事実や実環境を人が確認した
-という意味ではありません。`sourceSessionRefs`は根拠となったSession Note、
+という意味ではありません。`sourceThreadNoteRefs`は根拠となったThread Note、
 `promotionStatus`と`promotedTo`は再利用可能な原則やglobal contextなど、Project内の
 Decision Recordより広い範囲への昇格状態です。model、prompt、schema、hash、生成日時などの
 fieldは生成条件の追跡用なので、通常の初読では読み飛ばせます。working context、repository
 文書、global context、Skillへの反映先もFrontmatterの`*Targets` fieldで管理し、本文には
 表示しません。
 
-既存のDecision Record v1とreview済みv2はそのまま読み取り、自動上書きしません。
-Codex生成かつ`reviewStatus: unreviewed`のv2は、対象を確認して
-`decisions build --write`を実行したときに、IDと初回dateを保ってv3へ再構成できます。
+既存のDecision Record v1-v3はそのまま読み取り、自動上書きしません。
+Codex生成かつ`reviewStatus: unreviewed`のv2-v3は、対象を確認して
+`decisions build --write`を実行したときに、IDと初回dateを保ってv4へ再構成できます。
 書き込みなしの計画確認だけでは変更しません。
 
-Decision生成は入力Session Noteを変更しません。生成依存はDecision Record側の
-`sourceSessionRefs`に保持し、Session Noteごとの処理済み状態と逆引き`decisionIds`は
+Decision生成は入力Thread Noteを変更しません。生成依存はDecision Record側の
+`sourceThreadNoteRefs`に保持し、Thread Noteごとの処理済み状態と逆引き`decisionIds`は
 `decision-build-state.json`へ記録します。run reportの`decisionRefs`でも今回の対応を
-確認できます。生成結果がno-actionの場合もstateだけに記録するため、同じSession Noteを
+確認できます。生成結果がno-actionの場合もstateだけに記録するため、同じThread Noteを
 working contextなど別の下流処理で利用できます。
 
-source hashとdecision生成profileが同じSession Noteは次回`unchanged`としてスキップします。
+source hashとdecision生成profileが同じThread Noteは次回`unchanged`としてスキップします。
 再評価する場合は、書き込みを明示したうえで`--force`を指定します。同一decisionは既存IDへ
 紐付けます。`reviewStatus: unreviewed`のCodex生成recordは、複数Noteから得た訂正や重要な
 追加根拠がある場合、IDと初回dateを保って再構成できます。review済みrecordのcentral
-judgmentは自動更新せず、新しい`sourceSessionRefs`と`Related Evidence`だけを追記します。
+judgmentは自動更新せず、新しい`sourceThreadNoteRefs`と`Related Evidence`だけを追記します。
 
 ```powershell
 tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --write --force
 ```
 
-生成したDecision Record v3と既存のv2は単独でvalidateできます。
+生成したDecision Record v4と既存のv2-v3は単独でvalidateできます。
 
 ```powershell
 tkn-codex-context decisions validate <decision-record.md>
 ```
 
+### Working Contextを生成する
+
+`working-context build`は、現在のProjectにある検証済みThread Note v3、Decision Record、
+選択したroot文書、read-onlyなGit snapshotをまとめ、短い`working-context.md`を生成します。
+時系列の履歴ではなくcurrent truthを扱い、古い記述は置換し、Accepted decisionをdashboardへ
+反映します。Proposed decisionをcurrent truthへ昇格しません。
+
+最初にread-onlyな計画を確認します。既定ではCodexを呼び出さず、registry、artifact、state、
+run reportを変更しません。
+
+```powershell
+tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot>
+tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot> --full-output
+```
+
+source件数と変更計画を確認後、生成と書き込みを明示します。
+
+```powershell
+tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot> --write
+```
+
+生成結果は`data/projects/<projectId>/working-context.md`に保存します。Working Context v3は
+`Project Overview`と`Current Truth`を常設し、それ以外はsource-backedな内容がある場合だけ
+表示します。`Semantic Context`には、Project固有の小さな`Semantic Glossary`、`Taxonomy`、
+明示的な関係を含められます。生成する事実、用語、分類、関係には、既存の`project:/`または
+`repo:/` logical source referenceを必ず付けます。
+
+入力と生成profileのfingerprintが同じ場合はno-opです。`--write --force`で同じ入力を
+再評価できます。また、生成artifactのhashをstateへ保存します。生成後に
+`working-context.md`が手編集され、さらに入力が変化した場合は、自動上書きせず停止します。
+編集内容を確認して生成結果へ明示的に置き換える場合だけ`--allow-edited`を使用します。
+
+```powershell
+tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot> --write --allow-edited
+```
+
+生成したWorking Context v3は単独でvalidateできます。
+
+```powershell
+tkn-codex-context working-context validate <working-context.md>
+```
+
 `projects list`の既定出力を除き、各コマンドはJSON結果を出力します。
-機械可読な一覧には`projects list --json`を使います。Session NoteとDecision Recordの
+機械可読な一覧には`projects list --json`を使います。Thread Note、Decision Record、Working Contextの
 commandは既定で簡潔な要約を出力し、通常実行の完全なreportは`reportPath`へ保存します。
 完全なreport JSONもstdoutへ出す場合は`--full-output`を追加します。
 
@@ -424,15 +499,15 @@ consoleが対応している場合にvirtual-terminal processingを有効化し�
 - `-v` / `--verbose`: `[DEBUG]`の詳細な診断情報と元の進捗eventを追加表示
 
 ```powershell
-tkn-codex-context session-notes rebuild --project-id <projectIdOrNameOrRoot>
-tkn-codex-context -q session-notes rebuild --project-id <projectIdOrNameOrRoot> --dry-run
-tkn-codex-context -v session-notes pull
+tkn-codex-context thread-notes rebuild --project-id <projectIdOrNameOrRoot>
+tkn-codex-context -q thread-notes rebuild --project-id <projectIdOrNameOrRoot> --dry-run
+tkn-codex-context -v thread-notes pull
 ```
 
 ## 対象範囲
 
-現在はSession NoteとDecision Recordの生成を扱います。current working contextと
-global contextはまだ対象外です。
+現在はThread Note、Decision Record、Project Working Contextの生成を扱います。
+Project横断またはglobal contextはまだ対象外です。
 
 Codex app ProjectのPrimary rootとSecondary rootは、どちらも現在有効なrootとして
 扱います。Secondaryをhistorical rootとはみなしません。複数rootが異なるGit
@@ -453,7 +528,8 @@ threadは、Codex appの明示assignment、全active rootに対する一意なcw
 
 ## Codex内部形式への依存
 
-`.codex-global-state.json`とJSONL sessionはCodex appのprivateな内部形式であり、
+`.codex-global-state.json`と`~/.codex/sessions`配下のJSONL thread logは
+Codex appのprivateな内部形式であり、
 公開された互換contractではありません。adapterは必要な構造を厳密に検証し、
 破損・欠落・互換性のない変更を検出した場合は推測せずfail closedします。
 元JSONLは常にread-onlyです。
@@ -467,7 +543,7 @@ refresh stateは検証後にatomic反映し、通常のpullとrebuildの中断�
 
 ### Application-ownedな生成profile
 
-Session NoteとDecision Recordの生成resourceはapplication-ownedな開発者向けassetです。ユーザーはprompt、
+Thread Note、Decision Record、Working Contextの生成resourceはapplication-ownedな開発者向けassetです。ユーザーはprompt、
 schema、template、profileの選択・上書きを行えません。現在は1つのprofileをbundle
 として読み込み、将来、開発者が別の要約patternを追加するときは同階層へprofile
 directoryを追加します。
@@ -479,7 +555,12 @@ src/tkn_codex_context/profiles/
 │       ├── prompt.md
 │       ├── output.schema.json
 │       └── template.md
-└── decision/
+├── decision/
+│   └── default/
+│       ├── prompt.md
+│       ├── output.schema.json
+│       └── template.md
+└── working_context/
     └── default/
         ├── prompt.md
         ├── output.schema.json
@@ -498,12 +579,17 @@ src/tkn_codex_context/profiles/
 source event + prompt + output schema
     -> 検証済みの中間JSON
     -> Python renderer + template
-    -> Session Note
+    -> Thread Note
 
-Session Note + existing decision index + prompt + output schema
+Thread Note + existing decision index + prompt + output schema
     -> 検証済みのdecision中間JSON
     -> Python renderer + template
     -> Decision Record
+
+Thread Notes + Decision Records + repository evidence + prompt + output schema
+    -> 検証済みのcurrent-context中間JSON
+    -> Python renderer + template
+    -> Working Context
 ```
 
 output schemaは完成したMarkdownではなく、生成AIが返す中間JSONの契約です。
@@ -517,7 +603,7 @@ application contractです。bundle loaderはstrict schemaとtemplate placeholde
 | 既存fieldの上限やenum変更 | schema、説明している場合はprompt、test |
 | 生成fieldの追加・削除・改名 | schema、prompt、Pythonの検証・renderer、test。配置も変わる場合はtemplate |
 | Markdown sectionの順序・見出し変更 | templateとその`version`。必須見出し・placeholder変更時はPython検証・testも変更 |
-| Frontmatterや互換性のないSession Note形式の変更 | Python renderer・検証・test。通常は`SESSION_SCHEMA_VERSION`も更新 |
+| Frontmatterや互換性のないThread Note形式の変更 | Python renderer・検証・test。通常は`THREAD_NOTE_SCHEMA_VERSION`も更新 |
 
 schemaはSHA-256で識別し、promptとtemplateは明示的なversionも持ちます。3つのhashは
 生成fingerprintへ含め、provenanceは`config show`と生成ノートmetadataで確認できます。

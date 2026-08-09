@@ -22,19 +22,19 @@ from tkn_codex_context.decisions import (
     validate_decision_record,
 )
 from tkn_codex_context.frontmatter import parse_simple_frontmatter
-from tkn_codex_context.session_notes import PipelineConfig, PipelineError, Project
+from tkn_codex_context.thread_notes import PipelineConfig, PipelineError, Project
 
 
-def session_note(*, title: str = "Decision source", explicit: bool = True) -> str:
+def thread_note(*, title: str = "Decision source", explicit: bool = True) -> str:
     decision_section = (
-        "\n### Explicit Decision\n\n- Session Noteを一次入力としてdecisionを生成する。\n"
+        "\n### Explicit Decision\n\n- Thread Noteを一次入力としてdecisionを生成する。\n"
         if explicit
         else "\n### Proposal\n\n- Decision生成を検討する。\n"
     )
     return (
         "---\n"
-        "type: summary\n"
-        "schemaVersion: 2\n"
+        "type: threadNote\n"
+        "schemaVersion: 3\n"
         f"title: {json.dumps(title, ensure_ascii=False)}\n"
         "description: Decision distillation source.\n"
         "generator: Codex\n"
@@ -42,13 +42,13 @@ def session_note(*, title: str = "Decision source", explicit: bool = True) -> st
         "reviewStatus: unreviewed\n"
         "date: 2026-08-03T09:00:00+09:00\n"
         "updated: 2026-08-03T10:00:00+09:00\n"
-        "sessionId: 20260803T090000+0900\n"
+        "threadNoteId: 20260803T090000+0900\n"
         "sourceThreadIds:\n"
         "  - thread-1\n"
         "sourceRefs:\n"
         "  - sessions/example.jsonl\n"
         "---\n\n"
-        "# Session Note\n\n"
+        "# Thread Note\n\n"
         "## Summary\n\n"
         "- Decision生成方針を決定した。\n\n"
         "## Key Developments\n"
@@ -66,24 +66,24 @@ def new_decision_output(
             {
                 "disposition": "create",
                 "existingDecisionId": "",
-                "sourceSessionRefs": source_refs or ["project:/sessions/one.md"],
-                "title": "Session Noteを一次入力にする",
-                "fileSlug": "use-session-notes-as-primary-input",
-                "description": "Decision生成ではSession Noteを一次入力として利用する。",
+                "sourceThreadNoteRefs": source_refs or ["project:/thread-notes/one.md"],
+                "title": "Thread Noteを一次入力にする",
+                "fileSlug": "use-thread-notes-as-primary-input",
+                "description": "Decision生成ではThread Noteを一次入力として利用する。",
                 "status": "Accepted",
                 "scope": "project",
                 "implementationStatus": "implemented",
                 "context": ["chatを繰り返し読む処理を避ける必要がある。"],
-                "decision": "Decision生成ではSession Noteを一次入力として利用する。",
+                "decision": "Decision生成ではThread Noteを一次入力として利用する。",
                 "rationale": ["既にcuratedされた事実を再利用できる。"],
                 "benefits": ["raw chatの再読を通常経路から除外できる。"],
-                "costsAndRisks": ["Session Noteにない根拠は補完できない。"],
+                "costsAndRisks": ["Thread Noteにない根拠は補完できない。"],
                 "alternativesConsidered": ["毎回raw chatを読み直す。"],
                 "appliesWhen": ["Codex chat由来のdecisionを生成するとき。"],
                 "doesNotApplyWhen": [],
                 "reusablePrinciples": ["curated artifactを下流処理の入力にする。"],
-                "projectSpecificDetails": ["Session Note v2を利用する。"],
-                "verificationEvidence": ["Session Note pipelineが実装済み。"],
+                "projectSpecificDetails": ["Thread Note v3を利用する。"],
+                "verificationEvidence": ["Thread Note pipelineが実装済み。"],
                 "verificationLimitations": [],
                 "validationDate": "2026-08-03",
                 "relatedEvidence": ["project:/README_ja.md"],
@@ -112,7 +112,7 @@ def existing_decision_output(
             item[key] = "existing"
         elif key == "existingDecisionId":
             item[key] = decision_id
-        elif key == "sourceSessionRefs":
+        elif key == "sourceThreadNoteRefs":
             continue
         elif key == "materialization":
             item[key] = {name: [] for name in value}
@@ -131,7 +131,7 @@ def update_decision_output(
     item = output["decisions"][0]
     item["disposition"] = "update"
     item["existingDecisionId"] = decision_id
-    item["description"] = "複数のSession Noteを統合してDecisionを更新する。"
+    item["description"] = "複数のThread Noteを統合してDecisionを更新する。"
     item["verificationLimitations"] = ["Direct validation remains incomplete."]
     return output
 
@@ -161,7 +161,7 @@ def decision_project(tmp_path: Path) -> tuple[Project, PipelineConfig]:
         state_directory=tmp_path / "state" / "projects" / "project-1",
     )
     project.current_root.mkdir(parents=True)
-    project.sessions_path.mkdir(parents=True)
+    project.thread_notes_path.mkdir(parents=True)
     assert project.state_directory is not None
     project.state_directory.mkdir(parents=True)
     config = PipelineConfig(
@@ -216,7 +216,7 @@ def test_decision_validator_keeps_generated_v2_compatibility(tmp_path: Path) -> 
     assert validation["decisionId"] == "DR-0003"
 
 
-def test_unreviewed_codex_v2_is_a_v3_quality_upgrade_candidate(tmp_path: Path) -> None:
+def test_unreviewed_codex_v2_is_a_v4_quality_upgrade_candidate(tmp_path: Path) -> None:
     decision = ExistingDecision(
         decision_id="DR-0003",
         path=tmp_path / "DR-0003-example.md",
@@ -237,13 +237,13 @@ def test_unreviewed_codex_v2_is_a_v3_quality_upgrade_candidate(tmp_path: Path) -
     assert reviewed.quality_upgrade_required is False
 
 
-def test_unreviewed_v2_can_be_resynthesized_as_v3(
+def test_unreviewed_v2_can_be_resynthesized_as_v4(
     decision_project: tuple[Project, PipelineConfig],
     tmp_path: Path,
 ) -> None:
     project, config = decision_project
-    source = project.sessions_path / "one.md"
-    source.write_text(session_note(), encoding="utf-8")
+    source = project.thread_notes_path / "one.md"
+    source.write_text(thread_note(), encoding="utf-8")
     directory = project.context_path / "decisions"
     directory.mkdir(parents=True)
     fixture = (Path(__file__).parent / "fixtures" / "decision-v2.md").read_text(encoding="utf-8")
@@ -256,7 +256,7 @@ def test_unreviewed_v2_can_be_resynthesized_as_v3(
         config,
         project,
         generator=FakeDecisionGenerator(
-            update_decision_output("DR-0003", ["project:/sessions/one.md"])
+            update_decision_output("DR-0003", ["project:/thread-notes/one.md"])
         ),
         write=True,
         cache_root=tmp_path / "reports",
@@ -264,7 +264,7 @@ def test_unreviewed_v2_can_be_resynthesized_as_v3(
 
     assert [item["decisionId"] for item in report["updated"]] == ["DR-0003"]
     metadata = parse_simple_frontmatter(record.read_text(encoding="utf-8"))
-    assert metadata["schemaVersion"] == "3"
+    assert metadata["schemaVersion"] == "4"
     assert metadata["date"] == original_date
     assert "None." not in record.read_text(encoding="utf-8")
 
@@ -274,12 +274,12 @@ def test_decision_output_requires_known_existing_id() -> None:
         validate_decision_output(
             existing_decision_output("DR-0001"),
             set(),
-            {"project:/sessions/one.md"},
+            {"project:/thread-notes/one.md"},
         )
     validate_decision_output(
         new_decision_output(),
         set(),
-        {"project:/sessions/one.md"},
+        {"project:/thread-notes/one.md"},
     )
 
 
@@ -293,7 +293,7 @@ def test_decision_output_rejects_context_artifacts_as_repository_documentation()
         validate_decision_output(
             output,
             set(),
-            {"project:/sessions/one.md"},
+            {"project:/thread-notes/one.md"},
         )
 
 
@@ -302,7 +302,7 @@ def test_old_unreviewed_decision_requires_quality_update() -> None:
         validate_decision_output(
             existing_decision_output("DR-0001"),
             {"DR-0001"},
-            {"project:/sessions/one.md"},
+            {"project:/thread-notes/one.md"},
             {"DR-0001"},
             {"DR-0001"},
         )
@@ -316,7 +316,7 @@ def test_decision_output_rejects_unavailable_decision_evidence() -> None:
         validate_decision_output(
             output,
             set(),
-            {"project:/sessions/one.md"},
+            {"project:/thread-notes/one.md"},
         )
 
 
@@ -324,8 +324,11 @@ def test_decision_dry_run_selects_only_explicit_decisions(
     decision_project: tuple[Project, PipelineConfig],
 ) -> None:
     project, config = decision_project
-    (project.sessions_path / "one.md").write_text(session_note(), encoding="utf-8")
-    (project.sessions_path / "two.md").write_text(session_note(title="Proposal only", explicit=False), encoding="utf-8")
+    (project.thread_notes_path / "one.md").write_text(thread_note(), encoding="utf-8")
+    (project.thread_notes_path / "two.md").write_text(
+        thread_note(title="Proposal only", explicit=False),
+        encoding="utf-8",
+    )
 
     report, report_path = execute_decision_build(
         config,
@@ -346,8 +349,8 @@ def test_decision_write_creates_record_without_mutating_source_and_becomes_uncha
     tmp_path: Path,
 ) -> None:
     project, config = decision_project
-    source = project.sessions_path / "one.md"
-    original_source = session_note()
+    source = project.thread_notes_path / "one.md"
+    original_source = thread_note()
     source.write_text(original_source, encoding="utf-8")
     generator = FakeDecisionGenerator(new_decision_output())
     progress_events: list[dict[str, object]] = []
@@ -367,9 +370,9 @@ def test_decision_write_creates_record_without_mutating_source_and_becomes_uncha
     decision = project.context_path / report["created"][0]["decisionRecord"]
     validation = validate_decision_record(decision)
     assert validation["decisionId"] == "DR-0001"
-    assert validation["schemaVersion"] == 3
+    assert validation["schemaVersion"] == 4
     decision_text = decision.read_text(encoding="utf-8")
-    assert "schemaVersion: 3" in decision_text
+    assert "schemaVersion: 4" in decision_text
     assert "## Decision" in decision_text
     assert "## Why" in decision_text
     assert "## Follow-up" in decision_text
@@ -380,12 +383,12 @@ def test_decision_write_creates_record_without_mutating_source_and_becomes_uncha
     assert completed["decisionRecordPaths"] == [str(decision.absolute())]
     assert source.read_text(encoding="utf-8") == original_source
     assert report["processed"][0]["decisionRefs"] == [
-        "project:/decisions/DR-0001-use-session-notes-as-primary-input.md"
+        "project:/decisions/DR-0001-use-thread-notes-as-primary-input.md"
     ]
     state = json.loads(
         (project.state_directory / DECISION_STATE_FILENAME).read_text(encoding="utf-8")  # type: ignore[operator]
     )
-    assert state["sources"]["sessions/one.md"]["decisionIds"] == ["DR-0001"]
+    assert state["sources"]["thread-notes/one.md"]["decisionIds"] == ["DR-0001"]
 
     candidates, scan, failures = scan_decision_sources(project, config)
     assert candidates == []
@@ -398,8 +401,8 @@ def test_existing_decision_is_referenced_without_creating_duplicate(
     tmp_path: Path,
 ) -> None:
     project, config = decision_project
-    first = project.sessions_path / "one.md"
-    first.write_text(session_note(), encoding="utf-8")
+    first = project.thread_notes_path / "one.md"
+    first.write_text(thread_note(), encoding="utf-8")
     execute_decision_build(
         config,
         project,
@@ -407,8 +410,8 @@ def test_existing_decision_is_referenced_without_creating_duplicate(
         write=True,
         cache_root=tmp_path / "reports-one",
     )
-    second = project.sessions_path / "two.md"
-    second.write_text(session_note(title="Same decision"), encoding="utf-8")
+    second = project.thread_notes_path / "two.md"
+    second.write_text(thread_note(title="Same decision"), encoding="utf-8")
 
     report, _path = execute_decision_build(
         config,
@@ -416,7 +419,7 @@ def test_existing_decision_is_referenced_without_creating_duplicate(
         generator=FakeDecisionGenerator(
             existing_decision_output(
                 "DR-0001",
-                ["project:/sessions/two.md"],
+                ["project:/thread-notes/two.md"],
             )
         ),
         write=True,
@@ -427,11 +430,11 @@ def test_existing_decision_is_referenced_without_creating_duplicate(
     assert report["referencedExisting"] == ["DR-0001"]
     assert len(list((project.context_path / "decisions").glob("*.md"))) == 1
     assert "project:/decisions/" not in second.read_text(encoding="utf-8")
-    decision_text = (project.context_path / "decisions/DR-0001-use-session-notes-as-primary-input.md").read_text(
+    decision_text = (project.context_path / "decisions/DR-0001-use-thread-notes-as-primary-input.md").read_text(
         encoding="utf-8"
     )
-    assert "project:/sessions/one.md" in decision_text
-    assert "project:/sessions/two.md" in decision_text
+    assert "project:/thread-notes/one.md" in decision_text
+    assert "project:/thread-notes/two.md" in decision_text
 
 
 def test_unreviewed_existing_decision_can_be_resynthesized_from_later_session(
@@ -439,8 +442,8 @@ def test_unreviewed_existing_decision_can_be_resynthesized_from_later_session(
     tmp_path: Path,
 ) -> None:
     project, config = decision_project
-    first = project.sessions_path / "one.md"
-    first.write_text(session_note(), encoding="utf-8")
+    first = project.thread_notes_path / "one.md"
+    first.write_text(thread_note(), encoding="utf-8")
     execute_decision_build(
         config,
         project,
@@ -448,10 +451,10 @@ def test_unreviewed_existing_decision_can_be_resynthesized_from_later_session(
         write=True,
         cache_root=tmp_path / "reports-one",
     )
-    decision = project.context_path / "decisions/DR-0001-use-session-notes-as-primary-input.md"
+    decision = project.context_path / "decisions/DR-0001-use-thread-notes-as-primary-input.md"
     original_date = parse_simple_frontmatter(decision.read_text(encoding="utf-8"))["date"]
-    second = project.sessions_path / "two.md"
-    second.write_text(session_note(title="Improved evidence"), encoding="utf-8")
+    second = project.thread_notes_path / "two.md"
+    second.write_text(thread_note(title="Improved evidence"), encoding="utf-8")
 
     report, _path = execute_decision_build(
         config,
@@ -459,7 +462,7 @@ def test_unreviewed_existing_decision_can_be_resynthesized_from_later_session(
         generator=FakeDecisionGenerator(
             update_decision_output(
                 "DR-0001",
-                ["project:/sessions/two.md"],
+                ["project:/thread-notes/two.md"],
             )
         ),
         write=True,
@@ -472,22 +475,22 @@ def test_unreviewed_existing_decision_can_be_resynthesized_from_later_session(
     decision_text = decision.read_text(encoding="utf-8")
     metadata = parse_simple_frontmatter(decision_text)
     assert metadata["date"] == original_date
-    assert "複数のSession Noteを統合してDecisionを更新する。" in decision_text
+    assert "複数のThread Noteを統合してDecisionを更新する。" in decision_text
     assert "**Limitations**\n\n- Direct validation remains incomplete." in decision_text
-    assert "project:/sessions/one.md" in decision_text
-    assert "project:/sessions/two.md" in decision_text
+    assert "project:/thread-notes/one.md" in decision_text
+    assert "project:/thread-notes/two.md" in decision_text
 
 
-def test_multiple_session_notes_synthesize_one_decision(
+def test_multiple_thread_notes_synthesize_one_decision(
     decision_project: tuple[Project, PipelineConfig],
     tmp_path: Path,
 ) -> None:
     project, config = decision_project
-    first = project.sessions_path / "one.md"
-    second = project.sessions_path / "two.md"
-    first.write_text(session_note(title="Initial choice"), encoding="utf-8")
-    second.write_text(session_note(title="Later verification"), encoding="utf-8")
-    source_refs = ["project:/sessions/one.md", "project:/sessions/two.md"]
+    first = project.thread_notes_path / "one.md"
+    second = project.thread_notes_path / "two.md"
+    first.write_text(thread_note(title="Initial choice"), encoding="utf-8")
+    second.write_text(thread_note(title="Later verification"), encoding="utf-8")
+    source_refs = ["project:/thread-notes/one.md", "project:/thread-notes/two.md"]
     output = new_decision_output(source_refs)
     output["decisions"][0]["reusablePrinciples"] = []
     output["decisions"][0]["verificationLimitations"] = ["Direct endpoint validation was incomplete."]
@@ -501,13 +504,13 @@ def test_multiple_session_notes_synthesize_one_decision(
         cache_root=tmp_path / "reports",
     )
 
-    assert generator.calls == [["sessions/one.md", "sessions/two.md"]]
+    assert generator.calls == [["thread-notes/one.md", "thread-notes/two.md"]]
     assert len(report["created"]) == 1
-    assert report["created"][0]["sourceSessionRefs"] == source_refs
+    assert report["created"][0]["sourceThreadNoteRefs"] == source_refs
     decision = project.context_path / report["created"][0]["decisionRecord"]
     decision_text = decision.read_text(encoding="utf-8")
-    assert decision_text.count("project:/sessions/one.md") == 1
-    assert decision_text.count("project:/sessions/two.md") == 1
+    assert decision_text.count("project:/thread-notes/one.md") == 1
+    assert decision_text.count("project:/thread-notes/two.md") == 1
     assert "**Limitations**\n\n- Direct endpoint validation was incomplete." in decision_text
     assert 'promotionStatus: "no-action"' in decision_text
     assert "project:/decisions/" not in first.read_text(encoding="utf-8")
@@ -519,8 +522,8 @@ def test_no_action_is_remembered_without_finalizing_session(
     tmp_path: Path,
 ) -> None:
     project, config = decision_project
-    source = project.sessions_path / "one.md"
-    original = session_note()
+    source = project.thread_notes_path / "one.md"
+    original = thread_note()
     source.write_text(original, encoding="utf-8")
 
     report, _path = execute_decision_build(
@@ -531,7 +534,7 @@ def test_no_action_is_remembered_without_finalizing_session(
         cache_root=tmp_path / "reports",
     )
 
-    assert report["noAction"] == ["sessions/one.md"]
+    assert report["noAction"] == ["thread-notes/one.md"]
     assert source.read_text(encoding="utf-8") == original
     candidates, scan, failures = scan_decision_sources(project, config)
     assert candidates == []
@@ -544,8 +547,8 @@ def test_transaction_rolls_back_decision_when_state_write_fails(
     tmp_path: Path,
 ) -> None:
     project, config = decision_project
-    source = project.sessions_path / "one.md"
-    original = session_note()
+    source = project.thread_notes_path / "one.md"
+    original = thread_note()
     source.write_text(original, encoding="utf-8")
 
     with patch(

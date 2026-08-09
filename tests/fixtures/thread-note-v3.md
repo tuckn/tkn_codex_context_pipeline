@@ -1,26 +1,26 @@
 ---
-type: session
-schemaVersion: 2
-title: Factual Session Contract
-description: The session writer was rebuilt as a source-near factual digest.
+type: threadNote
+schemaVersion: 3
+title: Factual Thread Note Contract
+description: The Thread Note writer was rebuilt as a source-near factual digest.
 generator: Codex
 status: done
 date: 2026-02-01T09:00:00+09:00
 updated: 2026-02-01T10:00:00+09:00
-sessionId: 20260201T090000+0900
+threadNoteId: 20260201T090000+0900
 ---
 
-# Session Note
+# Thread Note
 
 ## Summary
 
-- The session writer was rebuilt as a source-near factual digest.
+- The Thread Note writer was rebuilt as a source-near factual digest.
 - Required content was reduced to summary, key developments, and last known state.
 - Semantic promotion remains a downstream review responsibility.
 
 ## Key Developments
 
-### WI-01: Session contract
+### WI-01: Thread Note contract
 
 #### Request
 
@@ -46,15 +46,15 @@ sessionId: 20260201T090000+0900
 
 #### Validation
 
-- The session fixture checks passed.
+- The Thread Note fixture checks passed.
 
 #### Reported Result
 
-- Decision and current-truth classification no longer occurs in the session writer.
+- Decision and current-truth classification no longer occurs in the Thread Note writer.
 
 ## Last Known State
 
-- Work State: done — the factual session contract is implemented in the fixture.
+- Work State: done — the factual Thread Note contract is implemented in the fixture.
 - Latest User Direction: Treat the new contract as a complete redesign.
 
 ## Evidence

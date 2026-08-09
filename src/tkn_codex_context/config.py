@@ -10,7 +10,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .session_notes import (
+from .thread_notes import (
     DEFAULT_IDLE_MINUTES,
     DEFAULT_MODEL,
     DEFAULT_MODEL_TIMEOUT_SECONDS,
@@ -93,7 +93,7 @@ class AppConfig(BaseModel):
     def reports_root(self) -> Path:
         return self.state_root / "reports"
 
-    def session_pipeline_config(self, *, allow_missing_watermark: bool = False) -> PipelineConfig:
+    def thread_note_pipeline_config(self, *, allow_missing_watermark: bool = False) -> PipelineConfig:
         installed_at = self.installed_at
         if installed_at is None:
             if not allow_missing_watermark:

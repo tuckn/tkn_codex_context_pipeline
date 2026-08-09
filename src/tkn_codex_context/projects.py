@@ -10,7 +10,7 @@ from typing import Any
 from .app_state import CodexAppProject, CodexAppState
 from .chat_logs import normalize_path_text
 from .config import AppConfig
-from .session_notes import PipelineError, Project, atomic_write_text, now_iso
+from .thread_notes import PipelineError, Project, atomic_write_text, now_iso
 
 IDENTITY_KIND = "codexAppLocalProject"
 REGISTRY_SCHEMA_VERSION = 2
@@ -74,7 +74,8 @@ def _new_record(project: CodexAppProject, config: AppConfig) -> dict[str, Any]:
         "currentRoot": str(current_root),
         "projectDataPath": str(data),
         "projectStatePath": str(state),
-        "sessionsPath": str(data / "sessions"),
+        "threadNotesPath": str(data / "thread-notes"),
+        "workingContextPath": str(data / "working-context.md"),
         "sensitivity": "private",
         "status": "active",
         "lastSeenAt": now_iso(),
@@ -90,12 +91,12 @@ def _update_storage_paths(record: dict[str, Any], config: AppConfig) -> None:
     state = config.projects_state_root / project_id
     record["projectDataPath"] = str(data)
     record["projectStatePath"] = str(state)
-    record["sessionsPath"] = str(data / "sessions")
+    record["threadNotesPath"] = str(data / "thread-notes")
+    record["workingContextPath"] = str(data / "working-context.md")
     for legacy_key in (
         "projectContextPath",
         "decisionsPath",
         "memosPath",
-        "workingContextPath",
     ):
         record.pop(legacy_key, None)
 
@@ -224,7 +225,7 @@ def create_fresh_projects(
     records = [_new_record(project, config) for project in app_state.projects]
     if not dry_run:
         for record in records:
-            Path(str(record["sessionsPath"])).mkdir(parents=True, exist_ok=True)
+            Path(str(record["threadNotesPath"])).mkdir(parents=True, exist_ok=True)
             (Path(str(record["projectDataPath"])) / "decisions").mkdir(
                 parents=True,
                 exist_ok=True,
@@ -292,7 +293,7 @@ def fetch_projects(
     if not dry_run:
         for project_id in current_ids:
             record = by_id[project_id]
-            Path(str(record["sessionsPath"])).mkdir(parents=True, exist_ok=True)
+            Path(str(record["threadNotesPath"])).mkdir(parents=True, exist_ok=True)
             Path(str(record["projectStatePath"])).mkdir(parents=True, exist_ok=True)
         _write_registry(config.registry_path, records)
     report = {

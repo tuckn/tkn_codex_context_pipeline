@@ -6,7 +6,7 @@ import pytest
 import yaml
 
 from tkn_codex_context.config import load_app_config
-from tkn_codex_context.session_notes import PipelineError
+from tkn_codex_context.thread_notes import PipelineError
 
 
 def write_yaml(path: Path, value: dict[str, object]) -> None:

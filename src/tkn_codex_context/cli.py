@@ -26,14 +26,20 @@ from .projects import (
     resolve_project_selector,
     runtime_projects,
 )
-from .session_notes import (
+from .summary_resources import load_summary_profile
+from .thread_notes import (
     CodexSummarizer,
     PipelineError,
     execute_pipeline,
     execute_rebuild,
-    validate_session_note,
+    validate_thread_note,
 )
-from .summary_resources import load_summary_profile
+from .working_context import (
+    CodexWorkingContextGenerator,
+    execute_working_context_build,
+    validate_working_context,
+)
+from .working_context_resources import load_working_context_profile
 
 LOGGER = logging.getLogger("tkn_codex_context")
 
@@ -92,11 +98,11 @@ def build_parser() -> argparse.ArgumentParser:
     fetch = project_commands.add_parser("fetch", help="Fetch Projects from the Codex app")
     fetch.add_argument("--dry-run", action="store_true")
 
-    notes = commands.add_parser("session-notes", help="Generate Session Note v2 artifacts")
+    notes = commands.add_parser("thread-notes", help="Generate Thread Note v3 artifacts")
     note_commands = notes.add_subparsers(dest="notes_command", required=True)
     pull = note_commands.add_parser(
         "pull",
-        help="Pull eligible chats into Session Notes",
+        help="Pull eligible chats into Thread Notes",
     )
     pull.add_argument("--dry-run", action="store_true")
     pull.add_argument(
@@ -142,7 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
     decision_commands = decisions.add_subparsers(dest="decisions_command", required=True)
     decision_build = decision_commands.add_parser(
         "build",
-        help="Build decision records from Session Notes",
+        help="Build decision records from Thread Notes",
     )
     decision_build.add_argument(
         "--project-id",
@@ -158,7 +164,7 @@ def build_parser() -> argparse.ArgumentParser:
     decision_build.add_argument(
         "--force",
         action="store_true",
-        help="Re-evaluate selected Session Notes even when decision state is unchanged",
+        help="Re-evaluate selected Thread Notes even when decision state is unchanged",
     )
     decision_build.add_argument("--limit", type=int)
     decision_build.add_argument(
@@ -168,12 +174,56 @@ def build_parser() -> argparse.ArgumentParser:
     )
     decision_validate = decision_commands.add_parser(
         "validate",
-        help="Validate one Decision Record v2 or v3 file",
+        help="Validate one Decision Record v2, v3, or v4 file",
     )
     decision_validate.add_argument("decision_record", type=Path)
 
-    validate = commands.add_parser("validate", help="Validate a Session Note v2 file")
-    validate.add_argument("session_note", type=Path)
+    working_context = commands.add_parser(
+        "working-context",
+        help="Build the current Project orientation dashboard",
+    )
+    working_context_commands = working_context.add_subparsers(
+        dest="working_context_command",
+        required=True,
+    )
+    working_context_build = working_context_commands.add_parser(
+        "build",
+        help="Build Working Context v3 from Project evidence",
+    )
+    working_context_build.add_argument(
+        "--project-id",
+        metavar="PROJECT_ID_NAME_OR_ROOT",
+        required=True,
+        help="Select one active Project by ID, exact current Name, or CURRENT ROOT",
+    )
+    working_context_build.add_argument(
+        "--write",
+        action="store_true",
+        help="Generate and write working-context.md; the default is a read-only plan",
+    )
+    working_context_build.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-evaluate sources even when the input and generation profile are unchanged",
+    )
+    working_context_build.add_argument(
+        "--allow-edited",
+        action="store_true",
+        help="Replace an existing Working Context that differs from its recorded hash",
+    )
+    working_context_build.add_argument(
+        "--full-output",
+        action="store_true",
+        help="Emit the full Project fetch and Working Context build report JSON",
+    )
+    working_context_validate = working_context_commands.add_parser(
+        "validate",
+        help="Validate one Working Context v3 file",
+    )
+    working_context_validate.add_argument("working_context", type=Path)
+
+    validate = commands.add_parser("validate", help="Validate a Thread Note v3 file")
+    validate.add_argument("thread_note", type=Path)
     return parser
 
 
@@ -262,9 +312,9 @@ def _metric_summary(value: dict[str, Any]) -> str:
     return f" ({', '.join(metrics)})" if metrics else ""
 
 
-def _session_note_path_summary(value: dict[str, Any]) -> str:
-    path = value.get("sessionNotePath")
-    return f" — Session Note: {path}" if isinstance(path, str) and path else ""
+def _thread_note_path_summary(value: dict[str, Any]) -> str:
+    path = value.get("threadNotePath")
+    return f" — Thread Note: {path}" if isinstance(path, str) and path else ""
 
 
 def _progress(value: dict[str, Any]) -> None:
@@ -286,7 +336,7 @@ def _progress(value: dict[str, Any]) -> None:
             value.get("index", "?"),
             value.get("total", "?"),
             value.get("threadId", "unknown"),
-            _session_note_path_summary(value),
+            _thread_note_path_summary(value),
         )
     elif event_type == "chunk-start":
         LOGGER.info(
@@ -309,7 +359,7 @@ def _progress(value: dict[str, Any]) -> None:
             value.get("total", "?"),
             value.get("threadId", "unknown"),
             _metric_summary(value),
-            _session_note_path_summary(value),
+            _thread_note_path_summary(value),
         )
     elif event_type == "thread-failed":
         LOGGER.error(
@@ -320,10 +370,10 @@ def _progress(value: dict[str, Any]) -> None:
             value.get("error", "unknown error"),
         )
     elif event_type == "decision-batch-start":
-        session_notes = value.get("sessionNotes")
-        source_count = len(session_notes) if isinstance(session_notes, list) else 0
+        thread_notes = value.get("threadNotes")
+        source_count = len(thread_notes) if isinstance(thread_notes, list) else 0
         LOGGER.info(
-            "Starting decision synthesis batch %s/%s: %s Session Notes",
+            "Starting decision synthesis batch %s/%s: %s Thread Notes",
             value.get("index", "?"),
             value.get("total", "?"),
             source_count,
@@ -356,7 +406,7 @@ def _progress(value: dict[str, Any]) -> None:
             "Starting decision source %s/%s: %s",
             value.get("index", "?"),
             value.get("total", "?"),
-            value.get("sessionNote", "unknown"),
+            value.get("threadNote", "unknown"),
         )
     elif event_type == "decision-source-complete":
         log_success(
@@ -364,7 +414,7 @@ def _progress(value: dict[str, Any]) -> None:
             "Completed decision source %s/%s: %s (%s created, %s existing)%s",
             value.get("index", "?"),
             value.get("total", "?"),
-            value.get("sessionNote", "unknown"),
+            value.get("threadNote", "unknown"),
             value.get("createdCount", 0),
             value.get("referencedCount", 0),
             _metric_summary(value),
@@ -379,7 +429,27 @@ def _progress(value: dict[str, Any]) -> None:
             "Failed decision source %s/%s: %s — %s",
             value.get("index", "?"),
             value.get("total", "?"),
-            value.get("sessionNote", "unknown"),
+            value.get("threadNote", "unknown"),
+            value.get("error", "unknown error"),
+        )
+    elif event_type == "working-context-start":
+        LOGGER.info(
+            "Starting Working Context synthesis for Project %s: %s sources",
+            value.get("projectId", "unknown"),
+            value.get("sourceCount", 0),
+        )
+    elif event_type == "working-context-complete":
+        log_success(
+            LOGGER,
+            "Completed Working Context synthesis for Project %s%s — Working Context: %s",
+            value.get("projectId", "unknown"),
+            _metric_summary(value),
+            value.get("workingContextPath", "unknown"),
+        )
+    elif event_type == "working-context-failed":
+        LOGGER.error(
+            "Failed Working Context synthesis for Project %s: %s",
+            value.get("projectId", "unknown"),
             value.get("error", "unknown error"),
         )
 
@@ -394,7 +464,7 @@ def _log_project_fetch(report: dict[str, Any]) -> None:
     )
 
 
-def _log_session_report(report: dict[str, Any], report_path: Path | None) -> None:
+def _log_thread_note_report(report: dict[str, Any], report_path: Path | None) -> None:
     selected = report.get("selectedCount", 0)
     failed = len(report.get("failed", []))
     deferred = len(report.get("deferred", []))
@@ -409,7 +479,7 @@ def _log_session_report(report: dict[str, Any], report_path: Path | None) -> Non
             deferred,
         )
     else:
-        message = "Session Note run complete: %s processed, %s failed, %s deferred"
+        message = "Thread Note run complete: %s processed, %s failed, %s deferred"
         values = (len(report.get("processed", [])), failed, deferred)
         if failed:
             LOGGER.error(message, *values)
@@ -439,7 +509,7 @@ def _project_fetch_summary(report: dict[str, Any]) -> dict[str, Any]:
     return {key: report[key] for key in keys if key in report}
 
 
-def _session_report_summary(report: dict[str, Any]) -> dict[str, Any]:
+def _thread_note_report_summary(report: dict[str, Any]) -> dict[str, Any]:
     failed_count = _list_count(report.get("failed"))
     summary: dict[str, Any] = {
         "ok": failed_count == 0,
@@ -481,7 +551,7 @@ def _session_report_summary(report: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
-def _session_output(
+def _thread_note_output(
     command: str,
     fetch_report: dict[str, Any],
     report: dict[str, Any],
@@ -496,7 +566,7 @@ def _session_output(
             "reportPath": str(report_path) if report_path else None,
             "report": report,
         }
-    summary = _session_report_summary(report)
+    summary = _thread_note_report_summary(report)
     return {
         "command": command,
         "ok": bool(summary["ok"]) and not bool(fetch_report.get("pendingCount")),
@@ -558,13 +628,57 @@ def _decision_output(
     }
 
 
+def _working_context_report_summary(report: dict[str, Any]) -> dict[str, Any]:
+    failed_count = _list_count(report.get("failed"))
+    return {
+        "ok": failed_count == 0,
+        "dryRun": bool(report.get("dryRun")),
+        "projectId": report.get("projectId"),
+        "force": bool(report.get("force")),
+        "allowEdited": bool(report.get("allowEdited")),
+        "changed": bool(report.get("changed")),
+        "edited": bool(report.get("edited")),
+        "selectedCount": int(report.get("selectedCount") or 0),
+        "createdCount": int(report.get("createdCount") or 0),
+        "updatedCount": int(report.get("updatedCount") or 0),
+        "unchangedCount": int(report.get("unchangedCount") or 0),
+        "failedCount": failed_count,
+        "sourceCounts": report.get("sourceCounts"),
+        "workingContext": report.get("workingContext"),
+    }
+
+
+def _working_context_output(
+    fetch_report: dict[str, Any],
+    report: dict[str, Any],
+    report_path: Path | None,
+    *,
+    full_output: bool,
+) -> dict[str, Any]:
+    if full_output:
+        return {
+            "command": "working-context build",
+            "projectFetch": fetch_report,
+            "reportPath": str(report_path) if report_path else None,
+            "report": report,
+        }
+    summary = _working_context_report_summary(report)
+    return {
+        "command": "working-context build",
+        "ok": bool(summary["ok"]) and not bool(fetch_report.get("pendingCount")),
+        "reportPath": str(report_path) if report_path else None,
+        "projectFetchSummary": _project_fetch_summary(fetch_report),
+        "reportSummary": summary,
+    }
+
+
 def _prepare_projects(
     args: argparse.Namespace,
     *,
     dry_run: bool,
 ) -> tuple[Any, Any, Any, list[Any], dict[str, Any]]:
     config = load_app_config(explicit_path=args.config, overrides=_overrides(args))
-    pipeline_config = config.session_pipeline_config(allow_missing_watermark=dry_run)
+    pipeline_config = config.thread_note_pipeline_config(allow_missing_watermark=dry_run)
     app_state = load_codex_app_state(config.app_state_path)
     records, fetch_report = fetch_projects(config, app_state, dry_run=dry_run)
     return (
@@ -607,6 +721,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             try:
                 profile = load_summary_profile()
                 decision_profile = load_decision_profile()
+                working_context_profile = load_working_context_profile()
             except (RuntimeError, ValueError) as exc:
                 raise PipelineError(str(exc)) from exc
             _emit(
@@ -655,14 +770,35 @@ def main(argv: Sequence[str] | None = None) -> int:
                             "sha256": decision_profile.template.sha256,
                         },
                     },
+                    "workingContextProfile": {
+                        "name": working_context_profile.name,
+                        "source": working_context_profile.source,
+                        "sha256": working_context_profile.sha256,
+                        "prompt": {
+                            "source": working_context_profile.prompt.source,
+                            "id": working_context_profile.prompt.prompt_id,
+                            "version": working_context_profile.prompt.version,
+                            "sha256": working_context_profile.prompt.sha256,
+                        },
+                        "schema": {
+                            "source": working_context_profile.schema.source,
+                            "sha256": working_context_profile.schema.sha256,
+                        },
+                        "template": {
+                            "source": working_context_profile.template.source,
+                            "id": working_context_profile.template.template_id,
+                            "version": working_context_profile.template.version,
+                            "sha256": working_context_profile.template.sha256,
+                        },
+                    },
                 }
             )
             return 0
 
         if args.command == "validate":
-            note = args.session_note.expanduser().absolute()
-            LOGGER.info("Validating Session Note: %s", note)
-            _emit(validate_session_note(note))
+            note = args.thread_note.expanduser().absolute()
+            LOGGER.info("Validating Thread Note: %s", note)
+            _emit(validate_thread_note(note))
             log_success(LOGGER, "Validation succeeded: %s", note)
             return 0
 
@@ -726,7 +862,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.project_id,
                     decision_project.project_id,
                 )
-            generator = (
+            decision_generator = (
                 CodexDecisionGenerator(pipeline_config, observer=_progress)
                 if write
                 else None
@@ -734,7 +870,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             report, report_path = execute_decision_build(
                 pipeline_config,
                 decision_project,
-                generator=generator,
+                generator=decision_generator,
                 write=write,
                 force=args.force,
                 limit=args.limit,
@@ -777,6 +913,87 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 1 if failed else 0
 
+        if args.command == "working-context":
+            if args.working_context_command == "validate":
+                note = args.working_context.expanduser().absolute()
+                LOGGER.info("Validating Working Context: %s", note)
+                _emit(validate_working_context(note))
+                log_success(LOGGER, "Validation succeeded: %s", note)
+                return 0
+            if args.force and not args.write:
+                raise PipelineError("--force requires --write for working-context build")
+            if args.allow_edited and not args.write:
+                raise PipelineError("--allow-edited requires --write for working-context build")
+            write = bool(args.write)
+            LOGGER.info(
+                "%s Working Context build for Project %s",
+                "Starting" if write else "Planning",
+                args.project_id,
+            )
+            (
+                config,
+                pipeline_config,
+                _state,
+                projects,
+                fetch_report,
+            ) = _prepare_projects(args, dry_run=not write)
+            _log_project_fetch(fetch_report)
+            context_project = resolve_project_selector(projects, args.project_id)
+            if context_project.project_id != args.project_id:
+                selector_kind = "Name" if context_project.title == args.project_id else "CURRENT ROOT"
+                LOGGER.info(
+                    "Resolved Project %s %r to ID %s",
+                    selector_kind,
+                    args.project_id,
+                    context_project.project_id,
+                )
+            context_generator = (
+                CodexWorkingContextGenerator(pipeline_config, observer=_progress)
+                if write
+                else None
+            )
+            report, report_path = execute_working_context_build(
+                pipeline_config,
+                context_project,
+                generator=context_generator,
+                write=write,
+                force=args.force,
+                allow_edited=args.allow_edited,
+                cache_root=config.reports_root,
+                progress=_progress,
+            )
+            failed = _list_count(report.get("failed"))
+            if write:
+                message = "Working Context build complete: %s created, %s updated, %s unchanged, %s failed"
+                context_values = (
+                    report.get("createdCount", 0),
+                    report.get("updatedCount", 0),
+                    report.get("unchangedCount", 0),
+                    failed,
+                )
+                if failed:
+                    LOGGER.error(message, *context_values)
+                else:
+                    log_success(LOGGER, message, *context_values)
+                if report_path:
+                    LOGGER.info("Run report: %s", report_path)
+            else:
+                LOGGER.info(
+                    "Dry run complete: changed=%s, edited=%s, %s failed",
+                    report.get("changed"),
+                    report.get("edited"),
+                    failed,
+                )
+            _emit(
+                _working_context_output(
+                    fetch_report,
+                    report,
+                    report_path,
+                    full_output=args.full_output,
+                )
+            )
+            return 1 if failed else 0
+
         if args.notes_command == "pull":
             has_backfill_selector = bool(args.project_id or args.all)
             if args.backfill and not has_backfill_selector:
@@ -787,13 +1004,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         dry_run = bool(args.dry_run)
         if args.notes_command == "rebuild":
             LOGGER.info(
-                "%s Session Note rebuild for Project %s",
+                "%s Thread Note rebuild for Project %s",
                 "Planning" if dry_run else "Starting",
                 args.project_id,
             )
         else:
             mode = "backfill" if args.backfill else "pull"
-            LOGGER.info("%s Session Note %s", "Planning" if dry_run else "Starting", mode)
+            LOGGER.info("%s Thread Note %s", "Planning" if dry_run else "Starting", mode)
         (
             config,
             pipeline_config,
@@ -860,10 +1077,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 work_cache_root=config.cache_root,
                 progress=_progress,
             )
-        _log_session_report(report, report_path)
+        _log_thread_note_report(report, report_path)
         _emit(
-            _session_output(
-                f"session-notes {args.notes_command}",
+            _thread_note_output(
+                f"thread-notes {args.notes_command}",
                 fetch_report,
                 report,
                 report_path,

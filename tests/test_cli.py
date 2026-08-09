@@ -11,7 +11,7 @@ from tkn_codex_context.cli import (
     LOGGER,
     _configure_logging,
     _progress,
-    _session_output,
+    _thread_note_output,
     build_parser,
     main,
 )
@@ -45,24 +45,24 @@ def write_app_state(
     )
 
 
-def write_decision_session_note(path: Path) -> None:
+def write_decision_thread_note(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "---\n"
-        "type: summary\n"
-        "schemaVersion: 2\n"
+        "type: threadNote\n"
+        "schemaVersion: 3\n"
         "title: Decision source\n"
         "status: done\n"
-        "sessionId: 20260803T090000+0900\n"
+        "threadNoteId: 20260803T090000+0900\n"
         "sourceThreadIds:\n"
         "  - thread-1\n"
         "sourceRefs:\n"
         "  - sessions/example.jsonl\n"
         "---\n\n"
-        "# Session Note\n\n"
+        "# Thread Note\n\n"
         "## Summary\n\n- A decision was made.\n\n"
         "## Key Developments\n\n"
-        "### Explicit Decision\n\n- Use Session Notes as the primary input.\n\n"
+        "### Explicit Decision\n\n- Use Thread Notes as the primary input.\n\n"
         "## Last Known State\n\n- Work State: done — decided.\n",
         encoding="utf-8",
     )
@@ -112,7 +112,7 @@ def test_progress_events_are_human_readable(
             "index": 2,
             "total": 7,
             "threadId": "thread-2",
-            "sessionNotePath": r"C:\notes\thread-2.md",
+            "threadNotePath": r"C:\notes\thread-2.md",
             "durationSeconds": 12.5,
             "chunkCount": 2,
             "modelCalls": 3,
@@ -124,7 +124,7 @@ def test_progress_events_are_human_readable(
     assert captured.err.splitlines() == [
         "[INFO] Starting thread 2/7: thread-2",
         "[SUCCESS] Completed thread 2/7: thread-2 "
-        r"(12.5s, 2 chunks, 3 model calls) — Session Note: C:\notes\thread-2.md",
+        r"(12.5s, 2 chunks, 3 model calls) — Thread Note: C:\notes\thread-2.md",
     ]
 
 
@@ -139,7 +139,7 @@ def test_decision_batch_progress_logs_created_record_paths(
             "type": "decision-batch-complete",
             "index": 1,
             "total": 2,
-            "sessionNotes": ["sessions/source.md", "sessions/verification.md"],
+            "threadNotes": ["thread-notes/source.md", "thread-notes/verification.md"],
             "createdCount": 2,
             "decisionRecordPaths": [
                 r"C:\notes\decisions\DR-0001-first.md",
@@ -206,18 +206,26 @@ def test_config_show_reports_application_owned_summary_profile(
         "profiles/summary/default/output.schema.json"
     )
     assert len(profile["schema"]["sha256"]) == 64
-    assert profile["template"]["version"] == "1.0"
+    assert profile["template"]["version"] == "2.0"
     assert profile["template"]["source"].endswith(
         "profiles/summary/default/template.md"
     )
     decision_profile = output["decisionProfile"]
     assert decision_profile["name"] == "default"
     assert decision_profile["source"].endswith("profiles/decision/default")
-    assert decision_profile["prompt"]["version"] == "3.0"
+    assert decision_profile["prompt"]["version"] == "4.0"
     assert decision_profile["schema"]["source"].endswith(
         "profiles/decision/default/output.schema.json"
     )
     assert decision_profile["template"]["version"] == "2.0"
+    working_context_profile = output["workingContextProfile"]
+    assert working_context_profile["name"] == "default"
+    assert working_context_profile["source"].endswith("profiles/working_context/default")
+    assert working_context_profile["prompt"]["version"] == "1.0"
+    assert working_context_profile["schema"]["source"].endswith(
+        "profiles/working_context/default/output.schema.json"
+    )
+    assert working_context_profile["template"]["version"] == "1.0"
 
 
 def test_init_dry_run_has_no_files(
@@ -255,11 +263,11 @@ def test_init_creates_config_and_project_directories(
     assert result == 0
     assert target.is_file()
     app_root = target.parent
-    assert (app_root / "data/projects/local-project/sessions").is_dir()
+    assert (app_root / "data/projects/local-project/thread-notes").is_dir()
     assert (app_root / "data/projects/local-project/decisions").is_dir()
     assert (app_root / "state/projects/local-project").is_dir()
     assert (home / ".cache/codex_context_pipeline").is_dir()
-    assert not any((app_root / "data/projects/local-project/sessions").iterdir())
+    assert not any((app_root / "data/projects/local-project/thread-notes").iterdir())
 
 
 def test_projects_fetch_replaces_sync(
@@ -285,10 +293,10 @@ def test_projects_fetch_replaces_sync(
     assert exc.value.code == 2
 
 
-def test_session_notes_pull_replaces_run_and_backfill() -> None:
+def test_thread_notes_pull_replaces_run_and_backfill() -> None:
     parser = build_parser()
 
-    args = parser.parse_args(["session-notes", "pull", "--dry-run"])
+    args = parser.parse_args(["thread-notes", "pull", "--dry-run"])
 
     assert args.notes_command == "pull"
     assert args.dry_run is True
@@ -297,7 +305,7 @@ def test_session_notes_pull_replaces_run_and_backfill() -> None:
 
     historical = parser.parse_args(
         [
-            "session-notes",
+            "thread-notes",
             "pull",
             "--backfill",
             "--project-id",
@@ -309,15 +317,15 @@ def test_session_notes_pull_replaces_run_and_backfill() -> None:
     assert historical.notes_command == "pull"
     assert historical.backfill is True
     assert historical.project_id == "local-project"
-    forced = parser.parse_args(["session-notes", "pull", "--force", "--dry-run"])
+    forced = parser.parse_args(["thread-notes", "pull", "--force", "--dry-run"])
     assert forced.force is True
     full = parser.parse_args(
-        ["session-notes", "rebuild", "--project-id", "Project", "--full-output"]
+        ["thread-notes", "rebuild", "--project-id", "Project", "--full-output"]
     )
     assert full.full_output is True
     for removed_command in ("run", "backfill"):
         with pytest.raises(SystemExit) as exc:
-            parser.parse_args(["session-notes", removed_command])
+            parser.parse_args(["thread-notes", removed_command])
         assert exc.value.code == 2
 
 
@@ -336,6 +344,52 @@ def test_decisions_build_is_read_only_by_default_and_write_is_explicit() -> None
     assert writing.write is True
 
 
+def test_working_context_build_is_read_only_by_default_and_write_is_explicit() -> None:
+    parser = build_parser()
+
+    planned = parser.parse_args(
+        ["working-context", "build", "--project-id", "Project"]
+    )
+    writing = parser.parse_args(
+        ["working-context", "build", "--project-id", "Project", "--write"]
+    )
+
+    assert planned.working_context_command == "build"
+    assert planned.write is False
+    assert planned.allow_edited is False
+    assert writing.write is True
+
+
+def test_working_context_build_dry_run_routes_and_writes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    project_root = home / "project"
+    project_root.mkdir(parents=True)
+    (project_root / "README.md").write_text("# Project\n", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    write_app_state(home)
+    assert main(["init"]) == 0
+    capsys.readouterr()
+
+    result = main(
+        ["working-context", "build", "--project-id", "local-project"]
+    )
+
+    assert result == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["command"] == "working-context build"
+    assert output["reportSummary"]["dryRun"] is True
+    assert output["reportSummary"]["selectedCount"] == 1
+    assert not (
+        home
+        / ".tkn/codex_context_pipeline/data/projects/local-project/working-context.md"
+    ).exists()
+
+
 def test_decisions_build_dry_run_routes_and_emits_compact_summary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -348,8 +402,8 @@ def test_decisions_build_dry_run_routes_and_emits_compact_summary(
     assert main(["init"]) == 0
     capsys.readouterr()
     app_root = home / ".tkn" / "codex_context_pipeline"
-    write_decision_session_note(
-        app_root / "data" / "projects" / "local-project" / "sessions" / "one.md"
+    write_decision_thread_note(
+        app_root / "data" / "projects" / "local-project" / "thread-notes" / "one.md"
     )
 
     result = main(["decisions", "build", "--project-id", "local-project"])
@@ -375,10 +429,10 @@ def test_user_summary_prompt_commands_and_override_are_not_public() -> None:
     assert prompt_override.value.code == 2
 
 
-def test_compact_session_output_summarizes_rebuild_counts(tmp_path: Path) -> None:
+def test_compact_thread_note_output_summarizes_rebuild_counts(tmp_path: Path) -> None:
     report_path = tmp_path / "run.json"
-    output = _session_output(
-        "session-notes rebuild",
+    output = _thread_note_output(
+        "thread-notes rebuild",
         {
             "dryRun": False,
             "projectCount": 21,
@@ -424,16 +478,16 @@ def test_compact_session_output_summarizes_rebuild_counts(tmp_path: Path) -> Non
     ("arguments", "message"),
     [
         (
-            ["session-notes", "pull", "--backfill", "--dry-run"],
+            ["thread-notes", "pull", "--backfill", "--dry-run"],
             "--backfill requires --project-id <projectIdOrNameOrRoot> or --all",
         ),
         (
-            ["session-notes", "pull", "--all", "--dry-run"],
+            ["thread-notes", "pull", "--all", "--dry-run"],
             "--project-id and --all require --backfill",
         ),
     ],
 )
-def test_session_notes_pull_rejects_incomplete_backfill_options(
+def test_thread_notes_pull_rejects_incomplete_backfill_options(
     arguments: list[str],
     message: str,
     capsys: CaptureFixture[str],
@@ -445,7 +499,7 @@ def test_session_notes_pull_rejects_incomplete_backfill_options(
     assert output == {"ok": False, "error": message}
 
 
-def test_session_notes_pull_backfill_all_uses_historical_mode(
+def test_thread_notes_pull_backfill_all_uses_historical_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: CaptureFixture[str],
@@ -459,7 +513,7 @@ def test_session_notes_pull_backfill_all_uses_historical_mode(
 
     result = main(
         [
-            "session-notes",
+            "thread-notes",
             "pull",
             "--backfill",
             "--all",
@@ -469,7 +523,7 @@ def test_session_notes_pull_backfill_all_uses_historical_mode(
 
     assert result == 0
     output = json.loads(capsys.readouterr().out)
-    assert output["command"] == "session-notes pull"
+    assert output["command"] == "thread-notes pull"
     assert output["ok"] is True
     assert output["reportSummary"]["mode"] == "backfill"
     assert output["reportSummary"]["dryRun"] is True
@@ -481,14 +535,14 @@ def test_session_notes_pull_backfill_all_uses_historical_mode(
     "arguments",
     [
         [
-            "session-notes",
+            "thread-notes",
             "rebuild",
             "--project-id",
             "Project",
             "--dry-run",
         ],
         [
-            "session-notes",
+            "thread-notes",
             "pull",
             "--backfill",
             "--project-id",
@@ -497,7 +551,7 @@ def test_session_notes_pull_backfill_all_uses_historical_mode(
         ],
     ],
 )
-def test_session_notes_project_selector_accepts_unique_name(
+def test_thread_notes_project_selector_accepts_unique_name(
     arguments: list[str],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -521,7 +575,7 @@ def test_session_notes_project_selector_accepts_unique_name(
         assert output["reportSummary"]["projectId"] == "local-project"
 
 
-def test_session_notes_project_selector_accepts_current_root(
+def test_thread_notes_project_selector_accepts_current_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: CaptureFixture[str],
@@ -539,7 +593,7 @@ def test_session_notes_project_selector_accepts_current_root(
         [
             "--config",
             str(target),
-            "session-notes",
+            "thread-notes",
             "rebuild",
             "--project-id",
             str(current_root).replace("\\", "/") + "/",
@@ -554,7 +608,7 @@ def test_session_notes_project_selector_accepts_current_root(
     assert output["reportSummary"]["projectId"] == "local-project"
 
 
-def test_session_notes_full_output_preserves_detailed_dry_run(
+def test_thread_notes_full_output_preserves_detailed_dry_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: CaptureFixture[str],
@@ -571,7 +625,7 @@ def test_session_notes_full_output_preserves_detailed_dry_run(
         [
             "--config",
             str(target),
-            "session-notes",
+            "thread-notes",
             "rebuild",
             "--project-id",
             "Project",
@@ -588,7 +642,7 @@ def test_session_notes_full_output_preserves_detailed_dry_run(
     assert "reportSummary" not in output
 
 
-def test_session_notes_write_run_emits_compact_summary_and_report_path(
+def test_thread_notes_write_run_emits_compact_summary_and_report_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: CaptureFixture[str],
@@ -601,7 +655,7 @@ def test_session_notes_write_run_emits_compact_summary_and_report_path(
     assert main(["--config", str(target), "init"]) == 0
     capsys.readouterr()
 
-    result = main(["--config", str(target), "session-notes", "pull"])
+    result = main(["--config", str(target), "thread-notes", "pull"])
 
     assert result == 0
     captured = capsys.readouterr()
@@ -616,7 +670,7 @@ def test_session_notes_write_run_emits_compact_summary_and_report_path(
     assert "Run report:" in captured.err
 
 
-def test_session_notes_project_selector_rejects_duplicate_name(
+def test_thread_notes_project_selector_rejects_duplicate_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: CaptureFixture[str],
@@ -649,7 +703,7 @@ def test_session_notes_project_selector_rejects_duplicate_name(
         [
             "--config",
             str(target),
-            "session-notes",
+            "thread-notes",
             "rebuild",
             "--project-id",
             "Duplicate",
@@ -754,20 +808,20 @@ def test_projects_list_has_human_and_json_output(
     assert machine["projects"][0]["roots"][0]["role"] == "primary"
 
 
-def test_validate_command_accepts_session_note_v2(
+def test_validate_command_accepts_thread_note_v3(
     tmp_path: Path,
     capsys: CaptureFixture[str],
 ) -> None:
     note = tmp_path / "note.md"
     note.write_text(
         """---
-type: summary
-schemaVersion: 2
+type: threadNote
+schemaVersion: 3
 promptId: f5dfc679-13d3-4fcc-9736-b7d4e6bb5c11
 promptVersion: "2.0"
 outputSchemaSha256: 3ebffe117e29f76dfca25375a7e96ba0867de31a7ed68022dc6b65d91d651170
 templateId: 4d19c51c-0d02-43a5-b6ad-6d67f9739b75
-templateVersion: "1.0"
+templateVersion: "2.0"
 reviewStatus: unreviewed
 automatedValidation: passed
 status: done
@@ -779,7 +833,7 @@ sourceRefs:
 sourceFingerprint: abc123
 ---
 
-# Session Note
+# Thread Note
 
 ## Summary
 

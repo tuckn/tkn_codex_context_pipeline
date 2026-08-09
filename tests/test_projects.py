@@ -19,7 +19,7 @@ from tkn_codex_context.projects import (
     resolve_project_selector,
     runtime_projects,
 )
-from tkn_codex_context.session_notes import PipelineError, Project
+from tkn_codex_context.thread_notes import PipelineError, Project
 
 
 def app_project(project_id: str, name: str, roots: list[Path]) -> CodexAppProject:
@@ -139,7 +139,7 @@ def test_fetch_binds_multi_root_and_preserves_unknown_fields(tmp_path: Path) -> 
     assert projects[0].assigned_thread_ids == frozenset({"thread-1"})
     assert projects[0].projectless_thread_ids == frozenset({"thread-2"})
     assert projects[0].project_id == "source-1"
-    assert projects[0].sessions_path == data_root / "projects/source-1/sessions"
+    assert projects[0].thread_notes_path == data_root / "projects/source-1/thread-notes"
     assert projects[0].state_path == state_root / "projects/source-1/chat-refresh-state.json"
 
 
@@ -225,7 +225,7 @@ def test_same_id_survives_drive_and_name_change(tmp_path: Path) -> None:
         "currentRoot": str(old),
         "projectDataPath": str(config.projects_data_root / "source"),
         "projectStatePath": str(config.projects_state_root / "source"),
-        "sessionsPath": str(config.projects_data_root / "source/sessions"),
+        "threadNotesPath": str(config.projects_data_root / "source/thread-notes"),
         "status": "active",
         "roots": [{"path": str(old), "role": "primary", "status": "active"}],
     }
@@ -244,6 +244,9 @@ def test_same_id_survives_drive_and_name_change(tmp_path: Path) -> None:
     assert records[0]["title"] == "New Name"
     assert records[0]["currentRoot"] == str(new.absolute())
     assert records[0]["projectDataPath"] == str(config.projects_data_root / "source")
+    assert records[0]["workingContextPath"] == str(
+        config.projects_data_root / "source/working-context.md"
+    )
     assert {"path": str(old), "role": "alias", "status": "historical"} in records[0]["roots"]
 
 
@@ -262,7 +265,7 @@ def test_missing_app_project_becomes_inactive_and_can_reactivate(tmp_path: Path)
         "currentRoot": str(tmp_path / "old"),
         "projectDataPath": str(config.projects_data_root / "source"),
         "projectStatePath": str(config.projects_state_root / "source"),
-        "sessionsPath": str(config.projects_data_root / "source/sessions"),
+        "threadNotesPath": str(config.projects_data_root / "source/thread-notes"),
         "status": "active",
         "roots": [],
     }

@@ -1,20 +1,20 @@
 ---
-type: session
-schemaVersion: 2
-title: Core Factual Session
-description: A session fixture containing only the required factual sections.
+type: threadNote
+schemaVersion: 3
+title: Core Factual Thread Note
+description: A Thread Note fixture containing only the required factual sections.
 generator: Codex
 status: done
 date: 2026-02-02T09:00:00+09:00
 updated: 2026-02-02T10:00:00+09:00
-sessionId: 20260202T090000+0900
+threadNoteId: 20260202T090000+0900
 ---
 
-# Session Note
+# Thread Note
 
 ## Summary
 
-- A concise session note was produced using only the required factual sections.
+- A concise thread note was produced using only the required factual sections.
 
 ## Key Developments
 

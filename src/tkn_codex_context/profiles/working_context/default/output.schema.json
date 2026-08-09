@@ -1,0 +1,168 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "title": {"type": "string", "minLength": 1, "maxLength": 160},
+    "description": {"type": "string", "minLength": 1, "maxLength": 360},
+    "projectStatus": {
+      "type": "string",
+      "enum": ["active", "paused", "blocked", "completed", "archived", "unknown"]
+    },
+    "currentFocus": {"type": "string", "maxLength": 300},
+    "blocked": {"type": "boolean"},
+    "mainBlocker": {"type": "string", "maxLength": 420},
+    "exactNextAction": {"type": "string", "maxLength": 420},
+    "projectOverview": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "text": {"type": "string", "minLength": 1, "maxLength": 500},
+          "sourceRefs": {
+            "type": "array", "minItems": 1, "maxItems": 8,
+            "items": {"type": "string", "maxLength": 500}
+          }
+        },
+        "required": ["text", "sourceRefs"]
+      }
+    },
+    "currentTruth": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "text": {"type": "string", "minLength": 1, "maxLength": 500},
+          "sourceRefs": {
+            "type": "array", "minItems": 1, "maxItems": 8,
+            "items": {"type": "string", "maxLength": 500}
+          }
+        },
+        "required": ["text", "sourceRefs"]
+      }
+    },
+    "currentOutcome": {
+      "type": "array", "maxItems": 8,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "text": {"type": "string", "minLength": 1, "maxLength": 500},
+          "sourceRefs": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string", "maxLength": 500}}
+        },
+        "required": ["text", "sourceRefs"]
+      }
+    },
+    "activeWork": {
+      "type": "array", "maxItems": 10,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "text": {"type": "string", "minLength": 1, "maxLength": 500},
+          "sourceRefs": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string", "maxLength": 500}}
+        },
+        "required": ["text", "sourceRefs"]
+      }
+    },
+    "risksAndConstraints": {
+      "type": "array", "maxItems": 10,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "text": {"type": "string", "minLength": 1, "maxLength": 500},
+          "sourceRefs": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string", "maxLength": 500}}
+        },
+        "required": ["text", "sourceRefs"]
+      }
+    },
+    "effectiveDecisions": {
+      "type": "array", "maxItems": 12,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "decisionRef": {"type": "string", "minLength": 1, "maxLength": 500},
+          "summary": {"type": "string", "minLength": 1, "maxLength": 500}
+        },
+        "required": ["decisionRef", "summary"]
+      }
+    },
+    "semanticGlossary": {
+      "type": "array", "maxItems": 15,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "term": {"type": "string", "minLength": 1, "maxLength": 120},
+          "definition": {"type": "string", "minLength": 1, "maxLength": 500},
+          "aliases": {"type": "array", "maxItems": 6, "items": {"type": "string", "maxLength": 120}},
+          "distinctions": {"type": "array", "maxItems": 6, "items": {"type": "string", "maxLength": 300}},
+          "sourceRefs": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string", "maxLength": 500}}
+        },
+        "required": ["term", "definition", "aliases", "distinctions", "sourceRefs"]
+      }
+    },
+    "taxonomyItems": {
+      "type": "array", "maxItems": 15,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "label": {"type": "string", "minLength": 1, "maxLength": 120},
+          "kind": {"type": "string", "enum": ["category", "artifact", "system", "component", "workstream", "concept", "entity"]},
+          "parent": {"type": "string", "maxLength": 120},
+          "description": {"type": "string", "minLength": 1, "maxLength": 420},
+          "sourceRefs": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string", "maxLength": 500}}
+        },
+        "required": ["label", "kind", "parent", "description", "sourceRefs"]
+      }
+    },
+    "taxonomyRelations": {
+      "type": "array", "maxItems": 15,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "subject": {"type": "string", "minLength": 1, "maxLength": 120},
+          "predicate": {"type": "string", "minLength": 1, "maxLength": 120},
+          "object": {"type": "string", "minLength": 1, "maxLength": 120},
+          "sourceRefs": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string", "maxLength": 500}}
+        },
+        "required": ["subject", "predicate", "object", "sourceRefs"]
+      }
+    },
+    "keyEvidence": {
+      "type": "array", "maxItems": 12,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "ref": {"type": "string", "minLength": 1, "maxLength": 500},
+          "reason": {"type": "string", "minLength": 1, "maxLength": 420}
+        },
+        "required": ["ref", "reason"]
+      }
+    },
+    "resumption": {
+      "type": "array", "maxItems": 6,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "text": {"type": "string", "minLength": 1, "maxLength": 500},
+          "sourceRefs": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string", "maxLength": 500}}
+        },
+        "required": ["text", "sourceRefs"]
+      }
+    },
+    "sourceLimitations": {
+      "type": "array", "maxItems": 8,
+      "items": {"type": "string", "maxLength": 420}
+    }
+  },
+  "required": [
+    "title", "description", "projectStatus", "currentFocus", "blocked",
+    "mainBlocker", "exactNextAction", "projectOverview", "currentTruth",
+    "currentOutcome", "activeWork", "risksAndConstraints", "effectiveDecisions",
+    "semanticGlossary", "taxonomyItems", "taxonomyRelations", "keyEvidence",
+    "resumption", "sourceLimitations"
+  ]
+}

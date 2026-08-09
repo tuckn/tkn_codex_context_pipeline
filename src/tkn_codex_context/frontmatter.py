@@ -8,13 +8,12 @@ from collections.abc import Iterable
 from .common import yaml_string
 
 FRONTMATTER_PATTERN = re.compile(r"\A---\r?\n.*?\r?\n---\r?\n?", re.DOTALL)
-ARTIFACT_SCHEMA_VERSION = "2"
 LEGACY_ARTIFACT_SCHEMA_VERSION = "1"
 SUPPORTED_ARTIFACT_SCHEMA_VERSIONS = {
-    LEGACY_ARTIFACT_SCHEMA_VERSION,
-    ARTIFACT_SCHEMA_VERSION,
+    "thread note": {"3"},
+    "decision record": {"1", "2", "3", "4"},
+    "working context": {"1", "2", "3"},
 }
-DECISION_ARTIFACT_SCHEMA_VERSION = "3"
 
 
 def strip_frontmatter(text: str) -> str:
@@ -120,9 +119,10 @@ def require_supported_artifact_schema(
 ) -> str:
     """Treat unversioned artifacts as v1 and reject unknown versions."""
     version = metadata.get("schemaVersion") or LEGACY_ARTIFACT_SCHEMA_VERSION
-    supported_versions = set(SUPPORTED_ARTIFACT_SCHEMA_VERSIONS)
-    if artifact_label == "decision record":
-        supported_versions.add(DECISION_ARTIFACT_SCHEMA_VERSION)
+    supported_versions = SUPPORTED_ARTIFACT_SCHEMA_VERSIONS.get(
+        artifact_label,
+        {LEGACY_ARTIFACT_SCHEMA_VERSION},
+    )
     if version not in supported_versions:
         supported = ", ".join(sorted(supported_versions))
         raise SystemExit(f"Unsupported {artifact_label} schemaVersion: {version}. Supported versions: {supported}.")

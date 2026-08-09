@@ -64,9 +64,9 @@ Maintain a trustworthy example project dashboard.
 
 ## Resumption
 
-### Recommended Session
+### Recommended Thread
 
-- `state:/sessions/20260203T090000+0900-schema-tests.md`
+- `state:/thread-notes/20260203T090000+0900-schema-tests.md`
 
 ### Exact Next Action
 

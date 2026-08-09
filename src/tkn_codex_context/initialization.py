@@ -10,7 +10,7 @@ from uuid import uuid4
 from .app_state import load_codex_app_state
 from .config import AppConfig, config_document, initialization_config, write_config
 from .projects import create_fresh_projects
-from .session_notes import PipelineError
+from .thread_notes import PipelineError
 
 
 def _resolved(path: Path) -> Path:

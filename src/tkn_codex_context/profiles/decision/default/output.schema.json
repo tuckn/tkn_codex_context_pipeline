@@ -16,7 +16,7 @@
           "existingDecisionId": {
             "type": "string"
           },
-          "sourceSessionRefs": {
+          "sourceThreadNoteRefs": {
             "type": "array",
             "minItems": 1,
             "maxItems": 50,
@@ -167,7 +167,7 @@
         "required": [
           "disposition",
           "existingDecisionId",
-          "sourceSessionRefs",
+          "sourceThreadNoteRefs",
           "title",
           "fileSlug",
           "description",

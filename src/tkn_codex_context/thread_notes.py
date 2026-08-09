@@ -1,4 +1,4 @@
-"""Background Codex chat to session-note pipeline."""
+"""Background Codex chat-to-Thread-Note pipeline."""
 
 from __future__ import annotations
 
@@ -24,11 +24,11 @@ from .chat_logs import (
     fingerprint_events,
     has_clean_user_message,
     is_approval_review,
-    is_known_internal_session,
+    is_known_internal_thread,
     normalize_path_text,
     path_is_within,
-    read_session,
-    read_session_events,
+    read_thread_events,
+    read_thread_log,
     source_ref,
 )
 from .common import frontmatter, slugify
@@ -53,8 +53,8 @@ from .summary_resources import (
 CONFIG_SCHEMA_VERSION = 1
 STATE_SCHEMA_VERSION = 2
 LEGACY_STATE_SCHEMA_VERSION = 1
-SESSION_SCHEMA_VERSION = 2
-CONFIG_FILENAME = "session-note-pipeline.json"
+THREAD_NOTE_SCHEMA_VERSION = 3
+CONFIG_FILENAME = "thread-note-pipeline.json"
 STATE_FILENAME = "chat-refresh-state.json"
 DEFAULT_SOURCE_ID = "windows" if os.name == "nt" else "local"
 DEFAULT_MODEL = "gpt-5.6-sol"
@@ -65,7 +65,7 @@ DEFAULT_MODEL_TIMEOUT_SECONDS = 1800
 DEFAULT_CHUNK_CHARACTERS = 120_000
 MAX_EVENT_TEXT_CHARACTERS = 8_000
 GENERATOR_PROMPT_VERSION = 4
-RENDERER_VERSION = 5
+RENDERER_VERSION = 6
 REBUILD_WORK_SCHEMA_VERSION = 1
 IN_FLIGHT_GRACE_MINUTES = 9
 MAX_NOTE_NARRATIVE_CHARACTERS = 9_000
@@ -146,8 +146,8 @@ class Project:
     state_directory: Path | None = None
 
     @property
-    def sessions_path(self) -> Path:
-        return self.context_path / "sessions"
+    def thread_notes_path(self) -> Path:
+        return self.context_path / "thread-notes"
 
     @property
     def state_path(self) -> Path:
@@ -304,7 +304,7 @@ def load_config(path: Path | None = None) -> PipelineConfig:
     except (OSError, json.JSONDecodeError) as exc:
         raise PipelineError(f"cannot read pipeline config: {resolved}: {exc}") from exc
     if not isinstance(value, dict) or value.get("schemaVersion") != CONFIG_SCHEMA_VERSION:
-        raise PipelineError("unsupported session-note pipeline config schemaVersion")
+        raise PipelineError("unsupported thread-note pipeline config schemaVersion")
     if value.get("model") != DEFAULT_MODEL or value.get("reasoningEffort") != DEFAULT_REASONING_EFFORT:
         raise PipelineError(
             f"pipeline model must remain fixed at {DEFAULT_MODEL} with {DEFAULT_REASONING_EFFORT} reasoning"
@@ -441,7 +441,7 @@ def update_refresh_state(
     source["threads"][candidate.thread_id] = {
         "fingerprint": candidate.fingerprint,
         "generationFingerprint": generation_fingerprint(config, candidate),
-        "sessionSchemaVersion": SESSION_SCHEMA_VERSION,
+        "threadNoteSchemaVersion": THREAD_NOTE_SCHEMA_VERSION,
         "generatorModel": config.model,
         "generatorReasoningEffort": config.reasoning_effort,
         "generatorPromptVersion": GENERATOR_PROMPT_VERSION,
@@ -455,7 +455,7 @@ def update_refresh_state(
         "rendererVersion": RENDERER_VERSION,
         "noteHash": sha256(note_path.read_bytes()).hexdigest(),
         "sourceRefs": [candidate.source_ref],
-        "sessionNotes": [relative_note],
+        "threadNotes": [relative_note],
         "processedAt": processed_at,
     }
     source["lastRefreshAt"] = processed_at
@@ -532,24 +532,24 @@ def candidate_for_project(
     idle_cutoff = now_local() - timedelta(minutes=config.idle_minutes)
     if datetime.fromtimestamp(stat.st_mtime, tz=idle_cutoff.tzinfo) > idle_cutoff:
         return None
-    session = read_session(path)
-    if not session or is_approval_review(session) or is_known_internal_session(session):
+    thread_log = read_thread_log(path)
+    if not thread_log or is_approval_review(thread_log) or is_known_internal_thread(thread_log):
         return None
-    if not has_clean_user_message(session):
+    if not has_clean_user_message(thread_log):
         return None
-    events = events_for_project(session.id, read_session_events(path), project)
+    events = events_for_project(thread_log.id, read_thread_events(path), project)
     if not any(event.kind == "user_message" for event in events):
         return None
     relative_ref = source_ref(path, config.sessions_root)
     qualified_ref = f"{config.source_id}/{relative_ref}"
     return Candidate(
         project=project,
-        thread_id=session.id,
-        started_at=session.timestamp,
+        thread_id=thread_log.id,
+        started_at=thread_log.timestamp,
         source_path=path,
         source_ref=qualified_ref,
         source_relative_ref=relative_ref,
-        fingerprint=fingerprint_events(session.id, events, qualified_ref),
+        fingerprint=fingerprint_events(thread_log.id, events, qualified_ref),
         events=events,
         source_mtime_ns=stat.st_mtime_ns,
         source_size=stat.st_size,
@@ -622,30 +622,30 @@ def scan_candidates(
         if datetime.fromtimestamp(stat.st_mtime, tz=idle_cutoff.tzinfo) > idle_cutoff:
             counts["ignoredFiles"] += 1
             continue
-        session = read_session(path)
-        if not session:
+        thread_log = read_thread_log(path)
+        if not thread_log:
             counts["ignoredFiles"] += 1
             continue
-        if is_approval_review(session) or is_known_internal_session(session):
+        if is_approval_review(thread_log) or is_known_internal_thread(thread_log):
             counts["ignoredFiles"] += 1
             counts["excludedApprovalOrInternal"] += 1
             continue
-        if not has_clean_user_message(session):
+        if not has_clean_user_message(thread_log):
             counts["ignoredFiles"] += 1
             counts["excludedWithoutUserMessage"] += 1
             continue
-        all_events = read_session_events(path)
-        if session.id in projectless:
+        all_events = read_thread_events(path)
+        if thread_log.id in projectless:
             counts["projectless"] += 1
             counts["ignoredFiles"] += 1
             continue
-        if session.id not in assigned_to and any(
-            session.id in project.foreign_assigned_thread_ids for project in selected_projects
+        if thread_log.id not in assigned_to and any(
+            thread_log.id in project.foreign_assigned_thread_ids for project in selected_projects
         ):
             counts["unmatched"] += 1
             counts["ignoredFiles"] += 1
             continue
-        explicit_project_id = assigned_to.get(session.id)
+        explicit_project_id = assigned_to.get(thread_log.id)
         if explicit_project_id:
             matched_projects = [project for project in selected_projects if project.project_id == explicit_project_id]
             counts["assigned"] += 1
@@ -664,7 +664,7 @@ def scan_candidates(
             counts["ignoredFiles"] += 1
             continue
         project = matched_projects[0]
-        events = events_for_project(session.id, all_events, project)
+        events = events_for_project(thread_log.id, all_events, project)
         if not any(event.kind == "user_message" for event in events):
             counts["ignoredFiles"] += 1
             continue
@@ -674,12 +674,12 @@ def scan_candidates(
             qualified_ref = f"{config.source_id}/{relative_ref}"
             candidate = Candidate(
                 project=project,
-                thread_id=session.id,
-                started_at=session.timestamp,
+                thread_id=thread_log.id,
+                started_at=thread_log.timestamp,
                 source_path=path,
                 source_ref=qualified_ref,
                 source_relative_ref=relative_ref,
-                fingerprint=fingerprint_events(session.id, events, qualified_ref),
+                fingerprint=fingerprint_events(thread_log.id, events, qualified_ref),
                 events=events,
                 source_mtime_ns=stat.st_mtime_ns,
                 source_size=stat.st_size,
@@ -831,7 +831,7 @@ def validate_note_data(value: Any, allowed_event_ids: set[str]) -> dict[str, Any
         raise PipelineError(f"Codex output cited unknown event ids: {', '.join(sorted(invalid))}")
     narrative = json.dumps(value, ensure_ascii=False)
     if len(narrative) > MAX_NOTE_NARRATIVE_CHARACTERS:
-        raise PipelineError("Codex output exceeds the session-note narrative size limit")
+        raise PipelineError("Codex output exceeds the thread-note narrative size limit")
     avoidable = sorted(phrase for phrase in AVOIDABLE_ENGLISH_PHRASES if phrase in narrative.casefold())
     if avoidable:
         raise PipelineError("Codex output contains avoidable English prose: " + ", ".join(avoidable))
@@ -863,7 +863,7 @@ class CodexSummarizer:
             self.observer(event)
 
     def _invoke(self, prompt: str) -> dict[str, Any]:
-        with tempfile.TemporaryDirectory(prefix="tkn-session-note-") as directory:
+        with tempfile.TemporaryDirectory(prefix="tkn-thread-note-") as directory:
             temp = Path(directory)
             schema_path = temp / "schema.json"
             output_path = temp / "output.json"
@@ -1039,18 +1039,18 @@ def event_citation(event_ids: Sequence[str]) -> str:
 
 
 def file_slug_from_note_path(candidate: Candidate, note_path: Path) -> str:
-    session_id = source_timestamp(candidate.started_at).strftime("%Y%m%dT%H%M%S%z")
-    prefix = f"{session_id}-"
+    thread_note_id = source_timestamp(candidate.started_at).strftime("%Y%m%dT%H%M%S%z")
+    prefix = f"{thread_note_id}-"
     if not note_path.stem.startswith(prefix):
-        raise PipelineError(f"session note filename has an invalid timestamp prefix: {note_path}")
+        raise PipelineError(f"thread note filename has an invalid timestamp prefix: {note_path}")
     return note_path.stem[len(prefix) :]
 
 
 def find_note_matches(project: Project, thread_id: str) -> list[Path]:
-    if not project.sessions_path.is_dir():
+    if not project.thread_notes_path.is_dir():
         return []
     matches: list[Path] = []
-    for path in sorted(project.sessions_path.glob("*.md")):
+    for path in sorted(project.thread_notes_path.glob("*.md")):
         try:
             lines, _body = split_frontmatter_lines(path.read_text(encoding="utf-8-sig"))
         except (OSError, SystemExit):
@@ -1064,22 +1064,22 @@ def choose_note_path(
     candidate: Candidate,
     title: str,
     *,
-    sessions_path: Path | None = None,
+    thread_notes_path: Path | None = None,
     match_existing: bool = True,
 ) -> tuple[Path, dict[str, str]]:
-    target = sessions_path or candidate.project.sessions_path
+    target = thread_notes_path or candidate.project.thread_notes_path
     matches = find_note_matches(candidate.project, candidate.thread_id) if match_existing else []
     if len(matches) > 1:
         raise PipelineError(
-            f"multiple session notes match thread {candidate.thread_id}: " + ", ".join(str(path) for path in matches)
+            f"multiple thread notes match thread {candidate.thread_id}: " + ", ".join(str(path) for path in matches)
         )
     if matches:
         existing_text = matches[0].read_text(encoding="utf-8-sig")
         return matches[0], parse_simple_frontmatter(existing_text)
     started = source_timestamp(candidate.started_at)
-    session_id = started.strftime("%Y%m%dT%H%M%S%z")
+    thread_note_id = started.strftime("%Y%m%dT%H%M%S%z")
     file_slug = title if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", title) else slugify(title)
-    base = target / f"{session_id}-{file_slug}.md"
+    base = target / f"{thread_note_id}-{file_slug}.md"
     if not base.exists():
         return base, {}
     suffix = re.sub(r"[^A-Za-z0-9]", "", candidate.thread_id)[:8] or "thread"
@@ -1096,13 +1096,13 @@ def render_note(
     default_prompt = SUMMARY_PROMPT_RESOURCE
     started = source_timestamp(candidate.started_at)
     created = existing.get("date") or started.isoformat(timespec="seconds")
-    session_id = existing.get("sessionId") or started.strftime("%Y%m%dT%H%M%S%z")
+    thread_note_id = existing.get("threadNoteId") or started.strftime("%Y%m%dT%H%M%S%z")
     last_state = data["lastKnownState"]
     rendered_at = now_iso()
     fields: list[tuple[str, str | int | list[str]]] = [
-        ("type", "summary"),
-        ("schemaVersion", SESSION_SCHEMA_VERSION),
-        ("title", str(data["title"]).strip() or "Codex session"),
+        ("type", "threadNote"),
+        ("schemaVersion", THREAD_NOTE_SCHEMA_VERSION),
+        ("title", str(data["title"]).strip() or "Codex thread"),
         ("description", str(data["description"]).strip()),
         ("generator", "Codex"),
         ("generatorModel", data.get("_generatorModel", DEFAULT_MODEL)),
@@ -1124,7 +1124,7 @@ def render_note(
         ("automatedValidation", "passed"),
         ("date", created),
         ("updated", rendered_at),
-        ("sessionId", session_id),
+        ("threadNoteId", thread_note_id),
         ("sourceType", "codexChat"),
         ("sourceThreadIds", [candidate.thread_id]),
         ("sourceRefs", [candidate.source_ref]),
@@ -1205,15 +1205,15 @@ def revalidate_candidate(candidate: Candidate, config: PipelineConfig) -> None:
         candidate.source_path.stat()
     except OSError as exc:
         raise PipelineError(f"source log disappeared: {candidate.source_relative_ref}") from exc
-    session = read_session(candidate.source_path)
-    if not session:
+    thread_log = read_thread_log(candidate.source_path)
+    if not thread_log:
         raise PipelineError(f"source log no longer has metadata: {candidate.source_relative_ref}")
     events = events_for_project(
-        session.id,
-        read_session_events(candidate.source_path),
+        thread_log.id,
+        read_thread_events(candidate.source_path),
         candidate.project,
     )
-    current = fingerprint_events(session.id, events, candidate.source_ref)
+    current = fingerprint_events(thread_log.id, events, candidate.source_ref)
     if current != candidate.fingerprint:
         raise PipelineError(f"source log changed during generation: {candidate.source_relative_ref}")
 
@@ -1241,7 +1241,7 @@ def write_candidate_note(
         if not force and isinstance(manifest, dict):
             filename = str(manifest.get("file") or "")
             proposed = work_root / filename
-            final = candidate.project.sessions_path / filename
+            final = candidate.project.thread_notes_path / filename
             matches = find_note_matches(candidate.project, candidate.thread_id)
             if (
                 manifest.get("sourceFingerprint") == candidate.fingerprint
@@ -1251,7 +1251,7 @@ def write_candidate_note(
                 and proposed.is_file()
                 and (not matches or matches == [final])
             ):
-                validate_session_note(proposed)
+                validate_thread_note(proposed)
                 staged_note = proposed
                 note_path = final
     if staged_note is None or note_path is None:
@@ -1276,7 +1276,7 @@ def write_candidate_note(
         rendered = render_note(candidate, data, existing)
         staged_note = work_root / note_path.name
         atomic_write_text(staged_note, rendered)
-        validate_session_note(staged_note)
+        validate_thread_note(staged_note)
         atomic_write_json(
             manifest_path,
             {
@@ -1375,23 +1375,28 @@ def scan_rebuild_candidates(
     }
     for path in sorted(config.sessions_root.rglob("*.jsonl")):
         counts["files"] += 1
-        session = read_session(path)
-        if not session:
+        thread_log = read_thread_log(path)
+        if not thread_log:
             counts["unmatchedProject"] += 1
             continue
-        if session.id in project.projectless_thread_ids or session.id in project.foreign_assigned_thread_ids:
+        if (
+            thread_log.id in project.projectless_thread_ids
+            or thread_log.id in project.foreign_assigned_thread_ids
+        ):
             counts["unmatchedProject"] += 1
             continue
-        all_events = read_session_events(path)
-        project_events = events_for_project(session.id, all_events, project)
+        all_events = read_thread_events(path)
+        project_events = events_for_project(thread_log.id, all_events, project)
         if not project_events:
             counts["unmatchedProject"] += 1
             continue
         counts["matchedProject"] += 1
-        if is_approval_review(session) or is_known_internal_session(session):
+        if is_approval_review(thread_log) or is_known_internal_thread(thread_log):
             counts["excludedApprovalOrInternal"] += 1
             continue
-        if not has_clean_user_message(session) or not any(event.kind == "user_message" for event in project_events):
+        if not has_clean_user_message(thread_log) or not any(
+            event.kind == "user_message" for event in project_events
+        ):
             counts["excludedWithoutUserMessage"] += 1
             continue
         stat = path.stat()
@@ -1400,12 +1405,12 @@ def scan_rebuild_candidates(
         candidates.append(
             Candidate(
                 project=project,
-                thread_id=session.id,
-                started_at=session.timestamp,
+                thread_id=thread_log.id,
+                started_at=thread_log.timestamp,
                 source_path=path,
                 source_ref=qualified_ref,
                 source_relative_ref=relative_ref,
-                fingerprint=fingerprint_events(session.id, project_events, qualified_ref),
+                fingerprint=fingerprint_events(thread_log.id, project_events, qualified_ref),
                 events=project_events,
                 source_mtime_ns=stat.st_mtime_ns,
                 source_size=stat.st_size,
@@ -1423,12 +1428,12 @@ def scan_rebuild_candidates(
     return candidates, counts
 
 
-def session_note_metadata(path: Path) -> tuple[dict[str, str], list[str], list[str], str]:
+def thread_note_metadata(path: Path) -> tuple[dict[str, str], list[str], list[str], str]:
     text = path.read_text(encoding="utf-8-sig")
     try:
         lines, _body = split_frontmatter_lines(text)
     except SystemExit as exc:
-        raise PipelineError(f"invalid session note frontmatter: {path}") from exc
+        raise PipelineError(f"invalid thread note frontmatter: {path}") from exc
     metadata = parse_simple_frontmatter(text)
     version = metadata.get("schemaVersion") or "1"
     return (
@@ -1439,9 +1444,9 @@ def session_note_metadata(path: Path) -> tuple[dict[str, str], list[str], list[s
     )
 
 
-def parse_session_schema_version(version: str, path: Path) -> int:
+def parse_thread_note_schema_version(version: str, path: Path) -> int:
     if not re.fullmatch(r"[1-9][0-9]*", version):
-        raise PipelineError(f"unsupported session schemaVersion {version}: {path.name}")
+        raise PipelineError(f"unsupported Thread Note schemaVersion {version}: {path.name}")
     return int(version)
 
 
@@ -1453,19 +1458,19 @@ def current_note_matches_generation(
     matches = find_note_matches(candidate.project, candidate.thread_id)
     if len(matches) > 1:
         raise PipelineError(
-            f"multiple session notes match thread {candidate.thread_id}: "
+            f"multiple thread notes match thread {candidate.thread_id}: "
             + ", ".join(str(path) for path in matches)
         )
     if not matches:
         return False
     path = matches[0]
-    metadata, thread_ids, source_refs, version = session_note_metadata(path)
-    parsed_version = parse_session_schema_version(version, path)
-    if parsed_version > SESSION_SCHEMA_VERSION:
-        raise PipelineError(f"unsupported session schemaVersion {version}: {path.name}")
+    metadata, thread_ids, source_refs, version = thread_note_metadata(path)
+    parsed_version = parse_thread_note_schema_version(version, path)
+    if parsed_version > THREAD_NOTE_SCHEMA_VERSION:
+        raise PipelineError(f"unsupported Thread Note schemaVersion {version}: {path.name}")
     return (
-        parsed_version == SESSION_SCHEMA_VERSION
-        and metadata.get("type") == "summary"
+        parsed_version == THREAD_NOTE_SCHEMA_VERSION
+        and metadata.get("type") == "threadNote"
         and thread_ids == [candidate.thread_id]
         and source_refs == [candidate.source_ref]
         and metadata.get("sourceFingerprint") == candidate.fingerprint
@@ -1481,8 +1486,8 @@ def current_note_matches_generation(
     )
 
 
-def validate_staged_sessions(
-    sessions_path: Path,
+def validate_staged_thread_notes(
+    thread_notes_path: Path,
     candidates: Sequence[Candidate],
     config: PipelineConfig,
     *,
@@ -1493,15 +1498,15 @@ def validate_staged_sessions(
     note_hashes: dict[str, str] = {}
     candidates_by_thread = {candidate.thread_id: candidate for candidate in candidates}
     strict = strict_threads or set()
-    for path in sorted(sessions_path.glob("*.md")):
-        metadata, thread_ids, source_refs, version = session_note_metadata(path)
-        if parse_session_schema_version(version, path) != SESSION_SCHEMA_VERSION:
+    for path in sorted(thread_notes_path.glob("*.md")):
+        metadata, thread_ids, source_refs, version = thread_note_metadata(path)
+        if parse_thread_note_schema_version(version, path) != THREAD_NOTE_SCHEMA_VERSION:
             raise PipelineError(
-                f"staged session note is not schemaVersion {SESSION_SCHEMA_VERSION}: {path.name}"
+                f"staged thread note is not schemaVersion {THREAD_NOTE_SCHEMA_VERSION}: {path.name}"
             )
         if thread_ids:
-            if metadata.get("type") != "summary":
-                raise PipelineError(f"staged session note has invalid type: {path.name}")
+            if metadata.get("type") != "threadNote":
+                raise PipelineError(f"staged thread note has invalid type: {path.name}")
             if metadata.get("reviewStatus") != "unreviewed":
                 raise PipelineError(f"chat-backed note is not unreviewed: {path.name}")
             if metadata.get("sourceType") != "codexChat" or not source_refs:
@@ -1513,17 +1518,17 @@ def validate_staged_sessions(
                     )
                 by_thread[thread_id] = path.name
                 note_hashes[thread_id] = sha256(path.read_bytes()).hexdigest()
-        elif metadata.get("type") not in {"session", "summary"}:
-            raise PipelineError(f"staged session note has invalid type: {path.name}")
+        elif metadata.get("type") != "threadNote":
+            raise PipelineError(f"staged thread note has invalid type: {path.name}")
         body = path.read_text(encoding="utf-8-sig")
         for heading in (
-            "# Session Note",
+            "# Thread Note",
             "## Summary",
             "## Key Developments",
             "## Last Known State",
         ):
             if heading not in body:
-                raise PipelineError(f"staged session note is missing {heading}: {path.name}")
+                raise PipelineError(f"staged thread note is missing {heading}: {path.name}")
         status_match = re.search(
             r"(?m)^- Work State: (in-progress|blocked|waiting-for-user|done)\b",
             body,
@@ -1536,10 +1541,12 @@ def validate_staged_sessions(
                 continue
             if source_refs != [candidate.source_ref]:
                 raise PipelineError(f"sourceRefs do not match source thread {thread_id}: {path.name}")
-            expected_session_id = source_timestamp(candidate.started_at).strftime("%Y%m%dT%H%M%S%z")
+            expected_thread_note_id = source_timestamp(candidate.started_at).strftime("%Y%m%dT%H%M%S%z")
             expected_date = source_timestamp(candidate.started_at).isoformat(timespec="seconds")
-            if metadata.get("sessionId") != expected_session_id or not path.name.startswith(f"{expected_session_id}-"):
-                raise PipelineError(f"filename or sessionId does not match source time: {path.name}")
+            if metadata.get("threadNoteId") != expected_thread_note_id or not path.name.startswith(
+                f"{expected_thread_note_id}-"
+            ):
+                raise PipelineError(f"filename or threadNoteId does not match source time: {path.name}")
             if metadata.get("date") != expected_date:
                 raise PipelineError(f"date does not match source time: {path.name}")
             if thread_id in strict:
@@ -1562,7 +1569,7 @@ def validate_staged_sessions(
                 file_slug = metadata.get("fileSlug") or ""
                 if (
                     not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", file_slug)
-                    or path.name != f"{expected_session_id}-{file_slug}.md"
+                    or path.name != f"{expected_thread_note_id}-{file_slug}.md"
                 ):
                     raise PipelineError(f"generated note filename does not match fileSlug: {path.name}")
     expected = {candidate.thread_id for candidate in candidates}
@@ -1572,62 +1579,62 @@ def validate_staged_sessions(
     return by_thread, note_hashes
 
 
-def validate_session_note(path: Path) -> dict[str, Any]:
-    """Validate one standalone Session Note v2 without touching project state."""
+def validate_thread_note(path: Path) -> dict[str, Any]:
+    """Validate one standalone Thread Note v3 without touching project state."""
 
     if not path.is_file():
-        raise PipelineError(f"session note not found: {path}")
-    metadata, thread_ids, source_refs, version = session_note_metadata(path)
-    if parse_session_schema_version(version, path) != SESSION_SCHEMA_VERSION:
-        raise PipelineError(f"session note is not schemaVersion {SESSION_SCHEMA_VERSION}: {path}")
+        raise PipelineError(f"thread note not found: {path}")
+    metadata, thread_ids, source_refs, version = thread_note_metadata(path)
+    if parse_thread_note_schema_version(version, path) != THREAD_NOTE_SCHEMA_VERSION:
+        raise PipelineError(f"thread note is not schemaVersion {THREAD_NOTE_SCHEMA_VERSION}: {path}")
     required = {
-        "type": "summary",
+        "type": "threadNote",
         "reviewStatus": "unreviewed",
         "sourceType": "codexChat",
         "automatedValidation": "passed",
     }
     for key, expected in required.items():
         if metadata.get(key) != expected:
-            raise PipelineError(f"session note has invalid {key}: {path}")
+            raise PipelineError(f"thread note has invalid {key}: {path}")
     try:
         uuid.UUID(metadata.get("promptId") or "")
     except ValueError as exc:
-        raise PipelineError(f"session note has invalid promptId: {path}") from exc
+        raise PipelineError(f"thread note has invalid promptId: {path}") from exc
     if not metadata.get("promptVersion"):
-        raise PipelineError(f"session note has no promptVersion: {path}")
+        raise PipelineError(f"thread note has no promptVersion: {path}")
     try:
         uuid.UUID(metadata.get("templateId") or "")
     except ValueError as exc:
-        raise PipelineError(f"session note has invalid templateId: {path}") from exc
+        raise PipelineError(f"thread note has invalid templateId: {path}") from exc
     if not metadata.get("templateVersion"):
-        raise PipelineError(f"session note has no templateVersion: {path}")
+        raise PipelineError(f"thread note has no templateVersion: {path}")
     if not re.fullmatch(r"[0-9a-f]{64}", metadata.get("outputSchemaSha256") or ""):
-        raise PipelineError(f"session note has invalid outputSchemaSha256: {path}")
+        raise PipelineError(f"thread note has invalid outputSchemaSha256: {path}")
     if len(thread_ids) != 1 or len(source_refs) != 1:
-        raise PipelineError(f"session note must have one source thread and source ref: {path}")
+        raise PipelineError(f"thread note must have one source thread and source ref: {path}")
     if not metadata.get("sourceFingerprint"):
-        raise PipelineError(f"session note has no sourceFingerprint: {path}")
+        raise PipelineError(f"thread note has no sourceFingerprint: {path}")
     body = path.read_text(encoding="utf-8-sig")
     for heading in (
-        "# Session Note",
+        "# Thread Note",
         "## Summary",
         "## Key Developments",
         "## Last Known State",
     ):
         if heading not in body:
-            raise PipelineError(f"session note is missing {heading}: {path}")
+            raise PipelineError(f"thread note is missing {heading}: {path}")
     status = re.search(
         r"(?m)^- Work State: (in-progress|blocked|waiting-for-user|done)\b",
         body,
     )
     if status is None:
-        raise PipelineError(f"session note has no valid Work State: {path}")
+        raise PipelineError(f"thread note has no valid Work State: {path}")
     if metadata.get("status") != status.group(1):
         raise PipelineError(f"frontmatter status and Work State differ: {path}")
     return {
         "valid": True,
         "path": str(path.absolute()),
-        "schemaVersion": SESSION_SCHEMA_VERSION,
+        "schemaVersion": THREAD_NOTE_SCHEMA_VERSION,
         "threadId": thread_ids[0],
         "sourceRef": source_refs[0],
         "status": status.group(1),
@@ -1651,7 +1658,7 @@ def rebuild_state(
         threads[candidate.thread_id] = {
             "fingerprint": candidate.fingerprint,
             "generationFingerprint": generation_fingerprint(config, candidate),
-            "sessionSchemaVersion": SESSION_SCHEMA_VERSION,
+            "threadNoteSchemaVersion": THREAD_NOTE_SCHEMA_VERSION,
             "generatorModel": config.model,
             "generatorReasoningEffort": config.reasoning_effort,
             "generatorPromptVersion": GENERATOR_PROMPT_VERSION,
@@ -1665,7 +1672,7 @@ def rebuild_state(
             "rendererVersion": RENDERER_VERSION,
             "noteHash": note_hash_by_thread[candidate.thread_id],
             "sourceRefs": [candidate.source_ref],
-            "sessionNotes": [f"sessions/{note_by_thread[candidate.thread_id]}"],
+            "threadNotes": [f"thread-notes/{note_by_thread[candidate.thread_id]}"],
             "processedAt": processed_at,
         }
     source["threads"] = threads
@@ -1678,7 +1685,9 @@ def rebuild_state(
 def remove_rebuild_tree(project: Project, path: Path) -> None:
     context = project.context_path.absolute()
     target = path.absolute()
-    if target.parent != context or not target.name.startswith((".session-notes-rebuild-", ".sessions-rebuild-backup-")):
+    if target.parent != context or not target.name.startswith(
+        (".thread-notes-rebuild-", ".thread-notes-rebuild-backup-")
+    ):
         raise PipelineError(f"refusing to remove unmanaged rebuild path: {target}")
     if target.exists():
         shutil.rmtree(target)
@@ -1775,9 +1784,9 @@ def reusable_generated_note(
         return None
     if sha256(path.read_bytes()).hexdigest() != completed.get("noteHash"):
         return None
-    _metadata, thread_ids, source_refs, version = session_note_metadata(path)
+    _metadata, thread_ids, source_refs, version = thread_note_metadata(path)
     if (
-        version != str(SESSION_SCHEMA_VERSION)
+        version != str(THREAD_NOTE_SCHEMA_VERSION)
         or thread_ids != [candidate.thread_id]
         or source_refs != [candidate.source_ref]
     ):
@@ -1785,16 +1794,16 @@ def reusable_generated_note(
     return path
 
 
-def replace_sessions_and_state(
+def replace_thread_notes_and_state(
     project: Project,
-    staged_sessions: Path,
+    staged_thread_notes: Path,
     state: dict[str, Any],
 ) -> list[str]:
     warnings: list[str] = []
     context = project.context_path.absolute()
-    live = project.sessions_path.absolute()
-    backup = context / f".sessions-rebuild-backup-{uuid.uuid4().hex}"
-    if live.parent != context or staged_sessions.parent.parent != context:
+    live = project.thread_notes_path.absolute()
+    backup = context / f".thread-notes-rebuild-backup-{uuid.uuid4().hex}"
+    if live.parent != context or staged_thread_notes.parent.parent != context:
         raise PipelineError("refusing rebuild outside the project context folder")
     original_state = project.state_path.read_bytes() if project.state_path.exists() else None
     moved_live = False
@@ -1803,12 +1812,12 @@ def replace_sessions_and_state(
         if live.exists():
             os.replace(live, backup)
             moved_live = True
-        os.replace(staged_sessions, live)
+        os.replace(staged_thread_notes, live)
         installed_staged = True
         atomic_write_json(project.state_path, state)
     except Exception:
         if installed_staged and live.exists():
-            failed = staged_sessions.parent / "failed-sessions"
+            failed = staged_thread_notes.parent / "failed-thread-notes"
             os.replace(live, failed)
         if moved_live and backup.exists():
             os.replace(backup, live)
@@ -1825,7 +1834,9 @@ def replace_sessions_and_state(
         try:
             shutil.rmtree(backup)
         except OSError as exc:
-            warnings.append(f"new sessions and state were committed, but backup cleanup failed: {backup}: {exc}")
+            warnings.append(
+                f"new Thread Notes and state were committed, but backup cleanup failed: {backup}: {exc}"
+            )
     return warnings
 
 
@@ -1861,22 +1872,22 @@ def execute_rebuild(
     preserve: list[Path] = []
     legacy: list[Path] = []
     replaced_current: list[Path] = []
-    matched_v2: dict[str, Path] = {}
+    matched_current: dict[str, Path] = {}
     reusable_threads: set[str] = set()
     generator_versions = {"current": 0, "older": 0, "unknown": 0}
-    if project.sessions_path.is_dir():
-        for path in sorted(project.sessions_path.glob("*.md")):
-            metadata, thread_ids, _source_refs, version = session_note_metadata(path)
-            parsed_version = parse_session_schema_version(version, path)
-            if parsed_version < SESSION_SCHEMA_VERSION:
+    if project.thread_notes_path.is_dir():
+        for path in sorted(project.thread_notes_path.glob("*.md")):
+            metadata, thread_ids, _source_refs, version = thread_note_metadata(path)
+            parsed_version = parse_thread_note_schema_version(version, path)
+            if parsed_version < THREAD_NOTE_SCHEMA_VERSION:
                 legacy.append(path)
                 continue
-            if parsed_version > SESSION_SCHEMA_VERSION:
-                raise PipelineError(f"unsupported session schemaVersion {version}: {path.name}")
+            if parsed_version > THREAD_NOTE_SCHEMA_VERSION:
+                raise PipelineError(f"unsupported Thread Note schemaVersion {version}: {path.name}")
             if len(thread_ids) == 1 and thread_ids[0] in candidates_by_thread:
-                if thread_ids[0] in matched_v2:
-                    raise PipelineError(f"multiple v2 notes match thread {thread_ids[0]}")
-                matched_v2[thread_ids[0]] = path
+                if thread_ids[0] in matched_current:
+                    raise PipelineError(f"multiple current Thread Notes match thread {thread_ids[0]}")
+                matched_current[thread_ids[0]] = path
                 prompt_version = metadata.get("generatorPromptVersion")
                 renderer_version = metadata.get("rendererVersion")
                 current_generator = (
@@ -1884,7 +1895,7 @@ def execute_rebuild(
                     and renderer_version == str(RENDERER_VERSION)
                     and metadata.get("generatorModel") == config.model
                     and metadata.get("generatorReasoningEffort") == config.reasoning_effort
-                    and metadata.get("type") == "summary"
+                    and metadata.get("type") == "threadNote"
                     and metadata.get("promptId") == prompt.prompt_id
                     and metadata.get("promptVersion") == prompt.version
                     and metadata.get("outputSchemaSha256")
@@ -1952,8 +1963,8 @@ def execute_rebuild(
         "warnings": [],
         "resumedCount": 0,
         "resumeAvailable": 0,
-        "existingTotalBytes": sum(path.stat().st_size for path in project.sessions_path.glob("*.md"))
-        if project.sessions_path.is_dir()
+        "existingTotalBytes": sum(path.stat().st_size for path in project.thread_notes_path.glob("*.md"))
+        if project.thread_notes_path.is_dir()
         else 0,
     }
     if dry_run:
@@ -1973,19 +1984,19 @@ def execute_rebuild(
     report["reusedWorkArea"] = reused_work
     if hasattr(summarizer, "set_deadline"):
         summarizer.set_deadline(hard_deadline)
-    stage_root = project.context_path / f".session-notes-rebuild-{uuid.uuid4().hex}"
-    staged_sessions = stage_root / "sessions"
+    stage_root = project.context_path / f".thread-notes-rebuild-{uuid.uuid4().hex}"
+    staged_thread_notes = stage_root / "thread-notes"
     generated_by_thread: dict[str, Path] = {}
     for index, candidate in enumerate(generate):
         reusable = reusable_generated_note(work_root, work_manifest, candidate, config)
         if reusable is not None:
             generated_by_thread[candidate.thread_id] = reusable
-            final_note_path = (candidate.project.sessions_path / reusable.name).absolute()
+            final_note_path = (candidate.project.thread_notes_path / reusable.name).absolute()
             report["resumedCount"] += 1
             report["processed"].append(
                 {
                     "threadId": candidate.thread_id,
-                    "sessionNote": reusable.name,
+                    "threadNote": reusable.name,
                     "resumed": True,
                     "noteHash": sha256(reusable.read_bytes()).hexdigest(),
                     "generationFingerprint": generation_fingerprint(config, candidate),
@@ -1998,7 +2009,7 @@ def execute_rebuild(
                         "index": index + 1,
                         "total": len(generate),
                         "threadId": candidate.thread_id,
-                        "sessionNotePath": str(final_note_path),
+                        "threadNotePath": str(final_note_path),
                     }
                 )
             continue
@@ -2029,7 +2040,7 @@ def execute_rebuild(
             note_path, _existing = choose_note_path(
                 candidate,
                 str(data["fileSlug"]),
-                sessions_path=work_root / "generated",
+                thread_notes_path=work_root / "generated",
                 match_existing=False,
             )
             data["fileSlug"] = file_slug_from_note_path(candidate, note_path)
@@ -2049,13 +2060,13 @@ def execute_rebuild(
             }
             save_rebuild_work(work_root, work_manifest)
             generated_by_thread[candidate.thread_id] = note_path
-            final_note_path = (candidate.project.sessions_path / note_path.name).absolute()
+            final_note_path = (candidate.project.thread_notes_path / note_path.name).absolute()
             duration = round(time.monotonic() - thread_started, 3)
             metrics = deepcopy(getattr(summarizer, "last_metrics", {}))
             report["processed"].append(
                 {
                     "threadId": candidate.thread_id,
-                    "sessionNote": note_path.name,
+                    "threadNote": note_path.name,
                     "resumed": False,
                     "durationSeconds": duration,
                     "noteHash": note_hash,
@@ -2070,7 +2081,7 @@ def execute_rebuild(
                         "index": index + 1,
                         "total": len(generate),
                         "threadId": candidate.thread_id,
-                        "sessionNotePath": str(final_note_path),
+                        "threadNotePath": str(final_note_path),
                         "durationSeconds": duration,
                         **metrics,
                     }
@@ -2098,22 +2109,24 @@ def execute_rebuild(
         report_path = write_run_report(cache_root or default_cache_root(), report)
         return report, report_path
 
-    staged_sessions.mkdir(parents=True)
+    staged_thread_notes.mkdir(parents=True)
     try:
         for path in preserve:
-            shutil.copy2(path, staged_sessions / path.name)
+            shutil.copy2(path, staged_thread_notes / path.name)
         for candidate in generate:
             generated = generated_by_thread.get(candidate.thread_id)
             if generated is None:
                 raise PipelineError(f"generated note missing from rebuild work area: {candidate.thread_id}")
-            destination = staged_sessions / generated.name
+            destination = staged_thread_notes / generated.name
             if destination.exists():
-                raise PipelineError(f"generated filename conflicts with preserved v2 note: {generated.name}")
+                raise PipelineError(
+                    f"generated filename conflicts with preserved current Thread Note: {generated.name}"
+                )
             shutil.copy2(generated, destination)
         for candidate in candidates:
             revalidate_candidate(candidate, config)
-        note_by_thread, note_hash_by_thread = validate_staged_sessions(
-            staged_sessions,
+        note_by_thread, note_hash_by_thread = validate_staged_thread_notes(
+            staged_thread_notes,
             candidates,
             config,
             strict_threads={candidate.thread_id for candidate in generate},
@@ -2126,7 +2139,7 @@ def execute_rebuild(
             note_by_thread,
             note_hash_by_thread,
         )
-        report["warnings"].extend(replace_sessions_and_state(project, staged_sessions, state))
+        report["warnings"].extend(replace_thread_notes_and_state(project, staged_thread_notes, state))
     except Exception as exc:
         report["failed"].append({"error": str(exc)})
         report["finishedAt"] = now_iso()
@@ -2142,7 +2155,7 @@ def execute_rebuild(
         shutil.rmtree(work_root)
     except OSError as exc:
         report["warnings"].append(f"rebuild succeeded, but reusable work cleanup failed: {work_root}: {exc}")
-    report["newTotalBytes"] = sum(path.stat().st_size for path in project.sessions_path.glob("*.md"))
+    report["newTotalBytes"] = sum(path.stat().st_size for path in project.thread_notes_path.glob("*.md"))
     report["finishedAt"] = now_iso()
     report_path = write_run_report(cache_root or default_cache_root(), report)
     return report, report_path
@@ -2260,7 +2273,7 @@ def execute_pipeline(
                 {
                     "projectId": candidate.project.project_id,
                     "threadId": candidate.thread_id,
-                    "sessionNote": note_path.relative_to(candidate.project.context_path).as_posix(),
+                    "threadNote": note_path.relative_to(candidate.project.context_path).as_posix(),
                     "durationSeconds": duration,
                     **metrics,
                 }
@@ -2272,7 +2285,7 @@ def execute_pipeline(
                         "index": index + 1,
                         "total": len(candidates),
                         "threadId": candidate.thread_id,
-                        "sessionNotePath": str(note_path.absolute()),
+                        "threadNotePath": str(note_path.absolute()),
                         "durationSeconds": duration,
                         **metrics,
                     }

@@ -1,4 +1,4 @@
-"""Distill durable decision records from generated Session Notes."""
+"""Distill durable decision records from generated Thread Notes."""
 
 from __future__ import annotations
 
@@ -32,7 +32,8 @@ from .frontmatter import (
     unique_ordered,
 )
 from .safety import has_secret_like_content
-from .session_notes import (
+from .summary_resources import validate_summary_output_schema
+from .thread_notes import (
     PipelineConfig,
     PipelineError,
     Project,
@@ -40,14 +41,13 @@ from .session_notes import (
     atomic_write_text,
     now_iso,
     now_local,
-    session_note_metadata,
+    thread_note_metadata,
     write_run_report,
 )
-from .summary_resources import validate_summary_output_schema
 
-DECISION_SCHEMA_VERSION = 3
+DECISION_SCHEMA_VERSION = 4
 DECISION_STATE_SCHEMA_VERSION = 1
-DECISION_RENDERER_VERSION = 3
+DECISION_RENDERER_VERSION = 4
 DECISION_STATE_FILENAME = "decision-build-state.json"
 MAX_EXISTING_DECISION_INDEX = 200
 MAX_SOURCE_NOTE_CHARACTERS = 20_000
@@ -67,7 +67,7 @@ class DecisionSource:
     relative_path: str
     source_ref: str
     source_sha256: str
-    session_id: str
+    thread_note_id: str
     thread_id: str
     text: str
 
@@ -89,7 +89,7 @@ class ExistingDecision:
     @property
     def update_allowed(self) -> bool:
         return (
-            self.schema_version in {"2", str(DECISION_SCHEMA_VERSION)}
+            self.schema_version in {"2", "3", str(DECISION_SCHEMA_VERSION)}
             and self.generator == "Codex"
             and self.review_status == "unreviewed"
         )
@@ -109,7 +109,7 @@ class ExistingDecision:
             "reviewStatus": self.review_status,
             "updateAllowed": self.update_allowed,
             "qualityUpgradeRequired": self.quality_upgrade_required,
-            "sourceSessionRefs": list(self.source_refs),
+            "sourceThreadNoteRefs": list(self.source_refs),
             "decision": self.decision[:600],
             "recordExcerpt": self.record_excerpt[:4000] if self.update_allowed else "",
         }
@@ -207,7 +207,7 @@ def load_existing_decisions(project: Project) -> list[ExistingDecision]:
         text = path.read_text(encoding="utf-8-sig")
         metadata = parse_simple_frontmatter(text)
         version = metadata.get("schemaVersion") or "1"
-        if version not in {"1", "2", "3"}:
+        if version not in {"1", "2", "3", "4"}:
             raise PipelineError(f"unsupported decision schemaVersion {version}: {path.name}")
         decision_id = metadata.get("decisionId") or f"DR-{match.group(1)}"
         if decision_id != f"DR-{match.group(1)}":
@@ -223,7 +223,7 @@ def load_existing_decisions(project: Project) -> list[ExistingDecision]:
                 title=metadata.get("title") or path.stem,
                 status=metadata.get("status") or "unknown",
                 decision=_section(text, "Decision"),
-                source_refs=tuple(frontmatter_list_value(lines, "sourceSessionRefs")),
+                source_refs=tuple(frontmatter_list_value(lines, "sourceThreadNoteRefs")),
                 review_status=metadata.get("reviewStatus") or "unknown",
                 generator=metadata.get("generator") or "unknown",
                 schema_version=version,
@@ -234,23 +234,23 @@ def load_existing_decisions(project: Project) -> list[ExistingDecision]:
     return result
 
 
-def _session_source(path: Path, project: Project) -> DecisionSource:
+def _thread_note_source(path: Path, project: Project) -> DecisionSource:
     text = path.read_text(encoding="utf-8-sig")
-    metadata, thread_ids, _source_refs, version = session_note_metadata(path)
-    if version != "2":
-        raise PipelineError(f"decision distillation requires Session Note v2: {path.name}")
-    if metadata.get("type") not in {"summary", "session"}:
-        raise PipelineError(f"invalid Session Note type for decision distillation: {path.name}")
+    metadata, thread_ids, _source_refs, version = thread_note_metadata(path)
+    if version != "3":
+        raise PipelineError(f"decision distillation requires Thread Note v3: {path.name}")
+    if metadata.get("type") != "threadNote":
+        raise PipelineError(f"invalid Thread Note type for decision distillation: {path.name}")
     if len(thread_ids) != 1:
-        raise PipelineError(f"Session Note must identify one source thread: {path.name}")
-    for heading in ("# Session Note", "## Summary", "## Key Developments", "## Last Known State"):
+        raise PipelineError(f"Thread Note must identify one source thread: {path.name}")
+    for heading in ("# Thread Note", "## Summary", "## Key Developments", "## Last Known State"):
         if heading not in text:
-            raise PipelineError(f"Session Note is missing {heading}: {path.name}")
+            raise PipelineError(f"Thread Note is missing {heading}: {path.name}")
     secrets = has_secret_like_content(text)
     if secrets:
-        raise PipelineError(f"Session Note contains secret-like content ({', '.join(secrets)}): {path.name}")
+        raise PipelineError(f"Thread Note contains secret-like content ({', '.join(secrets)}): {path.name}")
     if len(text) > MAX_SOURCE_NOTE_CHARACTERS:
-        raise PipelineError(f"Session Note exceeds the decision input size limit: {path.name}")
+        raise PipelineError(f"Thread Note exceeds the decision input size limit: {path.name}")
     relative = path.relative_to(project.context_path).as_posix()
     return DecisionSource(
         project=project,
@@ -258,7 +258,7 @@ def _session_source(path: Path, project: Project) -> DecisionSource:
         relative_path=relative,
         source_ref=f"project:/{relative}",
         source_sha256=sha256(path.read_bytes()).hexdigest(),
-        session_id=metadata.get("sessionId") or path.stem,
+        thread_note_id=metadata.get("threadNoteId") or path.stem,
         thread_id=thread_ids[0],
         text=text,
     )
@@ -282,13 +282,13 @@ def scan_decision_sources(
         "withoutExplicitDecision": 0,
         "invalid": 0,
     }
-    for path in sorted(project.sessions_path.glob("*.md")):
+    for path in sorted(project.thread_notes_path.glob("*.md")):
         counts["total"] += 1
         try:
-            source = _session_source(path, project)
+            source = _thread_note_source(path, project)
         except (OSError, PipelineError, SystemExit) as exc:
             counts["invalid"] += 1
-            failures.append({"sessionNote": path.name, "error": str(exc)})
+            failures.append({"threadNote": path.name, "error": str(exc)})
             continue
         if _EXPLICIT_DECISION_HEADING.search(source.text) is None:
             counts["withoutExplicitDecision"] += 1
@@ -369,16 +369,16 @@ def validate_decision_output(
         if not isinstance(item, dict):
             raise PipelineError("Codex decision output has an invalid decision item")
         disposition = item.get("disposition")
-        item_source_refs = item.get("sourceSessionRefs")
+        item_source_refs = item.get("sourceThreadNoteRefs")
         if not isinstance(item_source_refs, list) or not item_source_refs:
-            raise PipelineError("each decision must identify at least one sourceSessionRef")
+            raise PipelineError("each decision must identify at least one sourceThreadNoteRef")
         normalized_source_refs = [str(ref) for ref in item_source_refs]
         if len(set(normalized_source_refs)) != len(normalized_source_refs):
-            raise PipelineError("a decision repeats a sourceSessionRef")
+            raise PipelineError("a decision repeats a sourceThreadNoteRef")
         unknown_source_refs = sorted(set(normalized_source_refs) - source_refs)
         if unknown_source_refs:
             raise PipelineError(
-                "Codex output references unknown sourceSessionRefs: " + ", ".join(unknown_source_refs)
+                "Codex output references unknown sourceThreadNoteRefs: " + ", ".join(unknown_source_refs)
             )
         if disposition == "existing":
             decision_id = str(item.get("existingDecisionId") or "")
@@ -397,7 +397,7 @@ def validate_decision_output(
                 if key not in {
                     "disposition",
                     "existingDecisionId",
-                    "sourceSessionRefs",
+                    "sourceThreadNoteRefs",
                     "materialization",
                 }
                 and field_value != ""
@@ -447,11 +447,15 @@ def validate_decision_output(
         invalid_destinations = [
             destination
             for destination in item["materialization"]["repositoryDocumentation"]
-            if re.search(r"(?:^|/)(?:sessions?/|decisions?/|DR-[0-9]{4})", destination, re.IGNORECASE)
+            if re.search(
+                r"(?:^|/)(?:thread-notes?/|decisions?/|DR-[0-9]{4})",
+                destination,
+                re.IGNORECASE,
+            )
         ]
         if invalid_destinations:
             raise PipelineError(
-                "Session Notes and Decision Records are evidence, not repository documentation: "
+                "Thread Notes and Decision Records are evidence, not repository documentation: "
                 + ", ".join(invalid_destinations)
             )
         unavailable_decision_refs = []
@@ -572,26 +576,26 @@ class CodexDecisionGenerator:
         existing_decisions: Sequence[ExistingDecision],
     ) -> dict[str, Any]:
         if not sources:
-            raise PipelineError("decision generation requires at least one Session Note")
+            raise PipelineError("decision generation requires at least one Thread Note")
         self.last_metrics = {
             "modelCalls": 0,
             "transportRetries": 0,
             "semanticRetries": 0,
         }
         prompt_index = [item.as_prompt_dict() for item in list(existing_decisions)[-MAX_EXISTING_DECISION_INDEX:]]
-        session_notes = [
+        thread_notes = [
             {
                 "sourceRef": source.source_ref,
-                "sessionId": source.session_id,
+                "threadNoteId": source.thread_note_id,
                 "threadId": source.thread_id,
-                "sessionNote": source.text,
+                "threadNote": source.text,
             }
             for source in sources
         ]
         current_prompt = render_decision_prompt(
             self.profile.prompt,
             project_id=sources[0].project.project_id,
-            session_notes=session_notes,
+            thread_notes=thread_notes,
             existing_decisions=prompt_index,
         )
         existing_ids = {item.decision_id for item in existing_decisions}
@@ -617,7 +621,7 @@ class CodexDecisionGenerator:
                 current_prompt = render_decision_repair_prompt(
                     self.profile.prompt,
                     project_id=sources[0].project.project_id,
-                    session_refs=sorted(source_refs),
+                    thread_note_refs=sorted(source_refs),
                     validation_error=str(exc),
                     draft=value,
                     existing_decisions=prompt_index,
@@ -665,7 +669,7 @@ def render_decision(
     template: DecisionTemplate = DECISION_PROFILE.template,
 ) -> str:
     if not sources:
-        raise PipelineError("a Decision Record requires at least one source Session Note")
+        raise PipelineError("a Decision Record requires at least one source Thread Note")
     timestamp = generated_at or now_iso()
     source_refs = unique_ordered(
         list(source_refs_override) if source_refs_override is not None else [source.source_ref for source in sources]
@@ -706,9 +710,9 @@ def render_decision(
         ("generatedAt", timestamp),
         ("reviewStatus", "unreviewed"),
         ("automatedValidation", "passed"),
-        ("sourceSessionRefs", source_refs),
+        ("sourceThreadNoteRefs", source_refs),
         (
-            "sourceSessionSha256",
+            "sourceThreadNoteSetSha256",
             _source_set_sha256(sources)
             if source_refs_override is None
             else _source_refs_fingerprint(sources[0].project, source_refs),
@@ -768,7 +772,7 @@ def validate_decision_record(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8-sig")
     metadata = parse_simple_frontmatter(text)
     schema_version = metadata.get("schemaVersion") or "1"
-    if schema_version not in {"2", "3"}:
+    if schema_version not in {"2", "3", str(DECISION_SCHEMA_VERSION)}:
         raise PipelineError(f"unsupported decision schemaVersion {schema_version}: {path.name}")
     required = {
         "type": "decision",
@@ -809,10 +813,10 @@ def validate_decision_record(path: Path) -> dict[str, Any]:
     }:
         raise PipelineError(f"decision record has invalid promotionStatus: {path}")
     lines, body = split_frontmatter_lines(text)
-    if not frontmatter_list_value(lines, "sourceSessionRefs"):
-        raise PipelineError(f"decision record has no sourceSessionRefs: {path}")
-    if not re.fullmatch(r"[0-9a-f]{64}", metadata.get("sourceSessionSha256") or ""):
-        raise PipelineError(f"decision record has invalid sourceSessionSha256: {path}")
+    if not frontmatter_list_value(lines, "sourceThreadNoteRefs"):
+        raise PipelineError(f"decision record has no sourceThreadNoteRefs: {path}")
+    if not re.fullmatch(r"[0-9a-f]{64}", metadata.get("sourceThreadNoteSetSha256") or ""):
+        raise PipelineError(f"decision record has invalid sourceThreadNoteSetSha256: {path}")
     title = metadata.get("title") or ""
     if f"# {decision_id}: {title}" not in text:
         raise PipelineError(f"decision record title does not match frontmatter: {path}")
@@ -893,7 +897,9 @@ def validate_decision_record(path: Path) -> dict[str, Any]:
         if empty:
             raise PipelineError(f"decision record has empty sections ({', '.join(empty)}): {path}")
         if re.search(r"(?m)(?:^|:\s+)None\.$", body):
-            raise PipelineError(f"decision record v3 must omit empty values instead of rendering None: {path}")
+            raise PipelineError(
+                f"decision record v3-v4 must omit empty values instead of rendering None: {path}"
+            )
     secrets = has_secret_like_content(text)
     if secrets:
         raise PipelineError(f"decision record contains secret-like content ({', '.join(secrets)}): {path}")
@@ -944,14 +950,14 @@ def _extend_existing_decision_sources(
     lines, body = split_frontmatter_lines(text)
     merged_refs = unique_ordered(
         [
-            *frontmatter_list_value(lines, "sourceSessionRefs"),
+            *frontmatter_list_value(lines, "sourceThreadNoteRefs"),
             *[source.source_ref for source in sources],
         ]
     )
-    updated_lines = replace_frontmatter_list(lines, "sourceSessionRefs", merged_refs)
+    updated_lines = replace_frontmatter_list(lines, "sourceThreadNoteRefs", merged_refs)
     updated_lines = replace_frontmatter_scalar(
         updated_lines,
-        "sourceSessionSha256",
+        "sourceThreadNoteSetSha256",
         _source_refs_fingerprint(sources[0].project, merged_refs),
     )
     updated_lines = replace_frontmatter_scalar(updated_lines, "updated", timestamp)
@@ -969,7 +975,7 @@ def _commit_batch(
         raise PipelineError("cannot commit an empty decision synthesis batch")
     for source in sources:
         if sha256(source.path.read_bytes()).hexdigest() != source.source_sha256:
-            raise PipelineError(f"Session Note changed during decision generation: {source.path.name}")
+            raise PipelineError(f"Thread Note changed during decision generation: {source.path.name}")
     timestamp = now_iso()
     source_by_ref = {source.source_ref: source for source in sources}
     existing_by_id = {item.decision_id: item for item in existing}
@@ -984,7 +990,7 @@ def _commit_batch(
     existing_source_updates: dict[str, list[DecisionSource]] = {}
 
     for item in output["decisions"]:
-        item_sources = [source_by_ref[str(ref)] for ref in item["sourceSessionRefs"]]
+        item_sources = [source_by_ref[str(ref)] for ref in item["sourceThreadNoteRefs"]]
         disposition = item["disposition"]
         if disposition == "existing":
             decision_id = str(item["existingDecisionId"])
@@ -1043,7 +1049,7 @@ def _commit_batch(
                 title=str(item["title"]),
                 status=str(item["status"]),
                 decision=str(item["decision"]),
-                source_refs=tuple(str(ref) for ref in item["sourceSessionRefs"]),
+                source_refs=tuple(str(ref) for ref in item["sourceThreadNoteRefs"]),
                 review_status="unreviewed",
                 generator="Codex",
                 schema_version=str(DECISION_SCHEMA_VERSION),
@@ -1166,8 +1172,8 @@ def execute_decision_build(
     if not write:
         report["selected"] = [
             {
-                "sessionNote": source.relative_path,
-                "sessionId": source.session_id,
+                "threadNote": source.relative_path,
+                "threadNoteId": source.thread_note_id,
                 "threadId": source.thread_id,
                 "sourceSha256": source.source_sha256,
             }
@@ -1184,7 +1190,7 @@ def execute_decision_build(
         if now_local() >= start_deadline:
             report["deferred"].extend(
                 {
-                    "sessionNote": item.relative_path,
+                    "threadNote": item.relative_path,
                     "reason": "runtime-deadline",
                 }
                 for remaining_batch in batches[batch_index:]
@@ -1198,7 +1204,7 @@ def execute_decision_build(
                     "type": "decision-batch-start",
                     "index": batch_index + 1,
                     "total": len(batches),
-                    "sessionNotes": [source.relative_path for source in batch],
+                    "threadNotes": [source.relative_path for source in batch],
                 }
             )
         try:
@@ -1219,7 +1225,7 @@ def execute_decision_build(
             )
         except Exception as exc:  # Per-batch isolation is intentional.
             report["failed"].extend(
-                {"sessionNote": source.relative_path, "error": str(exc)} for source in batch
+                {"threadNote": source.relative_path, "error": str(exc)} for source in batch
             )
             if progress:
                 progress(
@@ -1227,7 +1233,7 @@ def execute_decision_build(
                         "type": "decision-batch-failed",
                         "index": batch_index + 1,
                         "total": len(batches),
-                        "sessionNotes": [source.relative_path for source in batch],
+                        "threadNotes": [source.relative_path for source in batch],
                         "error": str(exc),
                     }
                 )
@@ -1242,7 +1248,7 @@ def execute_decision_build(
             {
                 "decisionId": item.decision_id,
                 "decisionRecord": item.path.relative_to(project.context_path).as_posix(),
-                "sourceSessionRefs": list(item.source_refs),
+                "sourceThreadNoteRefs": list(item.source_refs),
             }
             for item in committed.created
         ]
@@ -1250,7 +1256,7 @@ def execute_decision_build(
             {
                 "decisionId": item.decision_id,
                 "decisionRecord": item.path.relative_to(project.context_path).as_posix(),
-                "sourceSessionRefs": list(item.source_refs),
+                "sourceThreadNoteRefs": list(item.source_refs),
             }
             for item in committed.updated
         ]
@@ -1260,7 +1266,7 @@ def execute_decision_build(
         report["batches"].append(
             {
                 "batchIndex": batch_index + 1,
-                "sessionNotes": [source.relative_path for source in batch],
+                "threadNotes": [source.relative_path for source in batch],
                 "created": created_values,
                 "updated": updated_values,
                 "referencedExisting": committed.referenced,
@@ -1278,7 +1284,7 @@ def execute_decision_build(
                 report["noAction"].append(source.relative_path)
             report["processed"].append(
                 {
-                    "sessionNote": source.relative_path,
+                    "threadNote": source.relative_path,
                     "created": source_created,
                     "updated": source_updated,
                     "referencedExisting": source_referenced,
@@ -1293,7 +1299,7 @@ def execute_decision_build(
                     "type": "decision-batch-complete",
                     "index": batch_index + 1,
                     "total": len(batches),
-                    "sessionNotes": [source.relative_path for source in batch],
+                    "threadNotes": [source.relative_path for source in batch],
                     "createdCount": len(committed.created),
                     "updatedCount": len(committed.updated),
                     "decisionRecordPaths": [str(item.path.absolute()) for item in committed.created],

@@ -12,7 +12,7 @@ sys.path.insert(0, str(LIB_ROOT))
 from tkn_codex_context.chat_logs import (  # noqa: E402
     normalize_path_text,
     path_is_within,
-    read_session,
+    read_thread_log,
 )
 
 
@@ -29,24 +29,24 @@ class ChatLogCompatibilityTests(unittest.TestCase):
             )
         )
 
-    def test_reads_legacy_top_level_session_and_message_records(self) -> None:
-        session = read_session(FIXTURES / "chat-legacy-session.jsonl")
+    def test_reads_legacy_top_level_thread_and_message_records(self) -> None:
+        thread_log = read_thread_log(FIXTURES / "chat-legacy-thread.jsonl")
 
-        self.assertIsNotNone(session)
-        assert session is not None
-        self.assertEqual("legacy-thread-0001", session.id)
-        self.assertEqual("2025-08-24T10:45:58.916Z", session.timestamp)
+        self.assertIsNotNone(thread_log)
+        assert thread_log is not None
+        self.assertEqual("legacy-thread-0001", thread_log.id)
+        self.assertEqual("2025-08-24T10:45:58.916Z", thread_log.timestamp)
         self.assertEqual(
             "https://example.invalid/example/project.git",
-            session.repository_url,
+            thread_log.repository_url,
         )
         self.assertEqual(
             ["Rebuild this project context."],
-            [message.text for message in session.user_messages],
+            [message.text for message in thread_log.user_messages],
         )
         self.assertEqual(
             ["The project context was reviewed."],
-            [message.text for message in session.assistant_messages],
+            [message.text for message in thread_log.assistant_messages],
         )
 
 

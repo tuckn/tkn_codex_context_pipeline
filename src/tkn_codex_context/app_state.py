@@ -9,7 +9,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from .session_notes import PipelineError
+from .thread_notes import PipelineError
 
 
 class CodexAppProject(BaseModel):

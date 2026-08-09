@@ -279,4 +279,8 @@ def validate_summary_output_schema(
         if isinstance(enum, list) and value not in enum:
             raise ValueError(f"{path} must be one of the permitted values")
         return
+    if expected_type == "boolean":
+        if type(value) is not bool:
+            raise ValueError(f"{path} must be a boolean")
+        return
     raise ValueError(f"{path} uses unsupported schema type: {expected_type}")

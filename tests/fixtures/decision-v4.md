@@ -1,6 +1,6 @@
 ---
 type: decision
-schemaVersion: 3
+schemaVersion: 4
 title: Omit empty Decision Record sections
 description: Render only Decision Record sections that contain source-backed information.
 generator: Codex
@@ -13,6 +13,9 @@ projectWorkingContextTargets: []
 repositoryDocumentationTargets: []
 globalContextTargets: []
 skillAutomationTargets: []
+sourceThreadNoteRefs:
+  - project:/thread-notes/example.md
+sourceThreadNoteSetSha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 date: 2026-08-08T09:00:00+09:00
 updated: 2026-08-08T10:00:00+09:00
 decisionId: DR-0004

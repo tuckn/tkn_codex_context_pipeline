@@ -33,7 +33,7 @@ Treat an unversioned decision as v1.
 
 ## Related files
 
-- `state:/sessions/example.md`
+- `state:/thread-notes/example.md`
 
 ## Notes
 

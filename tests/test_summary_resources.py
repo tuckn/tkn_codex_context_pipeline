@@ -71,7 +71,7 @@ def test_packaged_markdown_template_controls_heading_order() -> None:
     template = load_summary_template()
     values = {
         field: {
-            "frontmatter": "---\ntype: summary\n---",
+            "frontmatter": "---\ntype: threadNote\n---",
             "summary": "- Summary",
             "key_developments": "- Development",
             "last_known_state": "- Work State: done",
@@ -83,8 +83,8 @@ def test_packaged_markdown_template_controls_heading_order() -> None:
 
     rendered = render_summary_template(template, values)
 
-    assert template.version == "1.0"
-    assert rendered.index("# Session Note") < rendered.index("## Summary")
+    assert template.version == "2.0"
+    assert rendered.index("# Thread Note") < rendered.index("## Summary")
     assert rendered.index("## Summary") < rendered.index("## Key Developments")
     assert rendered.index("## Key Developments") < rendered.index(
         "## Last Known State"

@@ -1,25 +1,25 @@
 ---
 type: prompt
 id: 3eb50b1e-aac2-4e98-9b54-f284179d3d77
-version: "3.0"
+version: "4.0"
 ---
 
 # Default decision distillation instructions
 
-Synthesize durable decisions from one or more factual Session Notes. A decision record is
-for a choice that should guide work after the source session ends. It may cover
+Synthesize durable decisions from one or more factual Thread Notes. A decision record is
+for a choice that should guide work after the source thread ends. It may cover
 project scope, product direction, design, architecture, workflow, operations,
 testing, documentation, repository conventions, collaboration, or an important
 rejected option that should not be reconsidered without new evidence.
 
-Do not create a decision for temporary session state, routine implementation
+Do not create a decision for temporary turn state, routine implementation
 details, command logs, a simple summary, unresolved brainstorming, an assistant
 proposal that was not accepted, or content better kept in a specification or
 normal knowledge note.
 
 ## Source fidelity
 
-- Use only facts stated in the supplied Session Notes or existing-decision index.
+- Use only facts stated in the supplied Thread Notes or existing-decision index.
 - Do not infer a rationale, approval, scope, outcome, verification, alternative,
   or next step that the source does not establish.
 - Treat only an explicit user acceptance or an already implemented operational
@@ -32,32 +32,32 @@ normal knowledge note.
 - Use an empty array or empty string when a field is not established.
 - Keep fields non-redundant. Do not repeat the decision as rationale, a context
   fact as a consequence, or verification evidence as a project-specific detail.
-- The Decision Record v3 renderer omits empty optional sections. Do not add
+- The Decision Record v4 renderer omits empty optional sections. Do not add
   filler merely to make an optional field visible.
 - Write natural Japanese except for headings, paths, commands, identifiers, and
   product names.
 
 ## One central decision per object
 
-The unit of output is a central decision, not a Session Note. Compare all
-supplied Session Notes before producing output. When several notes establish,
+The unit of output is a central decision, not a Thread Note. Compare all
+supplied Thread Notes before producing output. When several notes establish,
 repeat, refine, or verify the same central decision, return one decision object
-with the union of their `sourceSessionRefs`. Create separate objects only for
+with the union of their `sourceThreadNoteRefs`. Create separate objects only for
 independently reusable decisions. Do not split one decision merely because it
 has several consequences. Return no decisions when the sources contain no
 durable explicit decision.
 
-Every decision object must list one or more exact `sourceSessionRefs` from the
+Every decision object must list one or more exact `sourceThreadNoteRefs` from the
 application-managed input. Do not invent or normalize those references. A
-Session Note may support several independent decisions, and a decision may be
-supported by several Session Notes.
+Thread Note may support several independent decisions, and a decision may be
+supported by several Thread Notes.
 
 ## Existing decision handling
 
 The existing-decision index contains `decisionId`, `title`, `status`,
-`reviewStatus`, `updateAllowed`, `sourceSessionRefs`, and the central decision
+`reviewStatus`, `updateAllowed`, `sourceThreadNoteRefs`, and the central decision
 text. Updateable entries also include a bounded `recordExcerpt`; preserve its
-source-backed facts unless a supplied Session Note corrects or supersedes them.
+source-backed facts unless a supplied Thread Note corrects or supersedes them.
 When `qualityUpgradeRequired` is true and the supplied sources support that
 decision, use `update`, not `existing`, so the record adopts the current
 quality contract.
@@ -79,11 +79,11 @@ quality contract.
 - Do not claim that an existing decision was updated; this stage creates records
   or adds source provenance to an existing record without rewriting its central
   judgment.
-- A decision ID mentioned inside a Session Note is not an existing local record
+- A decision ID mentioned inside a Thread Note is not an existing local record
   unless that ID is present in the supplied existing-decision index. Treat an
-  unavailable or legacy ID as information contained by the Session Note, not as
+  unavailable or legacy ID as information contained by the Thread Note, not as
   `existingDecisionId` or a directly resolvable `relatedEvidence` entry. The
-  Session Note's own source ref already preserves that evidence. Mention the
+  Thread Note's own source ref already preserves that evidence. Mention the
   unavailable legacy reference in `sourceLimitations` when it matters.
 
 ## New decision fields
@@ -106,17 +106,17 @@ quality contract.
 - `relatedEvidence`: only source-backed logical references, files, specs, tests,
   issues, or pull requests. Do not invent paths.
 - `materialization`: downstream places that the source says should reflect the
-  decision. Session Notes and Decision Records are evidence artifacts, not
-  repository documentation destinations. Do not place input session refs,
+  decision. Thread Notes and Decision Records are evidence artifacts, not
+  repository documentation destinations. Do not place input Thread Note refs,
   `DR-NNNN` files, or this generated record in `repositoryDocumentation`. Use
   empty arrays when no downstream destination is stated. The v3 artifact stores
   destination arrays in Frontmatter and renders only `followUp` in the body.
 - `supersedes` and `supersededBy`: exact known decision IDs or durable artifact
   references only.
 
-## Mode: `distill-session-decision`
+## Mode: `distill-thread-note-decision`
 
-Review all Session Notes together with the existing-decision index, synthesize
+Review all Thread Notes together with the existing-decision index, synthesize
 same-decision evidence across sources, then return new or existing decision
 mappings. Keep the output concise and durable.
 

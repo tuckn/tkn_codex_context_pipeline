@@ -1,32 +1,34 @@
-# Project Handoff: Session Note and Decision Record CLI
+# Project Handoff: Thread Note, Decision Record, and Working Context CLI
 
-Updated: 2026-08-08
+Updated: 2026-08-09
 
 ## Project purpose
 
 This repository contains an independent, local-first data pipeline that turns
-Codex app chats into durable Session Note v2 artifacts and distills durable
-Decision Record v3 artifacts from those notes.
+Codex app chats into durable Thread Note v3 artifacts, distills durable
+Decision Record v4 artifacts from those notes, and synthesizes Working Context
+v3 dashboards from Project evidence.
 
 The larger context-engineering flow is:
 
 ```text
 raw Codex chat
-  -> factual Session Note v2
-  -> concise Decision Record v3
+  -> factual Thread Note v3
+  -> concise Decision Record v4
   -> current working context
   -> cross-project knowledge
 ```
 
-The Session Note and Decision Record transformations are implemented. Current
-working context and global context remain out of scope.
+The Thread Note, Decision Record, and Project Working Context transformations
+are implemented. Cross-Project and global context remain out of scope.
 
 The pipeline does not write markers, configuration, or context into a Codex
 Project root. Generated artifacts remain in application-owned external storage:
 
 ```text
-~/.tkn/codex_context_pipeline/data/projects/<projectId>/sessions/
+~/.tkn/codex_context_pipeline/data/projects/<projectId>/thread-notes/
 ~/.tkn/codex_context_pipeline/data/projects/<projectId>/decisions/
+~/.tkn/codex_context_pipeline/data/projects/<projectId>/working-context.md
 ```
 
 The existing context-engineering Plugin was not changed or removed as part of
@@ -58,18 +60,20 @@ Implemented commands:
 init [--force]
 config show
 projects fetch
-session-notes pull [--force]
-session-notes pull --backfill --project-id <id-name-or-root> [--force]
-session-notes pull --backfill --all [--force]
-session-notes rebuild --project-id <id-name-or-root> [--force]
-validate <session-note>
+thread-notes pull [--force]
+thread-notes pull --backfill --project-id <id-name-or-root> [--force]
+thread-notes pull --backfill --all [--force]
+thread-notes rebuild --project-id <id-name-or-root> [--force]
+validate <thread-note>
 decisions build --project-id <id-name-or-root> [--write] [--force]
 decisions validate <decision-record>
+working-context build --project-id <id-name-or-root> [--write] [--force] [--allow-edited]
+working-context validate <working-context>
 ```
 
-Session Note mutation commands support `--dry-run`. `decisions build` is
-read-only by default and requires `--write` before it calls Codex or changes
-durable state.
+Thread Note mutation commands support `--dry-run`. `decisions build` and
+`working-context build` are read-only by default and require `--write` before
+they call Codex or change durable state.
 
 ## Important files
 
@@ -82,9 +86,11 @@ src/tkn_codex_context/config.py
 src/tkn_codex_context/app_state.py
 src/tkn_codex_context/projects.py
 src/tkn_codex_context/chat_logs.py
-src/tkn_codex_context/session_notes.py
+src/tkn_codex_context/thread_notes.py
 src/tkn_codex_context/decisions.py
 src/tkn_codex_context/decision_resources.py
+src/tkn_codex_context/working_context.py
+src/tkn_codex_context/working_context_resources.py
 src/tkn_codex_context/cli.py
 tests/
 ```
@@ -97,11 +103,14 @@ Responsibilities:
 - `app_state.py`: fail-closed adapter for Codex app local Project state
 - `projects.py`: binding Codex app Projects to durable context `projectId`s
 - `chat_logs.py`: read-only JSONL parsing and canonical event generation
-- `session_notes.py`: selection, fingerprinting, model invocation, rendering,
+- `thread_notes.py`: selection, fingerprinting, model invocation, rendering,
   validation, atomic commit, rollback, cache resume, and rebuild
-- `decisions.py`: Session Note selection, existing-decision indexing, decision
+- `decisions.py`: Thread Note selection, existing-decision indexing, decision
   generation, deterministic rendering, source finalization, atomic commit, and
   rollback
+- `working_context.py`: Project evidence collection, bounded current-truth
+  synthesis, semantic validation, deterministic rendering, edited-artifact
+  protection, atomic commit, and rollback
 - `cli.py`: UTF-8 console behavior, JSON results, logging, command routing, and
   exit codes
 
@@ -141,12 +150,13 @@ model, reasoning effort, prompt version, and renderer version still match.
 `pull --force` bypasses this no-op check. Rebuild treats every numeric schema
 version below the current version as legacy, while refusing future versions.
 
-The canonical Project registry is `data/project-registry.jsonl`. Session Notes
-are stored under `data/projects/<projectId>/sessions/`; Decision Records are
-stored under `data/projects/<projectId>/decisions/`. Per-Project checkpoints
+The canonical Project registry is `data/project-registry.jsonl`. Thread Notes
+are stored under `data/projects/<projectId>/thread-notes/`; Decision Records are
+stored under `data/projects/<projectId>/decisions/`; Working Context is stored
+at `data/projects/<projectId>/working-context.md`. Per-Project checkpoints
 are stored under `state/projects/<projectId>/chat-refresh-state.json` and
-`decision-build-state.json`. Run reports are stored under `state/reports/`.
-Resumable Session Note work is stored under the cache root.
+`decision-build-state.json` and `working-context-build-state.json`. Run reports are stored under `state/reports/`.
+Resumable Thread Note work is stored under the cache root.
 Execution-only model files use Python's standard temporary directory (`%TMP%`
 on Windows and normally `/tmp` on Linux).
 
@@ -183,7 +193,7 @@ Attribution precedence:
 Projectless and ambiguous threads are excluded and reported. Explicit
 assignment wins even if the chat cwd is outside the currently active roots.
 
-## Session Note v2 contract
+## Thread Note v3 contract
 
 Required body sections:
 
@@ -213,7 +223,7 @@ Automatically generated notes include:
 - prompt and renderer versions
 - automated validation status
 
-Session Notes do not store downstream processing status or references. Each
+Thread Notes do not store downstream processing status or references. Each
 consumer owns its processing state and provenance independently.
 
 The parser includes user and assistant messages, tool actions/results,
@@ -224,14 +234,14 @@ Unchanged source and generator fingerprints are a no-op and do not call the
 model. A changed generator fingerprint causes regeneration even if the source
 chat is unchanged.
 
-## Decision Record v3 contract
+## Decision Record v4 contract
 
-`decisions build` scans current Session Note v2 files with an `Explicit
+`decisions build` scans current Thread Note v3 files with an `Explicit
 Decision` development. Planning is read-only and does not call the model.
-`--write` generates strict structured output from bounded batches of Session
+`--write` generates strict structured output from bounded batches of Thread
 Notes plus an existing-decision index. The output unit is a central decision,
-not a Session Note. One decision may cite multiple `sourceSessionRefs`, and one
-Session Note may support multiple decisions. Each new central decision becomes
+not a Thread Note. One decision may cite multiple `sourceThreadNoteRefs`, and one
+Thread Note may support multiple decisions. Each new central decision becomes
 one `DR-NNNN-<slug>.md` file, or links to an existing decision ID when the model
 identifies the same decision.
 
@@ -240,18 +250,41 @@ identifies the same decision.
 `Follow-up`, and `Supersession` are rendered only when they contain
 source-backed content. Empty values remain available to structured processing
 but do not become `None.` placeholders in human-readable Markdown. New records
-use `schemaVersion: 3` and keep decision status, implementation status, and
+use `schemaVersion: 4` and keep decision status, implementation status, and
 promotion status separate. Materialization targets for working context,
 repository documentation, global context, and Skills are stored in Frontmatter
-instead of the body. Existing v1 and reviewed v2 records remain readable and
-are not automatically rewritten. Codex-generated unreviewed v2 records are
-quality-upgrade candidates and can be resynthesized as v3 only during an
+instead of the body. Existing v1-v3 records remain readable and are not
+automatically rewritten. Codex-generated unreviewed v2-v3 records are
+quality-upgrade candidates and can be resynthesized as v4 only during an
 explicit write run while preserving their ID and original date.
 
-Decision generation leaves source Session Notes unchanged. Decision Records
-own forward provenance through `sourceSessionRefs`; reverse `decisionIds`,
+Decision generation leaves source Thread Notes unchanged. Decision Records
+own forward provenance through `sourceThreadNoteRefs`; reverse `decisionIds`,
 source fingerprints, and no-action outcomes live in
 `decision-build-state.json`.
+
+## Working Context v3 contract
+
+`working-context build` uses validated Thread Notes, Decision Records, selected
+root documentation, and a read-only Git snapshot. Planning is read-only and
+does not call the model. `--write` uses bounded synthesis batches and a final
+merge when needed. Repository evidence has precedence for current file/Git
+state; reviewed Accepted decisions have precedence for durable judgments;
+newer Thread Notes provide current work state. Proposed decisions and
+unaccepted assistant suggestions are not promoted into current truth.
+
+`Project Overview` and `Current Truth` are required. `Current Outcome`, `Active
+Work`, `Risks And Constraints`, `Effective Decisions`, `Semantic Context`,
+`Key Evidence`, `Resumption`, and `Source Limitations` render only when they
+contain source-backed content. Semantic Glossary entries, Taxonomy items, and
+Taxonomy relationships must cite exact known source refs. Empty sections and
+`None.` placeholders are omitted.
+
+The source-set fingerprint and generated artifact hash live in
+`working-context-build-state.json`. An unchanged source/profile build is a
+no-op. A changed build refuses to overwrite an artifact whose current hash no
+longer matches the tracked generated hash; `--write --allow-edited` is the
+explicit replacement gate. Artifact and state writes are transactional.
 
 ## Generation and commit safety
 
@@ -274,13 +307,18 @@ failures restore the previous note and state.
 Decision Records are rendered and validated before their transaction is
 finalized. New records, resynthesized unreviewed generated records, appended
 provenance, and `decision-build-state.json` are committed together; failures
-remove new records and restore existing records and prior state. Source Session
+remove new records and restore existing records and prior state. Source Thread
 Notes are not part of normal Decision generation writes. Reviewed central
 judgment content is not automatically rewritten.
 
+Working Context is rendered and validated before replacing the live artifact.
+Its sources are fingerprinted again after model generation. Source changes,
+validation failure, or state-write failure restore the previous artifact and
+state.
+
 Incomplete normal-run and rebuild artifacts remain resumable in the pipeline
 cache. Successful work removes its pending cache. Rebuild performs a staged,
-validated sessions-folder cutover and restores the prior live sessions and
+validated Thread Notes folder cutover and restores the prior live Thread Notes and
 state if cutover fails.
 
 Source JSONL files are always read-only.
@@ -290,7 +328,7 @@ Source JSONL files are always read-only.
 The current implementation passed:
 
 ```text
-pytest:      112 passed
+pytest:      131 passed
 Ruff:         passed
 strict mypy:  passed
 uv build:     wheel and source distribution built successfully
@@ -304,10 +342,13 @@ Tests cover:
 - root/name/new/pending Project binding
 - historical aliases and unknown registry-field preservation
 - explicit assignment, cwd fallback, projectless, and ambiguous exclusion
-- Session Note v2 schema and WI hierarchy
-- Decision Record v3 conditional structure, v2 compatibility, deduplication
+- Thread Note v3 schema and WI hierarchy
+- Decision Record v4 conditional structure, v2-v3 readability, deduplication
   references, no-action state, and
-  Session Note distillation metadata
+  Thread Note distillation metadata
+- Working Context v3 source precedence, conditional sections, Semantic
+  Glossary and Taxonomy evidence, unchanged no-op, edited-file protection, and
+  atomic artifact/state writes
 - source provenance, redaction, size limits, and status consistency
 - unchanged no-op and stale-generator regeneration
 - note/state rollback and resumable cache
@@ -317,7 +358,7 @@ Tests cover:
 ## Read-only live verification
 
 The implementation was exercised against the current computer's real Codex
-app state, JSONL sessions, and context registry using dry-run only.
+app state, JSONL thread logs, and context registry using dry-run only.
 
 Observed summary at the time of implementation:
 
@@ -348,7 +389,7 @@ attribution counters.
 
 On 2026-08-03, a second read-only verification of `decisions build` resolved
 the current Project by internal ID with 22/22 Projects bound and no pending
-binding. The Project had no stored Session Notes at that moment, so the correct
+binding. The Project had no stored Thread Notes at that moment, so the correct
 result was `selectedCount: 0`, no model call, and no write.
 
 ## Repository state at handoff
@@ -373,8 +414,9 @@ First inspect and initialize the real configuration and Project storage:
 uv run tkn-codex-context init --dry-run
 uv run tkn-codex-context init
 uv run tkn-codex-context projects list
-uv run tkn-codex-context session-notes pull --dry-run
+uv run tkn-codex-context thread-notes pull --dry-run
 uv run tkn-codex-context decisions build --project-id <projectId>
+uv run tkn-codex-context working-context build --project-id <projectId>
 ```
 
 Use `projects list --json` when the full registered root metadata is needed.
@@ -385,14 +427,15 @@ After approval:
 
 ```powershell
 uv run tkn-codex-context projects fetch
-uv run tkn-codex-context session-notes pull
+uv run tkn-codex-context thread-notes pull
 uv run tkn-codex-context decisions build --project-id <projectId> --write
+uv run tkn-codex-context working-context build --project-id <projectId> --write
 ```
 
 Historical processing should start with a small Project-scoped batch:
 
 ```powershell
-uv run tkn-codex-context session-notes pull --backfill `
+uv run tkn-codex-context thread-notes pull --backfill `
   --project-id <projectId> `
   --limit 5 `
   --dry-run
@@ -410,7 +453,7 @@ Project binding.
   unassigned threads ambiguous.
 - A missing real config is allowed only for dry-run, where the current time is
   used as an in-memory normal-pull boundary. A write pull requires `init`.
-- Decision distillation is implemented from Session Note v2 inputs; current
-  working context and global context remain separate future stages.
+- Working Context generation is implemented per Project; cross-Project and
+  global context remain separate future stages.
 - Removing or changing the existing Plugin and configuring Task Scheduler are
   separate tasks.

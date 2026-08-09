@@ -8,7 +8,7 @@ import yaml
 
 import tkn_codex_context.initialization as initialization
 from tkn_codex_context.initialization import initialize_application
-from tkn_codex_context.session_notes import PipelineError
+from tkn_codex_context.thread_notes import PipelineError
 
 
 def write_app_state(codex_home: Path) -> None:
@@ -78,8 +78,8 @@ def test_force_dry_run_and_apply_preserve_settings_and_remove_old_storage(tmp_pa
     assert "context_store_root" not in saved
     assert "summary_prompt" not in saved
     assert not any((root / "old.txt").exists() for root in (data_root, state_root, cache_root))
-    assert (data_root / "projects/local-project/sessions").is_dir()
-    assert not any((data_root / "projects/local-project/sessions").iterdir())
+    assert (data_root / "projects/local-project/thread-notes").is_dir()
+    assert not any((data_root / "projects/local-project/thread-notes").iterdir())
     assert (state_root / "projects/local-project").is_dir()
     assert not (state_root / "projects/local-project/chat-refresh-state.json").exists()
 

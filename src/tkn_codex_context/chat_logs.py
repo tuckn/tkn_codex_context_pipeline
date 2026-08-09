@@ -40,7 +40,7 @@ class ChatEvent:
 
 
 @dataclass(frozen=True)
-class SessionLog:
+class ThreadLog:
     id: str
     timestamp: str
     cwd: str
@@ -159,11 +159,11 @@ def event_payload_text(value: Any) -> str:
         return str(value)
 
 
-def read_session_events(path: Path) -> tuple[ChatEvent, ...]:
+def read_thread_events(path: Path) -> tuple[ChatEvent, ...]:
     """Extract user, assistant, tool, and validation evidence in source order."""
     events: list[ChatEvent] = []
     seen_messages: set[tuple[str, str, str, str]] = set()
-    session_cwd = ""
+    thread_cwd = ""
     turn_cwd = ""
     turn_id = ""
 
@@ -196,7 +196,7 @@ def read_session_events(path: Path) -> tuple[ChatEvent, ...]:
                 text=cleaned,
                 timestamp=timestamp,
                 turn_id=turn_id,
-                cwd=turn_cwd or session_cwd,
+                cwd=turn_cwd or thread_cwd,
             )
         )
 
@@ -215,16 +215,16 @@ def read_session_events(path: Path) -> tuple[ChatEvent, ...]:
         timestamp = str(obj.get("timestamp") or "")
 
         if event_type == "session_meta":
-            session_cwd = str(payload.get("cwd") or session_cwd)
-            turn_cwd = session_cwd
+            thread_cwd = str(payload.get("cwd") or thread_cwd)
+            turn_cwd = thread_cwd
             continue
         if event_type == "turn_context":
             turn_id = str(payload.get("turn_id") or "")
-            turn_cwd = str(payload.get("cwd") or session_cwd)
+            turn_cwd = str(payload.get("cwd") or thread_cwd)
             continue
         if not event_type and obj.get("id") and "instructions" in obj:
-            session_cwd = str(obj.get("cwd") or session_cwd)
-            turn_cwd = session_cwd
+            thread_cwd = str(obj.get("cwd") or thread_cwd)
+            turn_cwd = thread_cwd
             continue
 
         if event_type == "response_item":
@@ -339,12 +339,12 @@ def select_events_for_roots(
 
 
 def fingerprint_events(
-    session_id: str,
+    thread_id: str,
     events: Sequence[ChatEvent],
     relative_source_ref: str,
 ) -> str:
     payload = {
-        "id": session_id,
+        "id": thread_id,
         "sourceRef": relative_source_ref,
         "events": [
             {
@@ -364,7 +364,7 @@ def fingerprint_events(
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def read_session(path: Path) -> SessionLog | None:
+def read_thread_log(path: Path) -> ThreadLog | None:
     meta: dict[str, Any] | None = None
     messages: list[ChatMessage] = []
     seen: set[tuple[str, str, str]] = set()
@@ -400,7 +400,7 @@ def read_session(path: Path) -> SessionLog | None:
         timestamp = str(obj.get("timestamp") or "")
 
         if meta is None and not event_type and obj.get("id") and obj.get("timestamp") and "instructions" in obj:
-            # Legacy Codex JSONL placed session metadata directly in the first object.
+            # Legacy Codex JSONL placed thread metadata directly in the first object.
             meta = obj
             turn_cwd = str(obj.get("cwd") or "")
             continue
@@ -444,7 +444,7 @@ def read_session(path: Path) -> SessionLog | None:
 
     git_value = meta.get("git")
     git: dict[str, Any] = git_value if isinstance(git_value, dict) else {}
-    return SessionLog(
+    return ThreadLog(
         id=str(meta.get("id") or meta.get("session_id") or ""),
         timestamp=str(meta.get("timestamp") or ""),
         cwd=str(meta.get("cwd") or ""),
@@ -457,26 +457,29 @@ def read_session(path: Path) -> SessionLog | None:
     )
 
 
-def is_approval_review(session: SessionLog) -> bool:
-    return any(message.text.lstrip().startswith(APPROVAL_REVIEW_PREFIX) for message in session.user_messages)
+def is_approval_review(thread_log: ThreadLog) -> bool:
+    return any(
+        message.text.lstrip().startswith(APPROVAL_REVIEW_PREFIX)
+        for message in thread_log.user_messages
+    )
 
 
-def is_known_internal_session(session: SessionLog) -> bool:
-    return session.thread_source.casefold() in KNOWN_INTERNAL_THREAD_SOURCES
+def is_known_internal_thread(thread_log: ThreadLog) -> bool:
+    return thread_log.thread_source.casefold() in KNOWN_INTERNAL_THREAD_SOURCES
 
 
-def has_clean_user_message(session: SessionLog) -> bool:
-    return bool(session.user_messages)
+def has_clean_user_message(thread_log: ThreadLog) -> bool:
+    return bool(thread_log.user_messages)
 
 
 def select_messages_for_roots(
-    session: SessionLog,
+    thread_log: ThreadLog,
     roots: Sequence[str],
 ) -> tuple[ChatMessage, ...]:
     return tuple(
         message
-        for message in session.messages
-        if any(path_is_within(message.cwd or session.cwd, root) for root in roots)
+        for message in thread_log.messages
+        if any(path_is_within(message.cwd or thread_log.cwd, root) for root in roots)
     )
 
 
@@ -484,22 +487,22 @@ def source_ref(path: Path, sessions_root: Path) -> str:
     return path.resolve().relative_to(sessions_root.resolve()).as_posix()
 
 
-def fingerprint_session(
-    session: SessionLog,
+def fingerprint_thread(
+    thread_log: ThreadLog,
     messages: Sequence[ChatMessage],
     relative_source_ref: str,
 ) -> str:
     payload = {
-        "id": session.id,
-        "timestamp": session.timestamp,
-        "repositoryUrl": normalize_repository_url(session.repository_url),
+        "id": thread_log.id,
+        "timestamp": thread_log.timestamp,
+        "repositoryUrl": normalize_repository_url(thread_log.repository_url),
         "sourceRef": relative_source_ref,
         "messages": [
             {
                 "role": message.role,
                 "text": normalize_message_text(message.text),
                 "turnId": message.turn_id,
-                "cwd": normalize_path_text(message.cwd or session.cwd),
+                "cwd": normalize_path_text(message.cwd or thread_log.cwd),
                 "timestamp": message.timestamp,
             }
             for message in messages
