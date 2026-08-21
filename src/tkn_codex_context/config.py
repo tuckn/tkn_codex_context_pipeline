@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import os
+import shutil
+from dataclasses import dataclass
 from datetime import datetime
+from importlib.resources import files
 from pathlib import Path
 from typing import Any, Literal
 
@@ -23,6 +26,16 @@ from .thread_notes import (
 
 CONFIG_SCHEMA_VERSION = 1
 APP_DIRECTORY_NAME = "codex_context_pipeline"
+CONFIG_EXAMPLE_RESOURCE = "resources/config.example.yaml"
+
+
+@dataclass(frozen=True)
+class ConfigResolution:
+    """Resolved configuration together with its inspectable provenance."""
+
+    config: AppConfig
+    sources: dict[str, str]
+    layers: tuple[dict[str, Any], ...]
 
 
 def default_app_root() -> Path:
@@ -138,7 +151,13 @@ def _resolve_paths(value: dict[str, Any], base: Path) -> dict[str, Any]:
         raw = result.get(key)
         if raw is None:
             continue
-        expanded = Path(os.path.expandvars(str(raw))).expanduser()
+        expanded_text = os.path.expandvars(str(raw))
+        if expanded_text == "~":
+            expanded = Path.home()
+        elif expanded_text.startswith(("~/", "~\\")):
+            expanded = Path.home() / expanded_text[2:]
+        else:
+            expanded = Path(expanded_text).expanduser()
         result[key] = expanded if expanded.is_absolute() else (base / expanded).absolute()
     return result
 
@@ -160,34 +179,53 @@ def _without_retired_user_prompt(
     return result, True
 
 
-def load_app_config(
+def resolve_app_config(
     *,
     explicit_path: Path | None = None,
     cwd: Path | None = None,
     overrides: dict[str, Any] | None = None,
-) -> AppConfig:
+) -> ConfigResolution:
     """Load defaults, global, project, explicit, then CLI overrides."""
 
     working = (cwd or Path.cwd()).absolute()
     merged: dict[str, Any] = {}
-    layers = [
-        global_config_path(),
-        project_config_path(working),
-        explicit_path.expanduser().absolute() if explicit_path else None,
+    sources = {name: "built-in defaults" for name in AppConfig.model_fields}
+    layer_specs = [
+        ("global", global_config_path()),
+        ("project", project_config_path(working)),
+        (
+            "explicit",
+            explicit_path.expanduser().absolute() if explicit_path else None,
+        ),
     ]
-    for path in layers:
+    layer_report: list[dict[str, Any]] = []
+    for kind, path in layer_specs:
+        if path is not None:
+            layer_report.append(
+                {
+                    "kind": kind,
+                    "path": str(path),
+                    "exists": path.is_file(),
+                }
+            )
         if path is not None and path.is_file():
             layer, _removed = _without_retired_user_prompt(
                 _read_layer(path),
                 remove_configured=False,
             )
-            merged.update(_resolve_paths(layer, path.parent))
-    merged.update(_resolve_paths(overrides or {}, working))
+            resolved_layer = _resolve_paths(layer, path.parent)
+            merged.update(resolved_layer)
+            for key in resolved_layer:
+                sources[key] = f"{kind}: {path}"
+    resolved_overrides = _resolve_paths(overrides or {}, working)
+    merged.update(resolved_overrides)
+    for key in resolved_overrides:
+        sources[key] = "CLI option"
     try:
         config = AppConfig.model_validate(merged)
     except Exception as exc:
         raise PipelineError(f"invalid configuration: {exc}") from exc
-    return config.model_copy(
+    resolved = config.model_copy(
         update={
             "codex_home": config.codex_home.expanduser().absolute(),
             "data_root": config.data_root.expanduser().absolute(),
@@ -195,6 +233,85 @@ def load_app_config(
             "cache_root": config.cache_root.expanduser().absolute(),
         }
     )
+    return ConfigResolution(
+        config=resolved,
+        sources=sources,
+        layers=tuple(layer_report),
+    )
+
+
+def load_app_config(
+    *,
+    explicit_path: Path | None = None,
+    cwd: Path | None = None,
+    overrides: dict[str, Any] | None = None,
+) -> AppConfig:
+    """Load and return the effective application configuration."""
+
+    return resolve_app_config(
+        explicit_path=explicit_path,
+        cwd=cwd,
+        overrides=overrides,
+    ).config
+
+
+def config_example_text() -> str:
+    """Read the application-owned example distributed in the package."""
+
+    try:
+        return files("tkn_codex_context").joinpath(CONFIG_EXAMPLE_RESOURCE).read_text(
+            encoding="utf-8"
+        )
+    except (FileNotFoundError, OSError) as exc:
+        raise PipelineError(f"packaged config example is unavailable: {exc}") from exc
+
+
+def initialize_user_config(
+    path: Path | None = None,
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Create the user config safely from the packaged example."""
+
+    target = (path or global_config_path()).expanduser().absolute()
+    example = config_example_text()
+    expected = example.encode("utf-8")
+    backup_path: Path | None = None
+
+    if target.exists() and not target.is_file():
+        raise PipelineError(f"config target is not a file: {target}")
+    if target.is_file():
+        try:
+            current = target.read_bytes()
+        except OSError as exc:
+            raise PipelineError(f"cannot read config: {target}: {exc}") from exc
+        if current == expected:
+            return {
+                "status": "unchanged",
+                "configPath": str(target),
+                "backupPath": None,
+            }
+        if not force:
+            raise PipelineError(
+                f"config already exists with different content: {target}; "
+                "review it or use `config init --force` to back it up and replace it"
+            )
+        stamp = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%f%z")
+        backup_path = target.with_name(f"{target.name}.{stamp}.bak")
+        try:
+            shutil.copy2(target, backup_path)
+        except OSError as exc:
+            raise PipelineError(f"cannot back up config: {target}: {exc}") from exc
+
+    try:
+        atomic_write_text(target, example)
+    except OSError as exc:
+        raise PipelineError(f"cannot write config: {target}: {exc}") from exc
+    return {
+        "status": "replaced" if backup_path else "created",
+        "configPath": str(target),
+        "backupPath": str(backup_path) if backup_path else None,
+    }
 
 
 def config_document(config: AppConfig) -> dict[str, Any]:
@@ -213,6 +330,10 @@ def initialization_config(
     """Load the target config for init, tolerating only retired init-owned keys."""
 
     target = (path or global_config_path()).expanduser().absolute()
+    if not target.is_file():
+        raise PipelineError(
+            f"config not found: {target}; run `tkn-codex-context config init` first"
+        )
     raw: dict[str, Any] = {}
     removed: list[str] = []
     if target.is_file():

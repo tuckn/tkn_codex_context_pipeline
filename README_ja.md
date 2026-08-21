@@ -73,15 +73,26 @@ uv tool install -e "C:\path\to\tkn_codex_context_pipeline" --reinstall
 
 ## 設定
 
-最初にCodex app Projectと保存先をdry-runで確認し、pipelineを初期化します。
+最初にユーザー設定を作成して解決結果を確認し、Codex app Projectと保存先を
+dry-runで確認してからpipeline storageを初期化します。
 
-```powershell
+```console
+tkn-codex-context config init
+tkn-codex-context config show
 tkn-codex-context init --dry-run
 tkn-codex-context init
-tkn-codex-context config show
 ```
 
-`init`はグローバル設定とProject registryを作成し、Codex app左ペインの
+`config init`はapplication-ownedなexampleを
+`~/.tkn/codex_context_pipeline/config.yaml`へcopyし、絶対pathを表示します。再実行時に
+同一内容なら`unchanged`です。編集済み設定は暗黙に上書きせず、`config init --force`を
+指定した場合だけtimestamp付きbackupを作成してから置換します。package resourceとして
+同梱するため、通常のwheelまたは`uv tool` installation後も利用できます。
+
+`config show`は解決後の設定をJSONで出力し、利用可能な設定layerと各設定値の採用元も
+表示します。
+
+`init`は作成済み設定を読み、Project registryとCodex app左ペインの
 Projectごとに空の`thread-notes/`と`decisions/`を用意します。Thread Noteや
 Decision Record、Working Contextは生成しません。
 実行日時は`installed_at`として保存され、通常実行が
@@ -91,7 +102,7 @@ chatは、明示的な`pull --backfill`または`rebuild`で処理します。
 既存のpipelineを完全に作り直す場合は、まず削除対象を確認してからforce初期化
 します。modelや保存先などの設定は維持され、`installed_at`だけが更新されます。
 
-```powershell
+```console
 tkn-codex-context init --force --dry-run
 tkn-codex-context init --force
 ```
@@ -144,8 +155,9 @@ directoryを使うため、Windowsでは通常`%TMP%`、Linuxでは通常`/tmp`�
 4. `--config`
 5. CLI option
 
-commitするのは`.tkn/config.example.yaml`だけです。実設定をcommitしないで
-ください。YAML中の相対パスは、そのYAMLファイルがあるfolderを基準に解決します。
+exampleのsource of truthはpackage resource
+`src/tkn_codex_context/resources/config.example.yaml`です。実設定をcommitしないで
+ください。YAML中の相対pathは、そのYAML fileがあるfolderを基準に解決します。
 Thread Note、Decision Record、Working Contextの生成profileはapplication-ownedで、ユーザー向け
 設定keyはありません。旧設定の
 `summary_prompt: null`は読み飛ばします。値を設定した`summary_prompt`が残っている
@@ -353,25 +365,30 @@ durableなdecisionを抽出します。通常経路では元のCodex chatを読�
 Decision Recordを生成します。既存Decision Recordのindexも渡し、同じdecisionなら
 既存IDを参照します。
 
-最初に書き込みなしの計画を確認します。`decisions build`は既定でread-onlyです。
-生成AIを呼び出さず、registry、Thread Note、Decision Record、state、run reportを
-変更しません。
+対象を事前確認する場合は、`--dry-run`を明示します。dry-runは生成AIを呼び出さず、
+registry、Thread Note、Decision Record、state、cache、run reportを変更しません。
 
 ```powershell
-tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot>
-tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --full-output
+tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --dry-run
+tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --dry-run --full-output
 ```
 
 `reportSummary.selectedCount`は生成対象のThread Note数、`synthesisBatchCount`はmodelへ
 渡すbatch数、`createdCount`は新規record数、`updatedCount`は未review recordの
-再構成数、`referencedExistingCount`は既存recordへ紐付けた件数です。dry-runで個別のThread Noteを
-確認する場合は`--full-output`を使用します。
+再構成数、`referencedExistingCount`は既存recordへ紐付けた件数です。dry-runでは生成AIを
+省略するため、最終的な作成・更新・既存参照件数は通常実行時に確定します。選択した個別の
+Thread Noteと予定するsynthesis batchを確認する場合は`--full-output`を使用します。
 
-確認後、`--write`を明示して生成・保存します。
+`--dry-run`を付けない場合は生成AIを呼び出し、Decision Record、state、run reportを
+生成・保存します。
 
 ```powershell
-tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --write
+tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot>
 ```
+
+version 0.2.0で、このcommandは既定dry-runから通常の書き込み実行へ変更しました。旧
+`--write`はscript互換性のため一時的に受理しますが、deprecation warningを出すため削除して
+ください。
 
 新規recordは`data/projects/<projectId>/decisions/DR-NNNN-<slug>.md`に保存します。
 新規生成するDecision Record v4は`Decision`だけを常設し、それ以外のsectionは
@@ -412,9 +429,8 @@ fieldは生成条件の追跡用なので、通常の初読では読み飛ばせ
 表示しません。
 
 既存のDecision Record v1-v3はそのまま読み取り、自動上書きしません。
-Codex生成かつ`reviewStatus: unreviewed`のv2-v3は、対象を確認して
-`decisions build --write`を実行したときに、IDと初回dateを保ってv4へ再構成できます。
-書き込みなしの計画確認だけでは変更しません。
+Codex生成かつ`reviewStatus: unreviewed`のv2-v3は、通常の`decisions build`実行時に、
+IDと初回dateを保ってv4へ再構成できます。`--dry-run`では変更しません。
 
 Decision生成は入力Thread Noteを変更しません。生成依存はDecision Record側の
 `sourceThreadNoteRefs`に保持し、Thread Noteごとの処理済み状態と逆引き`decisionIds`は
@@ -423,13 +439,14 @@ Decision生成は入力Thread Noteを変更しません。生成依存はDecisio
 working contextなど別の下流処理で利用できます。
 
 source hashとdecision生成profileが同じThread Noteは次回`unchanged`としてスキップします。
-再評価する場合は、書き込みを明示したうえで`--force`を指定します。同一decisionは既存IDへ
+再評価する場合は`--force`を指定します。model呼出や書き込みなしで選択を確認する場合は
+`--force --dry-run`を使用します。同一decisionは既存IDへ
 紐付けます。`reviewStatus: unreviewed`のCodex生成recordは、複数Noteから得た訂正や重要な
 追加根拠がある場合、IDと初回dateを保って再構成できます。review済みrecordのcentral
 judgmentは自動更新せず、新しい`sourceThreadNoteRefs`と`Related Evidence`だけを追記します。
 
 ```powershell
-tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --write --force
+tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --force
 ```
 
 生成したDecision Record v4と既存のv2-v3は単独でvalidateできます。
@@ -445,19 +462,23 @@ tkn-codex-context decisions validate <decision-record.md>
 時系列の履歴ではなくcurrent truthを扱い、古い記述は置換し、Accepted decisionをdashboardへ
 反映します。Proposed decisionをcurrent truthへ昇格しません。
 
-最初にread-onlyな計画を確認します。既定ではCodexを呼び出さず、registry、artifact、state、
-run reportを変更しません。
+sourceと変更計画を確認する場合は、`--dry-run`を明示します。dry-runではCodexを呼び出さず、
+registry、artifact、state、cache、run reportを変更しません。
+
+```powershell
+tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot> --dry-run
+tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot> --dry-run --full-output
+```
+
+`--dry-run`を付けない場合は生成AIを呼び出し、生成artifact、state、run reportを保存します。
 
 ```powershell
 tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot>
-tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot> --full-output
 ```
 
-source件数と変更計画を確認後、生成と書き込みを明示します。
-
-```powershell
-tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot> --write
-```
+version 0.2.0で、このcommandは既定dry-runから通常の書き込み実行へ変更しました。旧
+`--write`はscript互換性のため一時的に受理しますが、deprecation warningを出すため削除して
+ください。
 
 生成結果は`data/projects/<projectId>/working-context.md`に保存します。Working Context v3は
 `Project Overview`と`Current Truth`を常設し、それ以外はsource-backedな内容がある場合だけ
@@ -465,13 +486,16 @@ tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot> --w
 明示的な関係を含められます。生成する事実、用語、分類、関係には、既存の`project:/`または
 `repo:/` logical source referenceを必ず付けます。
 
-入力と生成profileのfingerprintが同じ場合はno-opです。`--write --force`で同じ入力を
-再評価できます。また、生成artifactのhashをstateへ保存します。生成後に
+入力と生成profileのfingerprintが同じ場合はno-opです。`--force`で同じ入力を再評価でき、
+`--force --dry-run`でその選択だけをpreviewできます。また、生成artifactのhashをstateへ
+保存します。生成後に
 `working-context.md`が手編集され、さらに入力が変化した場合は、自動上書きせず停止します。
 編集内容を確認して生成結果へ明示的に置き換える場合だけ`--allow-edited`を使用します。
+先に`--dry-run`と組み合わせ、手編集保護だけを解除する計画であることを確認できます。
 
 ```powershell
-tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot> --write --allow-edited
+tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot> --dry-run --allow-edited
+tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot> --allow-edited
 ```
 
 生成したWorking Context v3は単独でvalidateできます。
@@ -479,6 +503,22 @@ tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot> --w
 ```powershell
 tkn-codex-context working-context validate <working-context.md>
 ```
+
+### dry-run契約
+
+application所有のdata、state、cache、reportを通常変更するすべてのpipeline commandが
+`--dry-run`を提供します。このoptionを
+付けない`init`、`projects fetch`、`thread-notes pull/rebuild`、`decisions build`、
+`working-context build`は、command名が表す処理を実行します。
+`config init`は明示的でidempotentな設定作成境界です。同一内容なら`unchanged`とし、異なる
+内容は`--force`で先にbackupを作成しない限り保護します。
+
+dry-runは、正確な計画に必要な同じ設定を解決し、localのCodex app state、chat log、既存の
+pipeline state、Project file、local Git snapshotを読み取り、検証します。生成AIの呼出、
+network access、download、外部systemの変更は行わず、application所有のdata、config、state、
+cache、reportを作成・更新・削除しません。一時fileも残しません。選択・skipする処理と、生成
+なしで確定できる場合は作成・更新予定件数とpathを表示します。通常実行では入力を再読込し、
+保護条件を再確認するため、dry-runはpreviewであり、後の実行結果との完全一致を保証しません。
 
 `projects list`の既定出力を除き、各コマンドはJSON結果を出力します。
 機械可読な一覧には`projects list --json`を使います。Thread Note、Decision Record、Working Contextの

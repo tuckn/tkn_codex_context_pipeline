@@ -68,6 +68,12 @@ def write_decision_thread_note(path: Path) -> None:
     )
 
 
+def initialize_cli_pipeline(config_path: Path | None = None) -> None:
+    prefix = ["--config", str(config_path)] if config_path else []
+    assert main([*prefix, "config", "init"]) == 0
+    assert main([*prefix, "init"]) == 0
+
+
 def test_logging_uses_readable_stderr_prefixes(
     capsys: CaptureFixture[str],
 ) -> None:
@@ -226,9 +232,44 @@ def test_config_show_reports_application_owned_summary_profile(
         "profiles/working_context/default/output.schema.json"
     )
     assert working_context_profile["template"]["version"] == "1.0"
+    assert output["sources"]["model"] == "built-in defaults"
+    assert [layer["kind"] for layer in output["layers"]] == ["global", "project"]
 
 
-def test_init_dry_run_has_no_files(
+def test_config_init_cli_creates_then_keeps_the_user_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    target = home / ".tkn/codex_context_pipeline/config.yaml"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+
+    assert main(["config", "init"]) == 0
+    created = json.loads(capsys.readouterr().out)
+    assert main(["config", "init"]) == 0
+    unchanged = json.loads(capsys.readouterr().out)
+
+    assert created == {
+        "command": "config init",
+        "status": "created",
+        "configPath": str(target),
+        "backupPath": None,
+    }
+    assert unchanged["status"] == "unchanged"
+    assert target.is_file()
+
+
+def test_config_init_rejects_runtime_overrides(capsys: CaptureFixture[str]) -> None:
+    result = main(["--model", "temporary", "config", "init"])
+
+    assert result == 2
+    output = json.loads(capsys.readouterr().out)
+    assert "cannot be used with config init" in output["error"]
+
+
+def test_init_dry_run_keeps_config_and_creates_no_storage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: CaptureFixture[str],
@@ -238,17 +279,23 @@ def test_init_dry_run_has_no_files(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
     write_app_state(home)
+    assert main(["--config", str(target), "config", "init"]) == 0
+    before = target.read_bytes()
+    capsys.readouterr()
 
     result = main(["--config", str(target), "init", "--dry-run"])
 
     assert result == 0
-    assert not target.exists()
+    assert target.read_bytes() == before
+    assert not (target.parent / "data").exists()
+    assert not (target.parent / "state").exists()
+    assert not (home / ".cache/codex_context_pipeline").exists()
     output = json.loads(capsys.readouterr().out)
     assert output["dryRun"] is True
     assert output["projectFetch"]["projects"][0]["projectId"] == "local-project"
 
 
-def test_init_creates_config_and_project_directories(
+def test_init_uses_existing_config_and_creates_project_directories(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -257,6 +304,7 @@ def test_init_creates_config_and_project_directories(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
     write_app_state(home)
+    assert main(["config", "init"]) == 0
 
     result = main(["init"])
 
@@ -279,7 +327,7 @@ def test_projects_fetch_replaces_sync(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
     write_app_state(home)
-    assert main(["init"]) == 0
+    initialize_cli_pipeline()
     capsys.readouterr()
 
     result = main(["projects", "fetch", "--dry-run"])
@@ -329,35 +377,81 @@ def test_thread_notes_pull_replaces_run_and_backfill() -> None:
         assert exc.value.code == 2
 
 
-def test_decisions_build_is_read_only_by_default_and_write_is_explicit() -> None:
+def test_decisions_build_writes_by_default_and_dry_run_is_explicit() -> None:
     parser = build_parser()
 
-    planned = parser.parse_args(
+    normal = parser.parse_args(
         ["decisions", "build", "--project-id", "Project"]
     )
-    writing = parser.parse_args(
+    planned = parser.parse_args(
+        ["decisions", "build", "--project-id", "Project", "--dry-run"]
+    )
+    compatibility = parser.parse_args(
         ["decisions", "build", "--project-id", "Project", "--write"]
     )
 
-    assert planned.decisions_command == "build"
-    assert planned.write is False
-    assert writing.write is True
+    assert normal.decisions_command == "build"
+    assert normal.dry_run is False
+    assert normal.write is False
+    assert planned.dry_run is True
+    assert compatibility.write is True
 
 
-def test_working_context_build_is_read_only_by_default_and_write_is_explicit() -> None:
+def test_working_context_build_writes_by_default_and_dry_run_is_explicit() -> None:
     parser = build_parser()
 
-    planned = parser.parse_args(
+    normal = parser.parse_args(
         ["working-context", "build", "--project-id", "Project"]
     )
-    writing = parser.parse_args(
+    planned = parser.parse_args(
+        ["working-context", "build", "--project-id", "Project", "--dry-run"]
+    )
+    compatibility = parser.parse_args(
         ["working-context", "build", "--project-id", "Project", "--write"]
     )
 
-    assert planned.working_context_command == "build"
-    assert planned.write is False
-    assert planned.allow_edited is False
-    assert writing.write is True
+    assert normal.working_context_command == "build"
+    assert normal.dry_run is False
+    assert normal.write is False
+    assert normal.allow_edited is False
+    assert planned.dry_run is True
+    assert compatibility.write is True
+
+
+@pytest.mark.parametrize("command", ["decisions", "working-context"])
+def test_build_rejects_dry_run_with_deprecated_write(command: str) -> None:
+    parser = build_parser()
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(
+            [command, "build", "--project-id", "Project", "--dry-run", "--write"]
+        )
+
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["init", "--help"],
+        ["projects", "fetch", "--help"],
+        ["thread-notes", "pull", "--help"],
+        ["thread-notes", "rebuild", "--help"],
+        ["decisions", "build", "--help"],
+        ["working-context", "build", "--help"],
+    ],
+)
+def test_mutating_command_help_states_that_normal_execution_writes(
+    arguments: list[str],
+    capsys: CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(arguments)
+
+    assert exc.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "by default" in help_text
+    assert "--dry-run" in help_text
 
 
 def test_working_context_build_dry_run_routes_and_writes_nothing(
@@ -372,11 +466,11 @@ def test_working_context_build_dry_run_routes_and_writes_nothing(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
     write_app_state(home)
-    assert main(["init"]) == 0
+    initialize_cli_pipeline()
     capsys.readouterr()
 
     result = main(
-        ["working-context", "build", "--project-id", "local-project"]
+        ["working-context", "build", "--project-id", "local-project", "--dry-run"]
     )
 
     assert result == 0
@@ -399,14 +493,16 @@ def test_decisions_build_dry_run_routes_and_emits_compact_summary(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
     write_app_state(home)
-    assert main(["init"]) == 0
+    initialize_cli_pipeline()
     capsys.readouterr()
     app_root = home / ".tkn" / "codex_context_pipeline"
     write_decision_thread_note(
         app_root / "data" / "projects" / "local-project" / "thread-notes" / "one.md"
     )
 
-    result = main(["decisions", "build", "--project-id", "local-project"])
+    result = main(
+        ["decisions", "build", "--project-id", "local-project", "--dry-run"]
+    )
 
     assert result == 0
     output = json.loads(capsys.readouterr().out)
@@ -415,6 +511,27 @@ def test_decisions_build_dry_run_routes_and_emits_compact_summary(
     assert output["reportSummary"]["dryRun"] is True
     assert output["reportSummary"]["selectedCount"] == 1
     assert list((app_root / "data/projects/local-project/decisions").iterdir()) == []
+
+
+def test_decisions_build_without_dry_run_executes_write_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    write_app_state(home)
+    initialize_cli_pipeline()
+    capsys.readouterr()
+
+    result = main(["decisions", "build", "--project-id", "local-project"])
+
+    assert result == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["reportSummary"]["dryRun"] is False
+    assert output["reportPath"] is not None
+    assert Path(output["reportPath"]).is_file()
 
 
 def test_user_summary_prompt_commands_and_override_are_not_public() -> None:
@@ -508,7 +625,7 @@ def test_thread_notes_pull_backfill_all_uses_historical_mode(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
     write_app_state(home)
-    assert main(["init"]) == 0
+    initialize_cli_pipeline()
     capsys.readouterr()
 
     result = main(
@@ -562,7 +679,7 @@ def test_thread_notes_project_selector_accepts_unique_name(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
     write_app_state(home)
-    assert main(["--config", str(target), "init"]) == 0
+    initialize_cli_pipeline(target)
     capsys.readouterr()
 
     result = main(["--config", str(target), *arguments])
@@ -586,7 +703,7 @@ def test_thread_notes_project_selector_accepts_current_root(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
     write_app_state(home)
-    assert main(["--config", str(target), "init"]) == 0
+    initialize_cli_pipeline(target)
     capsys.readouterr()
 
     result = main(
@@ -618,7 +735,7 @@ def test_thread_notes_full_output_preserves_detailed_dry_run(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
     write_app_state(home)
-    assert main(["--config", str(target), "init"]) == 0
+    initialize_cli_pipeline(target)
     capsys.readouterr()
 
     result = main(
@@ -652,7 +769,7 @@ def test_thread_notes_write_run_emits_compact_summary_and_report_path(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
     write_app_state(home)
-    assert main(["--config", str(target), "init"]) == 0
+    initialize_cli_pipeline(target)
     capsys.readouterr()
 
     result = main(["--config", str(target), "thread-notes", "pull"])
@@ -696,7 +813,7 @@ def test_thread_notes_project_selector_rejects_duplicate_name(
             },
         },
     )
-    assert main(["--config", str(target), "init"]) == 0
+    initialize_cli_pipeline(target)
     capsys.readouterr()
 
     result = main(

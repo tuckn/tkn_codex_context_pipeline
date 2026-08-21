@@ -57,32 +57,37 @@ CLI:     tkn-codex-context
 Implemented commands:
 
 ```text
-init [--force]
+init [--force] [--dry-run]
+config init [--force]
 config show
-projects fetch
-thread-notes pull [--force]
-thread-notes pull --backfill --project-id <id-name-or-root> [--force]
-thread-notes pull --backfill --all [--force]
-thread-notes rebuild --project-id <id-name-or-root> [--force]
+projects fetch [--dry-run]
+thread-notes pull [--force] [--dry-run]
+thread-notes pull --backfill --project-id <id-name-or-root> [--force] [--dry-run]
+thread-notes pull --backfill --all [--force] [--dry-run]
+thread-notes rebuild --project-id <id-name-or-root> [--force] [--dry-run]
 validate <thread-note>
-decisions build --project-id <id-name-or-root> [--write] [--force]
+decisions build --project-id <id-name-or-root> [--force] [--dry-run]
 decisions validate <decision-record>
-working-context build --project-id <id-name-or-root> [--write] [--force] [--allow-edited]
+working-context build --project-id <id-name-or-root> [--force] [--allow-edited] [--dry-run]
 working-context validate <working-context>
 ```
 
-Thread Note mutation commands support `--dry-run`. `decisions build` and
-`working-context build` are read-only by default and require `--write` before
-they call Codex or change durable state.
+Pipeline data/state mutation commands perform their named operation by default
+and support an explicit `--dry-run` that does not call Codex or change durable
+files. `config init` is instead an explicit idempotent initializer that protects
+different content and backs it up before a forced replacement. Version
+0.2.0 changed `decisions build` and `working-context build` from default
+dry-run to default write execution. Their former `--write` option remains a
+deprecated compatibility option and emits a warning.
 
 ## Important files
 
 ```text
 pyproject.toml
-.tkn/config.example.yaml
 README.md
 README_ja.md
 src/tkn_codex_context/config.py
+src/tkn_codex_context/resources/config.example.yaml
 src/tkn_codex_context/app_state.py
 src/tkn_codex_context/projects.py
 src/tkn_codex_context/chat_logs.py
@@ -97,8 +102,8 @@ tests/
 
 Responsibilities:
 
-- `config.py`: strict layered YAML configuration and the `installed_at`
-  normal-run boundary
+- `config.py`: packaged example initialization, strict layered YAML
+  configuration with source provenance, and the `installed_at` normal-run boundary
 - `initialization.py`: safe first initialization and transactional force reset
 - `app_state.py`: fail-closed adapter for Codex app local Project state
 - `projects.py`: binding Codex app Projects to durable context `projectId`s
@@ -139,7 +144,12 @@ runtime_minutes: 230
 model_timeout_seconds: 1800
 ```
 
-`init` creates the configuration and Project registry, records the current
+`config init` creates the global user configuration from the packaged example,
+reports `unchanged` for identical content, and protects edited content unless
+`--force` backs it up before replacement. `config show` reports the resolved
+values, layers, and winning source for every setting.
+
+`init` requires that configuration, creates the Project registry, records the current
 time as `installed_at`, and creates empty Project storage. Normal pulls process
 only chats created or updated at or after this time. Older chats require
 explicit `pull --backfill` or rebuild. `init --force` preserves configuration values,
@@ -160,8 +170,8 @@ Resumable Thread Note work is stored under the cache root.
 Execution-only model files use Python's standard temporary directory (`%TMP%`
 on Windows and normally `/tmp` on Linux).
 
-Do not commit a real `.tkn/config.yaml`. Only
-`.tkn/config.example.yaml` is intended for version control.
+Do not commit a real `.tkn/config.yaml`. The version-controlled source example
+is `src/tkn_codex_context/resources/config.example.yaml`.
 
 ## Project binding
 
@@ -237,13 +247,13 @@ chat is unchanged.
 ## Decision Record v4 contract
 
 `decisions build` scans current Thread Note v3 files with an `Explicit
-Decision` development. Planning is read-only and does not call the model.
-`--write` generates strict structured output from bounded batches of Thread
-Notes plus an existing-decision index. The output unit is a central decision,
-not a Thread Note. One decision may cite multiple `sourceThreadNoteRefs`, and one
-Thread Note may support multiple decisions. Each new central decision becomes
-one `DR-NNNN-<slug>.md` file, or links to an existing decision ID when the model
-identifies the same decision.
+Decision` development. `--dry-run` planning is read-only and does not call the
+model. Normal execution generates strict structured output from bounded
+batches of Thread Notes plus an existing-decision index. The output unit is a
+central decision, not a Thread Note. One decision may cite multiple
+`sourceThreadNoteRefs`, and one Thread Note may support multiple decisions. Each
+new central decision becomes one `DR-NNNN-<slug>.md` file, or links to an
+existing decision ID when the model identifies the same decision.
 
 `Decision` is the only body section rendered for every record. `Why`,
 `Consequences`, `Alternatives`, `Scope`, `Verification`, `Related Evidence`,
@@ -255,8 +265,8 @@ promotion status separate. Materialization targets for working context,
 repository documentation, global context, and Skills are stored in Frontmatter
 instead of the body. Existing v1-v3 records remain readable and are not
 automatically rewritten. Codex-generated unreviewed v2-v3 records are
-quality-upgrade candidates and can be resynthesized as v4 only during an
-explicit write run while preserving their ID and original date.
+quality-upgrade candidates and can be resynthesized as v4 only during a normal
+non-dry-run build while preserving their ID and original date.
 
 Decision generation leaves source Thread Notes unchanged. Decision Records
 own forward provenance through `sourceThreadNoteRefs`; reverse `decisionIds`,
@@ -266,12 +276,12 @@ source fingerprints, and no-action outcomes live in
 ## Working Context v3 contract
 
 `working-context build` uses validated Thread Notes, Decision Records, selected
-root documentation, and a read-only Git snapshot. Planning is read-only and
-does not call the model. `--write` uses bounded synthesis batches and a final
-merge when needed. Repository evidence has precedence for current file/Git
-state; reviewed Accepted decisions have precedence for durable judgments;
-newer Thread Notes provide current work state. Proposed decisions and
-unaccepted assistant suggestions are not promoted into current truth.
+root documentation, and a read-only Git snapshot. `--dry-run` planning is
+read-only and does not call the model. Normal execution uses bounded synthesis
+batches and a final merge when needed. Repository evidence has precedence for
+current file/Git state; reviewed Accepted decisions have precedence for durable
+judgments; newer Thread Notes provide current work state. Proposed decisions
+and unaccepted assistant suggestions are not promoted into current truth.
 
 `Project Overview` and `Current Truth` are required. `Current Outcome`, `Active
 Work`, `Risks And Constraints`, `Effective Decisions`, `Semantic Context`,
@@ -283,8 +293,8 @@ Taxonomy relationships must cite exact known source refs. Empty sections and
 The source-set fingerprint and generated artifact hash live in
 `working-context-build-state.json`. An unchanged source/profile build is a
 no-op. A changed build refuses to overwrite an artifact whose current hash no
-longer matches the tracked generated hash; `--write --allow-edited` is the
-explicit replacement gate. Artifact and state writes are transactional.
+longer matches the tracked generated hash; `--allow-edited` is the explicit
+replacement gate. Artifact and state writes are transactional.
 
 ## Generation and commit safety
 
@@ -411,12 +421,14 @@ The build output and local virtual environment are ignored.
 First inspect and initialize the real configuration and Project storage:
 
 ```powershell
+uv run tkn-codex-context config init
+uv run tkn-codex-context config show
 uv run tkn-codex-context init --dry-run
 uv run tkn-codex-context init
 uv run tkn-codex-context projects list
 uv run tkn-codex-context thread-notes pull --dry-run
-uv run tkn-codex-context decisions build --project-id <projectId>
-uv run tkn-codex-context working-context build --project-id <projectId>
+uv run tkn-codex-context decisions build --project-id <projectId> --dry-run
+uv run tkn-codex-context working-context build --project-id <projectId> --dry-run
 ```
 
 Use `projects list --json` when the full registered root metadata is needed.
@@ -428,8 +440,8 @@ After approval:
 ```powershell
 uv run tkn-codex-context projects fetch
 uv run tkn-codex-context thread-notes pull
-uv run tkn-codex-context decisions build --project-id <projectId> --write
-uv run tkn-codex-context working-context build --project-id <projectId> --write
+uv run tkn-codex-context decisions build --project-id <projectId>
+uv run tkn-codex-context working-context build --project-id <projectId>
 ```
 
 Historical processing should start with a small Project-scoped batch:

@@ -76,15 +76,27 @@ The `-e` (`--editable`) option makes the installed command reference the reposit
 
 ## Configuration
 
-Inspect the Codex app Projects and storage plan, then initialize the pipeline:
+Create the user configuration, inspect the resolved values, then preview and
+initialize pipeline storage:
 
-```powershell
+```console
+tkn-codex-context config init
+tkn-codex-context config show
 tkn-codex-context init --dry-run
 tkn-codex-context init
-tkn-codex-context config show
 ```
 
-`init` creates the global configuration and Project registry, then creates empty
+`config init` copies the application-owned example to
+`~/.tkn/codex_context_pipeline/config.yaml` and prints its absolute path. A
+second run reports `unchanged`. It never overwrites an edited config
+implicitly; `config init --force` first creates a timestamped backup and then
+replaces it. The packaged example remains available after a normal wheel or
+`uv tool` installation.
+
+`config show` emits the effective configuration as JSON, including the
+available configuration layers and the winning source for every setting.
+
+`init` reads the existing configuration, creates the Project registry, and creates empty
 `thread-notes/` and `decisions/` directories for each Project in the Codex app
 sidebar. It does not generate Thread Notes, Decision Records, or Working Contexts. The command records the current time as
 `installed_at`. A normal pull
@@ -95,7 +107,7 @@ To rebuild existing pipeline storage, inspect the destructive plan and then
 force initialization. Model, path, and runtime settings are preserved;
 `installed_at` is refreshed.
 
-```powershell
+```console
 tkn-codex-context init --force --dry-run
 tkn-codex-context init --force
 ```
@@ -151,7 +163,8 @@ Configuration is merged in this order:
 4. `--config`
 5. CLI options
 
-Only `.tkn/config.example.yaml` is versioned. Do not commit real configuration.
+The source example is the package resource
+`src/tkn_codex_context/resources/config.example.yaml`. Do not commit real configuration.
 Relative paths in a YAML layer are resolved relative to that YAML file.
 Thread Note, Decision Record, and Working Context generation profiles are application-owned and
 have no user configuration key.
@@ -373,27 +386,34 @@ verify the same decision, one record lists all supporting `sourceThreadNoteRefs`
 The model also receives an index of existing Decision Records so the same
 decision can reference an existing ID instead of creating a duplicate.
 
-Start with the read-only plan. `decisions build` is read-only by default: it
+Start with an explicit dry-run when you want to review the selection. Dry-run
 does not call the generative AI or change the registry, Thread Notes, Decision
-Records, state, or run reports.
+Records, state, cache, or run reports.
 
 ```powershell
-tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot>
-tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --full-output
+tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --dry-run
+tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --dry-run --full-output
 ```
 
 `reportSummary.selectedCount` is the number of selected Thread Notes,
 `synthesisBatchCount` is the number of model batches, `createdCount` is the
 number of new records, `updatedCount` is the number of resynthesized unreviewed
 records, and `referencedExistingCount` is
-the number of links to existing records. Use `--full-output` to inspect the
-individual selected Thread Notes during planning.
+the number of links to existing records. Because dry-run skips generative AI,
+the final create, update, and existing-reference counts are known only during
+normal execution. Use `--full-output` to inspect the individual selected Thread
+Notes and planned synthesis batches.
 
-After review, explicitly enable generation and writes:
+Without `--dry-run`, the command calls generative AI, generates decisions, and
+writes Decision Records, state, and a run report:
 
 ```powershell
-tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --write
+tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot>
 ```
+
+Version 0.2.0 changed this command from default dry-run to normal write
+execution. The former `--write` option remains temporarily accepted for script
+compatibility, but emits a deprecation warning and should be removed.
 
 New records are stored under
 `data/projects/<projectId>/decisions/DR-NNNN-<slug>.md`. A newly generated
@@ -442,9 +462,8 @@ frontmatter fields instead of the body.
 
 Existing Decision Record v1-v3 files remain readable and are not automatically
 rewritten. A Codex-generated v2-v3 record with `reviewStatus: unreviewed` can
-be resynthesized as v4 while preserving its ID
-and original date when the user reviews the selection and explicitly runs
-`decisions build --write`. Read-only planning does not change it.
+be resynthesized as v4 while preserving its ID and original date during normal
+`decisions build` execution. A `--dry-run` does not change it.
 
 Decision generation does not modify its input Thread Notes. The Decision
 Record keeps the forward dependency in `sourceThreadNoteRefs`, while
@@ -454,7 +473,8 @@ A no-action result is also state-only, leaving the same Thread Note available
 for later working-context distillation.
 
 An unchanged Thread Note with the same decision profile is skipped. Use
-`--force` together with the explicit write flag to re-evaluate it. A matching
+`--force` to re-evaluate it; combine `--force --dry-run` to preview that
+selection without model calls or writes. A matching
 decision links to the existing ID. An unreviewed Codex-generated record may be
 resynthesized in place when combined sources materially correct or improve it,
 while preserving its ID and original date. Reviewed records do not have their
@@ -462,7 +482,7 @@ central judgment rewritten automatically; only new `sourceThreadNoteRefs` and
 `Related Evidence` are appended as provenance.
 
 ```powershell
-tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --write --force
+tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --force
 ```
 
 Validate a generated Decision Record v4 or an existing v2-v3 record without
@@ -480,20 +500,24 @@ snapshot into one concise `working-context.md`. It records current truth rather
 than chronology: stale statements are replaced, accepted decisions guide the
 dashboard, and proposed decisions are not promoted into current truth.
 
-Start with the read-only plan. The default does not call Codex or change the
-registry, artifacts, state, or run reports:
+Use an explicit dry-run to review the sources and change plan. It does not call
+Codex or change the registry, artifacts, state, cache, or run reports:
+
+```powershell
+tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot> --dry-run
+tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot> --dry-run --full-output
+```
+
+Without `--dry-run`, the command calls generative AI and writes the generated
+artifact, state, and a run report:
 
 ```powershell
 tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot>
-tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot> --full-output
 ```
 
-After reviewing the source counts and change plan, explicitly enable generation
-and writing:
-
-```powershell
-tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot> --write
-```
+Version 0.2.0 changed this command from default dry-run to normal write
+execution. The former `--write` option remains temporarily accepted for script
+compatibility, but emits a deprecation warning and should be removed.
 
 The generated artifact is stored at
 `data/projects/<projectId>/working-context.md`. Working Context v3 always
@@ -504,14 +528,16 @@ Every generated fact, term, classification, and relationship cites an exact
 `project:/` or `repo:/` logical source reference.
 
 Input and generation fingerprints make an unchanged build a no-op. `--force`
-may be combined with `--write` to re-evaluate unchanged inputs. The pipeline
-also stores the generated artifact hash. If `working-context.md` was edited
+re-evaluates unchanged inputs; `--force --dry-run` previews that selection. The
+pipeline also stores the generated artifact hash. If `working-context.md` was edited
 after generation, a later changed build stops instead of overwriting it. Use
-`--allow-edited` with `--write` only after reviewing the edited file and
-intentionally choosing generated replacement content:
+`--allow-edited` only after reviewing the edited file and intentionally choosing
+generated replacement content. Combine it with `--dry-run` first to verify that
+the edited-file protection is the only blocker being released:
 
 ```powershell
-tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot> --write --allow-edited
+tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot> --dry-run --allow-edited
+tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot> --allow-edited
 ```
 
 Validate a generated Working Context v3 without changing it:
@@ -519,6 +545,26 @@ Validate a generated Working Context v3 without changing it:
 ```powershell
 tkn-codex-context working-context validate <working-context.md>
 ```
+
+### Dry-run contract
+
+Every pipeline command that normally changes application-owned data, state,
+cache, or reports provides `--dry-run`. Without that option, `init`, `projects fetch`, `thread-notes
+pull/rebuild`, `decisions build`, and `working-context build` perform the
+operation named by the command. `config init` is the explicit, idempotent
+configuration-creation boundary: it reports `unchanged` for identical content
+and protects differing content unless `--force` creates a backup first.
+
+Dry-run resolves the same configuration, reads and validates the local Codex
+app state, chat logs, existing pipeline state, Project files, and local Git
+snapshot needed for an accurate plan. It does not call generative AI, perform
+network access or downloads, change an external system, or create, update, or
+delete application-owned data, config, state, cache, or reports. It leaves no
+temporary files behind. The result reports the selected and skipped work and,
+where the output can be known without generation, planned create/update counts
+and paths. Inputs are re-read and protection conditions are rechecked during
+normal execution, so a dry-run is a preview rather than a guarantee that later
+execution will be identical.
 
 Commands emit structured JSON results except for the human-readable default of
 `projects list`; use `projects list --json` when machine-readable output is

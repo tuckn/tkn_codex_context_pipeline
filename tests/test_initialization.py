@@ -37,6 +37,13 @@ def write_config(path: Path, value: dict[str, object]) -> None:
     path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
 
 
+def test_init_requires_config_init_first(tmp_path: Path) -> None:
+    target = tmp_path / "app/config.yaml"
+
+    with pytest.raises(PipelineError, match="config init"):
+        initialize_application(target, overrides=None, force=False, dry_run=True)
+
+
 def test_force_dry_run_and_apply_preserve_settings_and_remove_old_storage(tmp_path: Path) -> None:
     config_path = tmp_path / "app/config.yaml"
     codex_home = tmp_path / "codex"

@@ -89,7 +89,7 @@ def initialize_application(
     _records, project_report = create_fresh_projects(config, app_state, dry_run=True)
     existing = [
         str(path)
-        for path in (target, *reset_targets)
+        for path in reset_targets
         if path.exists() or path.is_symlink()
     ]
     if existing and not force:

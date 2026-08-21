@@ -11,7 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from .app_state import load_codex_app_state
-from .config import config_document, load_app_config
+from .config import (
+    config_document,
+    initialize_user_config,
+    load_app_config,
+    resolve_app_config,
+)
 from .console_logging import ColorFormatter, log_success, supports_color
 from .decision_resources import load_decision_profile
 from .decisions import (
@@ -83,28 +88,72 @@ def build_parser() -> argparse.ArgumentParser:
     _add_runtime_options(parser)
     commands = parser.add_subparsers(dest="command", required=True)
 
-    init = commands.add_parser("init", help="Initialize or cleanly rebuild pipeline storage")
-    init.add_argument("--dry-run", action="store_true")
+    init = commands.add_parser(
+        "init",
+        help="Initialize or cleanly rebuild pipeline storage (writes by default)",
+        description=(
+            "Writes pipeline config, data, state, and registry storage by default. "
+            "Use --dry-run for a read-only preview."
+        ),
+    )
+    init.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview storage changes without writing config, data, state, cache, or reports",
+    )
     init.add_argument("--force", action="store_true")
 
     config = commands.add_parser("config", help="Manage pipeline configuration")
     config_commands = config.add_subparsers(dest="config_command", required=True)
+    config_init = config_commands.add_parser(
+        "init",
+        help="Create the user config from the packaged example",
+        description=(
+            "Creates config.yaml when absent and leaves an identical file unchanged. "
+            "An edited file is protected unless --force is supplied; forced replacement "
+            "first creates a timestamped backup."
+        ),
+    )
+    config_init.add_argument(
+        "--force",
+        action="store_true",
+        help="Back up and replace an existing config with different content",
+    )
     config_commands.add_parser("show", help="Show resolved configuration")
 
     projects = commands.add_parser("projects", help="Manage Project bindings")
     project_commands = projects.add_subparsers(dest="projects_command", required=True)
     project_list = project_commands.add_parser("list", help="List registered Projects")
     project_list.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
-    fetch = project_commands.add_parser("fetch", help="Fetch Projects from the Codex app")
-    fetch.add_argument("--dry-run", action="store_true")
+    fetch = project_commands.add_parser(
+        "fetch",
+        help="Fetch Projects from the Codex app and update the registry (writes by default)",
+        description=(
+            "Reads Project metadata from local Codex app state and updates the registry by default. "
+            "Use --dry-run for a read-only preview."
+        ),
+    )
+    fetch.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview registry changes without writing application-owned files",
+    )
 
     notes = commands.add_parser("thread-notes", help="Generate Thread Note v3 artifacts")
     note_commands = notes.add_subparsers(dest="notes_command", required=True)
     pull = note_commands.add_parser(
         "pull",
-        help="Pull eligible chats into Thread Notes",
+        help="Pull eligible chats into Thread Notes (generates and writes by default)",
+        description=(
+            "Calls generative AI and writes Thread Notes, state, cache, and a run report by default. "
+            "Use --dry-run for a read-only preview."
+        ),
     )
-    pull.add_argument("--dry-run", action="store_true")
+    pull.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Select and validate inputs without calling generative AI or writing files",
+    )
     pull.add_argument(
         "--full-output",
         action="store_true",
@@ -129,7 +178,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     selector.add_argument("--all", action="store_true")
 
-    rebuild = note_commands.add_parser("rebuild", help="Re-evaluate all chats for one Project")
+    rebuild = note_commands.add_parser(
+        "rebuild",
+        help="Re-evaluate all chats for one Project (generates and writes by default)",
+        description=(
+            "Calls generative AI and writes rebuilt Thread Notes, state, cache, and a run report by default. "
+            "Use --dry-run for a read-only preview."
+        ),
+    )
     rebuild.add_argument(
         "--project-id",
         metavar="PROJECT_ID_NAME_OR_ROOT",
@@ -137,7 +193,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Select one active Project by ID, exact current Name, or CURRENT ROOT",
     )
     rebuild.add_argument("--force", action="store_true")
-    rebuild.add_argument("--dry-run", action="store_true")
+    rebuild.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Select and validate inputs without calling generative AI or writing files",
+    )
     rebuild.add_argument(
         "--full-output",
         action="store_true",
@@ -148,7 +208,11 @@ def build_parser() -> argparse.ArgumentParser:
     decision_commands = decisions.add_subparsers(dest="decisions_command", required=True)
     decision_build = decision_commands.add_parser(
         "build",
-        help="Build decision records from Thread Notes",
+        help="Build decision records from Thread Notes (generates and writes by default)",
+        description=(
+            "Calls generative AI and writes Decision Records, state, and a run report by default. "
+            "Use --dry-run for a read-only preview."
+        ),
     )
     decision_build.add_argument(
         "--project-id",
@@ -156,10 +220,16 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Select one active Project by ID, exact current Name, or CURRENT ROOT",
     )
-    decision_build.add_argument(
+    decision_mode = decision_build.add_mutually_exclusive_group()
+    decision_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Select and validate inputs without calling generative AI or writing files",
+    )
+    decision_mode.add_argument(
         "--write",
         action="store_true",
-        help="Generate and write decision records; the default is a read-only plan",
+        help="Deprecated compatibility option; normal execution already generates and writes",
     )
     decision_build.add_argument(
         "--force",
@@ -188,7 +258,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     working_context_build = working_context_commands.add_parser(
         "build",
-        help="Build Working Context v3 from Project evidence",
+        help="Build Working Context v3 from Project evidence (generates and writes by default)",
+        description=(
+            "Calls generative AI and writes Working Context, state, and a run report by default. "
+            "Use --dry-run for a read-only preview."
+        ),
     )
     working_context_build.add_argument(
         "--project-id",
@@ -196,10 +270,16 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Select one active Project by ID, exact current Name, or CURRENT ROOT",
     )
-    working_context_build.add_argument(
+    working_context_mode = working_context_build.add_mutually_exclusive_group()
+    working_context_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Resolve and validate sources without calling generative AI or writing files",
+    )
+    working_context_mode.add_argument(
         "--write",
         action="store_true",
-        help="Generate and write working-context.md; the default is a read-only plan",
+        help="Deprecated compatibility option; normal execution already generates and writes",
     )
     working_context_build.add_argument(
         "--force",
@@ -713,11 +793,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "config":
+            if args.config_command == "init":
+                if _overrides(args):
+                    raise PipelineError(
+                        "runtime configuration options cannot be used with config init; "
+                        "create the file first, then edit it or use the options at runtime"
+                    )
+                LOGGER.info("Initializing user configuration")
+                report = initialize_user_config(args.config, force=args.force)
+                if report["status"] == "unchanged":
+                    LOGGER.info("Configuration unchanged: %s", report["configPath"])
+                else:
+                    log_success(
+                        LOGGER,
+                        "Configuration %s: %s",
+                        report["status"],
+                        report["configPath"],
+                    )
+                if report["backupPath"]:
+                    LOGGER.info("Configuration backup: %s", report["backupPath"])
+                _emit({"command": "config init", **report})
+                return 0
             LOGGER.info("Showing resolved configuration")
-            resolved = load_app_config(
+            resolution = resolve_app_config(
                 explicit_path=args.config,
                 overrides=_overrides(args),
             )
+            resolved = resolution.config
             try:
                 profile = load_summary_profile()
                 decision_profile = load_decision_profile()
@@ -728,6 +830,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 {
                     "command": "config show",
                     "config": config_document(resolved),
+                    "sources": resolution.sources,
+                    "layers": list(resolution.layers),
                     "summaryProfile": {
                         "name": profile.name,
                         "source": profile.source,
@@ -835,9 +939,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _emit(validate_decision_record(record))
                 log_success(LOGGER, "Validation succeeded: %s", record)
                 return 0
-            if args.force and not args.write:
-                raise PipelineError("--force requires --write for decisions build")
-            write = bool(args.write)
+            dry_run = bool(args.dry_run)
+            write = not dry_run
+            if args.write:
+                LOGGER.warning(
+                    "--write is deprecated for decisions build; normal execution already writes. "
+                    "Use --dry-run for a read-only preview."
+                )
             LOGGER.info(
                 "%s decision build for Project %s",
                 "Starting" if write else "Planning",
@@ -920,11 +1028,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _emit(validate_working_context(note))
                 log_success(LOGGER, "Validation succeeded: %s", note)
                 return 0
-            if args.force and not args.write:
-                raise PipelineError("--force requires --write for working-context build")
-            if args.allow_edited and not args.write:
-                raise PipelineError("--allow-edited requires --write for working-context build")
-            write = bool(args.write)
+            dry_run = bool(args.dry_run)
+            write = not dry_run
+            if args.write:
+                LOGGER.warning(
+                    "--write is deprecated for working-context build; normal execution already writes. "
+                    "Use --dry-run for a read-only preview."
+                )
             LOGGER.info(
                 "%s Working Context build for Project %s",
                 "Starting" if write else "Planning",
