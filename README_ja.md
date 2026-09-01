@@ -37,8 +37,13 @@ source objectの標準名がsessionになるわけではありません。
 
 - Python 3.11以上
 - [uv](https://docs.astral.sh/uv/)
-- Thread Note、Decision Record、Working Context生成時に`PATH`から実行できる`codex`
-  - Windowsの場合、次のコマンドでインストールします。`powershell -ExecutionPolicy Bypass -c "irm https://chatgpt.com/codex/install.ps1 | iex"`
+- localのCodex app Project状態と`~/.codex/sessions`配下のchat log
+- Thread Note、Decision Record、Working Context生成に使用する、次のいずれかの推論backend
+  - `provider: codex`では`PATH`から実行できる`codex`
+    - Windowsでは`powershell -ExecutionPolicy Bypass -c "irm https://chatgpt.com/codex/install.ps1 | iex"`でインストールします。
+  - `provider: claude-code`では`PATH`から実行できる`claude`、または明示した`claude_executable`
+  - `provider: github-copilot`では`PATH`から実行できる`copilot`、または明示した`copilot_executable`
+  - `provider: ollama`ではlocalのOllama service
 
 ## インストール
 
@@ -91,6 +96,81 @@ tkn-codex-context init
 
 `config show`は解決後の設定をJSONで出力し、利用可能な設定layerと各設定値の採用元も
 表示します。
+
+### 推論provider
+
+Source providerはCodexのままです。Project metadataとchat evidenceはCodex appと
+`~/.codex/sessions`だけから読みます。`provider`は、そのevidenceからThread Note、
+Decision Record、Working Contextを生成する推論backendだけを切り替えます。
+
+| `provider` | 呼び出し方法 | 構造化出力contract |
+| --- | --- | --- |
+| `codex` | `codex exec` | native JSON Schema output |
+| `claude-code` | `claude -p` | `--json-schema`と`structured_output` |
+| `github-copilot` | `copilot -s`へのpipe input | JSON-only promptとapplication validation |
+| `ollama` | localの`POST /api/chat` | `format`のJSON Schemaとapplication validation |
+
+Claude CodeとGitHub Copilotは、file、shell、URL、MCP系toolを無効にした非対話
+modeで実行します。Ollama endpointはloopback host（`localhost`、`127.0.0.1`、
+`::1`）だけを許可します。どのproviderでも、application-owned prompt、schema、
+renderer、validation、retry、atomic writeは共通です。
+
+`~/.tkn/codex_context_pipeline/config.yaml`で、`provider`と、そのproviderが認識する
+modelを設定します。実行ファイルが`PATH`にない場合は、executableを絶対pathに
+変更できます。
+
+```yaml
+provider: codex
+codex_executable: codex
+claude_executable: claude
+copilot_executable: copilot
+ollama_base_url: http://127.0.0.1:11434
+model: gpt-5.6-sol
+reasoning_effort: high
+```
+
+providerごとの例です。
+
+```yaml
+# Claude Code
+provider: claude-code
+model: sonnet
+reasoning_effort: high
+```
+
+```yaml
+# GitHub Copilot CLI
+provider: github-copilot
+model: <model-supported-by-copilot>
+reasoning_effort: high
+```
+
+```yaml
+# Ollama
+provider: ollama
+model: qwen3.5:9b
+reasoning_effort: high
+ollama_base_url: http://127.0.0.1:11434
+```
+
+同じ値は、commandより前に置くglobal CLI optionでも上書きできます。
+
+```console
+tkn-codex-context --provider ollama --model qwen3.5:9b thread-notes pull
+```
+
+`config show`で、解決後の値と採用された設定layerを確認できます。dry-runはproviderを
+解決してsource evidenceを選択しますが、推論providerは呼びません。
+
+Codex、Claude Code、GitHub Copilotを選ぶと、選択・redact済みの生成inputは、各CLIが
+使用するaccountとserviceを通ります。認証、subscription entitlement、利用上限、
+発生し得る料金は、このapplicationではなく各CLIまたはserviceが管理します。Ollamaは
+設定したloopback serviceだけへinputを送り、このapplicationからcloud APIのリクエスト
+単位料金は発生しません。ただしlocal computeと電力は使用します。
+
+生成artifact、state、reportにはstable provider IDと表示名を記録します。provider ID、
+model、reasoning effortは生成fingerprintに含まれるため、providerを変更すると、以前の
+生成artifactは再生成対象になります。
 
 `init`は作成済み設定を読み、Project registryとCodex app左ペインの
 Projectごとに空の`thread-notes/`と`decisions/`を用意します。Thread Noteや
@@ -574,10 +654,11 @@ Codex appのprivateな内部形式であり、
 破損・欠落・互換性のない変更を検出した場合は推測せずfail closedします。
 元JSONLは常にread-onlyです。
 
-生成にはephemeral・read-only sandbox・structured outputのCodex CLIを使います。
-source/generator fingerprintが同じthreadはモデルを呼ばずno-opにします。noteと
-refresh stateは検証後にatomic反映し、通常のpullとrebuildの中断済み生成物は再開に
-利用します。
+生成には、設定した推論providerとstructured-output contract、application validationを
+使います。Codexはephemeral processとread-only sandbox、Claude CodeとGitHub Copilotは
+file、shell、URL、MCP系toolなしで実行し、Ollamaはloopback endpointだけに接続します。
+source/generator fingerprintが同じthreadはモデルを呼ばずno-opにします。noteとrefresh
+stateは検証後にatomic反映し、通常のpullとrebuildの中断済み生成物は再開に利用します。
 
 ## 開発
 

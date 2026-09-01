@@ -40,8 +40,13 @@ that storage path does not change the source object's canonical name.
 
 - Python 3.11 or newer
 - [uv](https://docs.astral.sh/uv/)
-- `codex` on `PATH` for Thread Note, Decision Record, or Working Context generation
-  - For Windows, install using the following command: `powershell -ExecutionPolicy Bypass -c "irm https://chatgpt.com/codex/install.ps1 | iex"`
+- Local Codex app Project state and chat logs under `~/.codex/sessions`
+- One supported inference backend for Thread Note, Decision Record, or Working Context generation:
+  - `codex` on `PATH` when `provider: codex` is selected
+    - For Windows, install it with `powershell -ExecutionPolicy Bypass -c "irm https://chatgpt.com/codex/install.ps1 | iex"`
+  - `claude` on `PATH` or an explicit `claude_executable` when `provider: claude-code` is selected
+  - `copilot` on `PATH` or an explicit `copilot_executable` when `provider: github-copilot` is selected
+  - A local Ollama service when `provider: ollama` is selected
 
 ## Installation
 
@@ -95,6 +100,88 @@ replaces it. The packaged example remains available after a normal wheel or
 
 `config show` emits the effective configuration as JSON, including the
 available configuration layers and the winning source for every setting.
+
+### Inference providers
+
+The source provider remains Codex: Project metadata and chat evidence are read
+only from the Codex app and `~/.codex/sessions`. The `provider` setting selects
+only the inference backend that converts that evidence into Thread Notes,
+Decision Records, and Working Context.
+
+| `provider` | Transport | Structured-output contract |
+| --- | --- | --- |
+| `codex` | `codex exec` | Native JSON Schema output |
+| `claude-code` | `claude -p` | `--json-schema` and `structured_output` |
+| `github-copilot` | piped input to `copilot -s` | JSON-only prompt plus application validation |
+| `ollama` | local `POST /api/chat` | JSON Schema in `format` plus application validation |
+
+Claude Code and GitHub Copilot run non-interactively with file, shell, URL, and
+MCP-style tools disabled. Ollama endpoints are restricted to loopback hosts
+(`localhost`, `127.0.0.1`, or `::1`). All providers use the same
+application-owned prompt, schema, renderer, validation, retry, and atomic-write
+pipeline.
+
+Set `provider` and a model understood by that provider in
+`~/.tkn/codex_context_pipeline/config.yaml`. Executable names may be replaced
+with absolute paths when they are not on `PATH`.
+
+```yaml
+provider: codex
+codex_executable: codex
+claude_executable: claude
+copilot_executable: copilot
+ollama_base_url: http://127.0.0.1:11434
+model: gpt-5.6-sol
+reasoning_effort: high
+```
+
+Provider-specific examples:
+
+```yaml
+# Claude Code
+provider: claude-code
+model: sonnet
+reasoning_effort: high
+```
+
+```yaml
+# GitHub Copilot CLI
+provider: github-copilot
+model: <model-supported-by-copilot>
+reasoning_effort: high
+```
+
+```yaml
+# Ollama
+provider: ollama
+model: qwen3.5:9b
+reasoning_effort: high
+ollama_base_url: http://127.0.0.1:11434
+```
+
+The same values can be overridden as global CLI options placed before the
+command:
+
+```console
+tkn-codex-context --provider ollama --model qwen3.5:9b thread-notes pull
+```
+
+Use `config show` to inspect the resolved values and their winning configuration
+layers. A dry-run resolves the provider and selects source evidence but does not
+call any inference provider.
+
+Choosing Codex, Claude Code, or GitHub Copilot sends the selected, redacted
+generation input through the account and service used by that CLI.
+Authentication, subscription entitlements, usage limits, and possible charges
+are managed by the corresponding CLI or service rather than this application.
+Ollama sends the input only to the configured loopback service and has no
+per-request cloud API charge from this application, although local compute and
+electricity are still used.
+
+Generated artifacts, state, and reports record both the stable provider ID and
+its display name. Provider ID, model, and reasoning effort are included in
+generation fingerprints, so changing providers makes previously generated
+artifacts eligible for regeneration.
 
 `init` reads the existing configuration, creates the Project registry, and creates empty
 `thread-notes/` and `decisions/` directories for each Project in the Codex app
@@ -626,10 +713,13 @@ reader validates required structure and fails closed when a format is missing,
 damaged, or incompatible; it does not guess Project identity. Source JSONL
 files are always read-only.
 
-Generation uses an ephemeral Codex CLI process with a read-only sandbox and
-structured output. Source and generator fingerprints make unchanged threads a
-no-op. Notes and refresh state are written atomically only after validation;
-normal and rebuild work is cached and resumable after an interrupted run.
+Generation uses the configured inference provider with a structured-output
+contract and application validation. Codex uses an ephemeral process with a
+read-only sandbox; Claude Code and GitHub Copilot run without file, shell, URL,
+or MCP-style tools; Ollama is restricted to a loopback endpoint. Source and
+generator fingerprints make unchanged threads a no-op. Notes and refresh state
+are written atomically only after validation; normal and rebuild work is cached
+and resumable after an interrupted run.
 
 ## Development
 

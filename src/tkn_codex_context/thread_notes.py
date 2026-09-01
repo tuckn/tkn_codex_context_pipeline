@@ -37,6 +37,7 @@ from .frontmatter import (
     parse_simple_frontmatter,
     split_frontmatter_lines,
 )
+from .inference import InferenceExecutionError, invoke_structured, provider_name
 from .prompting import (
     render_chunk_prompt,
     render_reduction_prompt,
@@ -124,6 +125,10 @@ class PipelineConfig:
     sessions_root: Path
     source_id: str
     codex_bin: str
+    provider: str = "codex"
+    claude_bin: str = "claude"
+    copilot_bin: str = "copilot"
+    ollama_base_url: str = "http://127.0.0.1:11434"
     model: str = DEFAULT_MODEL
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
     idle_minutes: int = DEFAULT_IDLE_MINUTES
@@ -272,6 +277,10 @@ def make_config(
         .absolute(),
         source_id=existing.source_id if existing else DEFAULT_SOURCE_ID,
         codex_bin=resolve_codex_bin(codex_bin or (existing.codex_bin if existing else "")),
+        provider=existing.provider if existing else "codex",
+        claude_bin=existing.claude_bin if existing else "claude",
+        copilot_bin=existing.copilot_bin if existing else "copilot",
+        ollama_base_url=existing.ollama_base_url if existing else "http://127.0.0.1:11434",
         model=DEFAULT_MODEL,
         reasoning_effort=DEFAULT_REASONING_EFFORT,
         idle_minutes=existing.idle_minutes if existing else DEFAULT_IDLE_MINUTES,
@@ -286,7 +295,11 @@ def config_json(config: PipelineConfig) -> dict[str, Any]:
         "installedAt": config.installed_at,
         "sessionsRoot": str(config.sessions_root),
         "sourceId": config.source_id,
+        "provider": config.provider,
         "codexBin": config.codex_bin,
+        "claudeBin": config.claude_bin,
+        "copilotBin": config.copilot_bin,
+        "ollamaBaseUrl": config.ollama_base_url,
         "model": config.model,
         "reasoningEffort": config.reasoning_effort,
         "idleMinutes": config.idle_minutes,
@@ -314,6 +327,10 @@ def load_config(path: Path | None = None) -> PipelineConfig:
         sessions_root=Path(str(value.get("sessionsRoot") or "")).expanduser().absolute(),
         source_id=str(value.get("sourceId") or DEFAULT_SOURCE_ID),
         codex_bin=str(value.get("codexBin") or ""),
+        provider=str(value.get("provider") or "codex"),
+        claude_bin=str(value.get("claudeBin") or "claude"),
+        copilot_bin=str(value.get("copilotBin") or "copilot"),
+        ollama_base_url=str(value.get("ollamaBaseUrl") or "http://127.0.0.1:11434"),
         model=str(value["model"]),
         reasoning_effort=str(value["reasoningEffort"]),
         idle_minutes=int(value.get("idleMinutes", DEFAULT_IDLE_MINUTES)),
@@ -442,6 +459,7 @@ def update_refresh_state(
         "fingerprint": candidate.fingerprint,
         "generationFingerprint": generation_fingerprint(config, candidate),
         "threadNoteSchemaVersion": THREAD_NOTE_SCHEMA_VERSION,
+        "generatorProvider": config.provider,
         "generatorModel": config.model,
         "generatorReasoningEffort": config.reasoning_effort,
         "generatorPromptVersion": GENERATOR_PROMPT_VERSION,
@@ -755,16 +773,16 @@ def validate_note_data(value: Any, allowed_event_ids: set[str]) -> dict[str, Any
     try:
         validate_summary_output_schema(value, NOTE_SCHEMA)
     except ValueError as exc:
-        raise PipelineError(f"Codex output does not match the summary schema: {exc}") from exc
+        raise PipelineError(f"Inference output does not match the summary schema: {exc}") from exc
     if not isinstance(value, dict):
-        raise PipelineError("Codex output must be a JSON object")
+        raise PipelineError("Inference output must be a JSON object")
     required = set(NOTE_SCHEMA["required"])
     if not required.issubset(value):
-        raise PipelineError(f"Codex output is missing fields: {', '.join(sorted(required - set(value)))}")
+        raise PipelineError(f"Inference output is missing fields: {', '.join(sorted(required - set(value)))}")
     if not all(isinstance(value.get(key), str) for key in ("title", "fileSlug", "description")):
-        raise PipelineError("Codex output title, fileSlug, and description must be strings")
+        raise PipelineError("Inference output title, fileSlug, and description must be strings")
     if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", value["fileSlug"]):
-        raise PipelineError("Codex output has invalid fileSlug")
+        raise PipelineError("Inference output has invalid fileSlug")
     summary_items = value.get("summaryItems")
     work_items = value.get("workItems")
     last_state = value.get("lastKnownState")
@@ -774,13 +792,13 @@ def validate_note_data(value: Any, allowed_event_ids: set[str]) -> dict[str, Any
         or not isinstance(work_items, list)
         or not isinstance(last_state, dict)
     ):
-        raise PipelineError("Codex output has invalid summaryItems, workItems, or lastKnownState")
+        raise PipelineError("Inference output has invalid summaryItems, workItems, or lastKnownState")
     if len(work_items) > MAX_WORK_ITEMS:
-        raise PipelineError("Codex output has too many work items")
+        raise PipelineError("Inference output has too many work items")
     if last_state.get("workState") not in ALLOWED_STATUS:
-        raise PipelineError("Codex output has invalid workState")
+        raise PipelineError("Inference output has invalid workState")
     if not isinstance(last_state.get("unresolved"), list) or not isinstance(last_state.get("unverified"), list):
-        raise PipelineError("Codex output has invalid unresolved or unverified items")
+        raise PipelineError("Inference output has invalid unresolved or unverified items")
     if last_state["workState"] == "done" and (
         last_state["unresolved"] or str(last_state.get("continuationPoint") or "").strip()
     ):
@@ -791,54 +809,54 @@ def validate_note_data(value: Any, allowed_event_ids: set[str]) -> dict[str, Any
     cited: list[str] = list(last_state.get("eventIds") or [])
     for item in summary_items:
         if not isinstance(item, dict) or not str(item.get("text") or "").strip():
-            raise PipelineError("Codex output has an invalid summary item")
+            raise PipelineError("Inference output has an invalid summary item")
         if len(str(item["text"])) > MAX_SUMMARY_TEXT_CHARACTERS:
-            raise PipelineError("Codex output summary item is too long")
+            raise PipelineError("Inference output summary item is too long")
         cited.extend(item.get("eventIds") or [])
     for work_item in work_items:
         if not isinstance(work_item, dict) or not isinstance(work_item.get("developments"), list):
-            raise PipelineError("Codex output has an invalid work item")
+            raise PipelineError("Inference output has an invalid work item")
         if len(work_item["developments"]) > MAX_DEVELOPMENTS_PER_WORK_ITEM:
-            raise PipelineError("Codex output has too many developments in a work item")
+            raise PipelineError("Inference output has too many developments in a work item")
         for item in work_item["developments"]:
             if not isinstance(item, dict) or item.get("label") not in ALLOWED_LABELS:
-                raise PipelineError("Codex output has an invalid key development")
+                raise PipelineError("Inference output has an invalid key development")
             if (
                 not str(item.get("text") or "").strip()
                 or len(str(item["text"])) > MAX_DEVELOPMENT_TEXT_CHARACTERS
             ):
-                raise PipelineError("Codex output has an empty or overly long development")
+                raise PipelineError("Inference output has an empty or overly long development")
             cited.extend(item.get("eventIds") or [])
     evidence = value.get("evidence")
     if not isinstance(evidence, list):
-        raise PipelineError("Codex output has invalid evidence")
+        raise PipelineError("Inference output has invalid evidence")
     for item in evidence:
         if not isinstance(item, dict):
-            raise PipelineError("Codex output has invalid evidence")
+            raise PipelineError("Inference output has invalid evidence")
         if (
             not str(item.get("text") or "").strip()
             or len(str(item["text"])) > MAX_EVIDENCE_TEXT_CHARACTERS
         ):
-            raise PipelineError("Codex output has an empty or overly long evidence item")
+            raise PipelineError("Inference output has an empty or overly long evidence item")
         cited.extend(item.get("eventIds") or [])
     if len(evidence) > MAX_EVIDENCE_ITEMS:
-        raise PipelineError("Codex output has too many evidence items")
+        raise PipelineError("Inference output has too many evidence items")
     source_limitations = value.get("sourceLimitations")
     if not isinstance(source_limitations, list) or len(source_limitations) > MAX_SOURCE_LIMITATIONS:
-        raise PipelineError("Codex output has invalid sourceLimitations")
+        raise PipelineError("Inference output has invalid sourceLimitations")
     invalid = {str(item) for item in cited if str(item) not in allowed_event_ids}
     if invalid:
-        raise PipelineError(f"Codex output cited unknown event ids: {', '.join(sorted(invalid))}")
+        raise PipelineError(f"Inference output cited unknown event ids: {', '.join(sorted(invalid))}")
     narrative = json.dumps(value, ensure_ascii=False)
     if len(narrative) > MAX_NOTE_NARRATIVE_CHARACTERS:
-        raise PipelineError("Codex output exceeds the thread-note narrative size limit")
+        raise PipelineError("Inference output exceeds the thread-note narrative size limit")
     avoidable = sorted(phrase for phrase in AVOIDABLE_ENGLISH_PHRASES if phrase in narrative.casefold())
     if avoidable:
-        raise PipelineError("Codex output contains avoidable English prose: " + ", ".join(avoidable))
+        raise PipelineError("Inference output contains avoidable English prose: " + ", ".join(avoidable))
     return value
 
 
-class CodexSummarizer:
+class ProviderSummarizer:
     def __init__(
         self,
         config: PipelineConfig,
@@ -865,27 +883,6 @@ class CodexSummarizer:
     def _invoke(self, prompt: str) -> dict[str, Any]:
         with tempfile.TemporaryDirectory(prefix="tkn-thread-note-") as directory:
             temp = Path(directory)
-            schema_path = temp / "schema.json"
-            output_path = temp / "output.json"
-            schema_path.write_text(json.dumps(NOTE_SCHEMA, ensure_ascii=False, indent=2), encoding="utf-8")
-            command = [
-                self.config.codex_bin,
-                "exec",
-                "--ephemeral",
-                "--ignore-user-config",
-                "--skip-git-repo-check",
-                "--sandbox",
-                "read-only",
-                "--model",
-                self.config.model,
-                "-c",
-                f'model_reasoning_effort="{self.config.reasoning_effort}"',
-                "--output-schema",
-                str(schema_path),
-                "--output-last-message",
-                str(output_path),
-                "-",
-            ]
             last_error = ""
             for attempt in range(3):
                 timeout = self.config.model_timeout_seconds
@@ -905,35 +902,18 @@ class CodexSummarizer:
                     }
                 )
                 try:
-                    completed = subprocess.run(
-                        command,
-                        input=prompt,
+                    return invoke_structured(
+                        self.config,
+                        prompt,
+                        NOTE_SCHEMA,
                         cwd=temp,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
                         timeout=timeout,
-                        check=False,
                     )
-                except subprocess.TimeoutExpired as exc:
-                    last_error = f"Codex timed out after {exc.timeout} seconds"
-                else:
-                    if completed.returncode == 0 and output_path.is_file():
-                        try:
-                            value = json.loads(output_path.read_text(encoding="utf-8-sig"))
-                        except json.JSONDecodeError as exc:
-                            last_error = f"Codex returned invalid JSON: {exc}"
-                        else:
-                            if isinstance(value, dict):
-                                return value
-                            last_error = "Codex output was not a JSON object"
-                    else:
-                        stderr = completed.stderr.strip()
-                        last_error = f"Codex exited with {completed.returncode}: {stderr[-2000:]}"
+                except InferenceExecutionError as exc:
+                    last_error = str(exc)
                 if attempt < 2:
                     self.sleeper(2**attempt)
-            raise PipelineError(last_error or "Codex generation failed")
+            raise PipelineError(last_error or "inference generation failed")
 
     def _validated_invoke(
         self,
@@ -956,7 +936,7 @@ class CodexSummarizer:
                     validation_error=str(exc),
                     draft=value,
                 )
-        raise PipelineError("Codex semantic validation did not produce a valid note")
+        raise PipelineError("Inference semantic validation did not produce a valid note")
 
     def generate(self, candidate: Candidate) -> dict[str, Any]:
         self.last_metrics = {
@@ -1003,6 +983,10 @@ class CodexSummarizer:
         )
 
 
+# Backward-compatible import for callers that used the original provider-specific name.
+CodexSummarizer = ProviderSummarizer
+
+
 def source_timestamp(value: str) -> datetime:
     try:
         return parse_datetime(value).astimezone()
@@ -1013,6 +997,7 @@ def source_timestamp(value: str) -> datetime:
 def generator_fingerprint(config: PipelineConfig) -> str:
     prompt = SUMMARY_PROMPT_RESOURCE
     value = {
+        "provider": config.provider,
         "model": config.model,
         "reasoningEffort": config.reasoning_effort,
         "generatorPromptVersion": GENERATOR_PROMPT_VERSION,
@@ -1104,7 +1089,8 @@ def render_note(
         ("schemaVersion", THREAD_NOTE_SCHEMA_VERSION),
         ("title", str(data["title"]).strip() or "Codex thread"),
         ("description", str(data["description"]).strip()),
-        ("generator", "Codex"),
+        ("generator", data.get("_generator", "Codex")),
+        ("generatorProvider", data.get("_generatorProvider", "codex")),
         ("generatorModel", data.get("_generatorModel", DEFAULT_MODEL)),
         (
             "generatorReasoningEffort",
@@ -1268,6 +1254,8 @@ def write_candidate_note(
             str(data["fileSlug"]),
         )
         data["fileSlug"] = file_slug_from_note_path(candidate, note_path)
+        data["_generator"] = provider_name(config.provider)
+        data["_generatorProvider"] = config.provider
         data["_generatorModel"] = config.model
         data["_generatorReasoningEffort"] = config.reasoning_effort
         prompt = SUMMARY_PROMPT_RESOURCE
@@ -1474,6 +1462,8 @@ def current_note_matches_generation(
         and thread_ids == [candidate.thread_id]
         and source_refs == [candidate.source_ref]
         and metadata.get("sourceFingerprint") == candidate.fingerprint
+        and metadata.get("generator") == provider_name(config.provider)
+        and metadata.get("generatorProvider", "codex") == config.provider
         and metadata.get("generatorModel") == config.model
         and metadata.get("generatorReasoningEffort") == config.reasoning_effort
         and metadata.get("promptId") == prompt.prompt_id
@@ -1551,6 +1541,8 @@ def validate_staged_thread_notes(
                 raise PipelineError(f"date does not match source time: {path.name}")
             if thread_id in strict:
                 expected_scalars = {
+                    "generator": provider_name(config.provider),
+                    "generatorProvider": config.provider,
                     "generatorModel": config.model,
                     "generatorReasoningEffort": config.reasoning_effort,
                     "promptId": prompt.prompt_id,
@@ -1659,6 +1651,7 @@ def rebuild_state(
             "fingerprint": candidate.fingerprint,
             "generationFingerprint": generation_fingerprint(config, candidate),
             "threadNoteSchemaVersion": THREAD_NOTE_SCHEMA_VERSION,
+            "generatorProvider": config.provider,
             "generatorModel": config.model,
             "generatorReasoningEffort": config.reasoning_effort,
             "generatorPromptVersion": GENERATOR_PROMPT_VERSION,
@@ -1893,6 +1886,8 @@ def execute_rebuild(
                 current_generator = (
                     prompt_version == str(GENERATOR_PROMPT_VERSION)
                     and renderer_version == str(RENDERER_VERSION)
+                    and metadata.get("generator") == provider_name(config.provider)
+                    and metadata.get("generatorProvider", "codex") == config.provider
                     and metadata.get("generatorModel") == config.model
                     and metadata.get("generatorReasoningEffort") == config.reasoning_effort
                     and metadata.get("type") == "threadNote"
@@ -1929,6 +1924,8 @@ def execute_rebuild(
         "projectId": project.project_id,
         "force": force,
         "generator": {
+            "provider": config.provider,
+            "name": provider_name(config.provider),
             "model": config.model,
             "reasoningEffort": config.reasoning_effort,
             "promptVersion": GENERATOR_PROMPT_VERSION,
@@ -2044,6 +2041,8 @@ def execute_rebuild(
                 match_existing=False,
             )
             data["fileSlug"] = file_slug_from_note_path(candidate, note_path)
+            data["_generator"] = provider_name(config.provider)
+            data["_generatorProvider"] = config.provider
             data["_generatorModel"] = config.model
             data["_generatorReasoningEffort"] = config.reasoning_effort
             prompt = SUMMARY_PROMPT_RESOURCE
@@ -2198,6 +2197,13 @@ def execute_pipeline(
         "mode": "backfill" if backfill else "daily",
         "dryRun": dry_run,
         "force": force,
+        "generator": {
+            "provider": config.provider,
+            "name": provider_name(config.provider),
+            "model": config.model,
+            "reasoningEffort": config.reasoning_effort,
+            "fingerprint": generator_fingerprint(config),
+        },
         "scan": scan_counts,
         "selectedCount": len(candidates),
         "processed": [],

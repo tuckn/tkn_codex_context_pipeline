@@ -13,6 +13,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from .inference import InferenceProvider, validate_ollama_base_url
 from .thread_notes import (
     DEFAULT_IDLE_MINUTES,
     DEFAULT_MODEL,
@@ -49,7 +50,7 @@ def default_user_cache_root() -> Path:
 
 
 class AppConfig(BaseModel):
-    """Resolved application configuration."""
+    """Resolved application configuration and inference backend selection."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -59,8 +60,11 @@ class AppConfig(BaseModel):
     data_root: Path = Field(default_factory=lambda: default_app_root() / "data")
     state_root: Path = Field(default_factory=lambda: default_app_root() / "state")
     cache_root: Path = Field(default_factory=default_user_cache_root)
-    provider: Literal["codex"] = "codex"
+    provider: InferenceProvider = "codex"
     codex_executable: str = "codex"
+    claude_executable: str = "claude"
+    copilot_executable: str = "copilot"
+    ollama_base_url: str = "http://127.0.0.1:11434"
     model: str = DEFAULT_MODEL
     reasoning_effort: Literal["low", "medium", "high", "xhigh", "max", "ultra"] = "high"
     idle_minutes: int = Field(default=DEFAULT_IDLE_MINUTES, ge=0)
@@ -74,6 +78,18 @@ class AppConfig(BaseModel):
         if not value.strip():
             raise ValueError("model must not be empty")
         return value.strip()
+
+    @field_validator("codex_executable", "claude_executable", "copilot_executable")
+    @classmethod
+    def require_executable(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("provider executable must not be empty")
+        return value.strip()
+
+    @field_validator("ollama_base_url")
+    @classmethod
+    def require_local_ollama(cls, value: str) -> str:
+        return validate_ollama_base_url(value)
 
     @field_validator("source_id")
     @classmethod
@@ -116,7 +132,11 @@ class AppConfig(BaseModel):
             installed_at=installed_at.astimezone().isoformat(timespec="seconds"),
             sessions_root=self.sessions_root,
             source_id=self.source_id,
+            provider=self.provider,
             codex_bin=self.codex_executable,
+            claude_bin=self.claude_executable,
+            copilot_bin=self.copilot_executable,
+            ollama_base_url=self.ollama_base_url,
             model=self.model,
             reasoning_effort=self.reasoning_effort,
             idle_minutes=self.idle_minutes,

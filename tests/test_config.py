@@ -128,3 +128,40 @@ def test_unknown_key_is_rejected(tmp_path: Path) -> None:
     write_yaml(path, {"unknown_setting": True})
     with pytest.raises(PipelineError, match="extra"):
         load_app_config(explicit_path=path, cwd=tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    [
+        ("codex", "gpt-5.6-sol"),
+        ("claude-code", "claude-sonnet-4-6"),
+        ("github-copilot", "claude-sonnet-4.6"),
+        ("ollama", "qwen3.5:9b"),
+    ],
+)
+def test_inference_providers_resolve_without_changing_codex_source(
+    tmp_path: Path,
+    provider: str,
+    model: str,
+) -> None:
+    config = load_app_config(
+        cwd=tmp_path,
+        overrides={"provider": provider, "model": model},
+    )
+
+    assert config.provider == provider
+    assert config.model == model
+    assert config.sessions_root == config.codex_home / "sessions"
+    assert config.thread_note_pipeline_config(allow_missing_watermark=True).provider == provider
+
+
+def test_remote_ollama_endpoint_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(PipelineError, match="loopback"):
+        load_app_config(
+            cwd=tmp_path,
+            overrides={
+                "provider": "ollama",
+                "model": "qwen3.5:9b",
+                "ollama_base_url": "https://ollama.example.com",
+            },
+        )

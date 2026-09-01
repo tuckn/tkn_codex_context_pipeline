@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 import tempfile
 import time
 from collections.abc import Callable, Sequence
@@ -30,6 +29,12 @@ from .frontmatter import (
     replace_frontmatter_scalar,
     split_frontmatter_lines,
     unique_ordered,
+)
+from .inference import (
+    InferenceExecutionError,
+    invoke_structured,
+    is_supported_generator,
+    provider_name,
 )
 from .safety import has_secret_like_content
 from .summary_resources import validate_summary_output_schema
@@ -90,7 +95,7 @@ class ExistingDecision:
     def update_allowed(self) -> bool:
         return (
             self.schema_version in {"2", "3", str(DECISION_SCHEMA_VERSION)}
-            and self.generator == "Codex"
+            and is_supported_generator(self.generator)
             and self.review_status == "unreviewed"
         )
 
@@ -148,6 +153,7 @@ def decision_generation_fingerprint(
 ) -> str:
     payload = json.dumps(
         {
+            "provider": config.provider,
             "model": config.model,
             "reasoningEffort": config.reasoning_effort,
             "profileSha256": profile.sha256,
@@ -350,24 +356,24 @@ def validate_decision_output(
     try:
         validate_summary_output_schema(value, DECISION_OUTPUT_SCHEMA)
     except ValueError as exc:
-        raise PipelineError(f"Codex output does not match the decision schema: {exc}") from exc
+        raise PipelineError(f"Inference output does not match the decision schema: {exc}") from exc
     if not isinstance(value, dict):
-        raise PipelineError("Codex decision output must be a JSON object")
+        raise PipelineError("Inference decision output must be a JSON object")
     strings = _all_strings(value)
     if any("\n" in item or "\r" in item for item in strings):
-        raise PipelineError("Codex decision output strings must not contain line breaks")
+        raise PipelineError("Inference decision output strings must not contain line breaks")
     secrets = has_secret_like_content(json.dumps(value, ensure_ascii=False))
     if secrets:
-        raise PipelineError("Codex decision output contains secret-like content: " + ", ".join(secrets))
+        raise PipelineError("Inference decision output contains secret-like content: " + ", ".join(secrets))
     decisions = value.get("decisions")
     if not isinstance(decisions, list):
-        raise PipelineError("Codex decision output has invalid decisions")
+        raise PipelineError("Inference decision output has invalid decisions")
     referenced: set[str] = set()
     new_slugs: set[str] = set()
     new_decisions: set[str] = set()
     for item in decisions:
         if not isinstance(item, dict):
-            raise PipelineError("Codex decision output has an invalid decision item")
+            raise PipelineError("Inference decision output has an invalid decision item")
         disposition = item.get("disposition")
         item_source_refs = item.get("sourceThreadNoteRefs")
         if not isinstance(item_source_refs, list) or not item_source_refs:
@@ -378,17 +384,17 @@ def validate_decision_output(
         unknown_source_refs = sorted(set(normalized_source_refs) - source_refs)
         if unknown_source_refs:
             raise PipelineError(
-                "Codex output references unknown sourceThreadNoteRefs: " + ", ".join(unknown_source_refs)
+                "Inference output references unknown sourceThreadNoteRefs: " + ", ".join(unknown_source_refs)
             )
         if disposition == "existing":
             decision_id = str(item.get("existingDecisionId") or "")
             if decision_id not in existing_decision_ids:
-                raise PipelineError(f"Codex output references unknown decisionId: {decision_id}")
+                raise PipelineError(f"Inference output references unknown decisionId: {decision_id}")
             if decision_id in referenced:
-                raise PipelineError(f"Codex output repeats existing decisionId: {decision_id}")
+                raise PipelineError(f"Inference output repeats existing decisionId: {decision_id}")
             if decision_id in required_update_ids:
                 raise PipelineError(
-                    f"Codex output must update decisionId to the current quality profile: {decision_id}"
+                    f"Inference output must update decisionId to the current quality profile: {decision_id}"
                 )
             referenced.add(decision_id)
             non_empty = [
@@ -412,15 +418,15 @@ def validate_decision_output(
                 )
             continue
         if disposition not in {"create", "update"}:
-            raise PipelineError("Codex decision output has invalid disposition")
+            raise PipelineError("Inference decision output has invalid disposition")
         if disposition == "update":
             decision_id = str(item.get("existingDecisionId") or "")
             if decision_id not in existing_decision_ids:
-                raise PipelineError(f"Codex output references unknown decisionId: {decision_id}")
+                raise PipelineError(f"Inference output references unknown decisionId: {decision_id}")
             if decision_id not in updateable_ids:
-                raise PipelineError(f"Codex output cannot update reviewed or legacy decisionId: {decision_id}")
+                raise PipelineError(f"Inference output cannot update reviewed or legacy decisionId: {decision_id}")
             if decision_id in referenced:
-                raise PipelineError(f"Codex output repeats existing decisionId: {decision_id}")
+                raise PipelineError(f"Inference output repeats existing decisionId: {decision_id}")
             referenced.add(decision_id)
         elif item.get("existingDecisionId"):
             raise PipelineError("new decisions must not set existingDecisionId")
@@ -439,7 +445,7 @@ def validate_decision_output(
         slug = str(item["fileSlug"])
         central = " ".join(str(item["decision"]).casefold().split())
         if slug in new_slugs or central in new_decisions:
-            raise PipelineError("Codex output repeats a new central decision")
+            raise PipelineError("Inference output repeats a new central decision")
         new_slugs.add(slug)
         new_decisions.add(central)
         if item["implementationStatus"] == "verified" and not item["verificationEvidence"]:
@@ -471,7 +477,7 @@ def validate_decision_output(
     return value
 
 
-class CodexDecisionGenerator:
+class ProviderDecisionGenerator:
     def __init__(
         self,
         config: PipelineConfig,
@@ -497,30 +503,6 @@ class CodexDecisionGenerator:
     def _invoke(self, prompt: str) -> dict[str, Any]:
         with tempfile.TemporaryDirectory(prefix="tkn-decision-") as directory:
             temp = Path(directory)
-            schema_path = temp / "schema.json"
-            output_path = temp / "output.json"
-            schema_path.write_text(
-                json.dumps(self.profile.schema.value, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            command = [
-                self.config.codex_bin,
-                "exec",
-                "--ephemeral",
-                "--ignore-user-config",
-                "--skip-git-repo-check",
-                "--sandbox",
-                "read-only",
-                "--model",
-                self.config.model,
-                "-c",
-                f'model_reasoning_effort="{self.config.reasoning_effort}"',
-                "--output-schema",
-                str(schema_path),
-                "--output-last-message",
-                str(output_path),
-                "-",
-            ]
             last_error = ""
             for attempt in range(3):
                 timeout = self.config.model_timeout_seconds
@@ -540,35 +522,18 @@ class CodexDecisionGenerator:
                     }
                 )
                 try:
-                    completed = subprocess.run(
-                        command,
-                        input=prompt,
+                    return invoke_structured(
+                        self.config,
+                        prompt,
+                        self.profile.schema.value,
                         cwd=temp,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
                         timeout=timeout,
-                        check=False,
                     )
-                except subprocess.TimeoutExpired as exc:
-                    last_error = f"Codex timed out after {exc.timeout} seconds"
-                else:
-                    if completed.returncode == 0 and output_path.is_file():
-                        try:
-                            value = json.loads(output_path.read_text(encoding="utf-8-sig"))
-                        except json.JSONDecodeError as exc:
-                            last_error = f"Codex returned invalid JSON: {exc}"
-                        else:
-                            if isinstance(value, dict):
-                                return value
-                            last_error = "Codex output was not a JSON object"
-                    else:
-                        stderr = completed.stderr.strip()
-                        last_error = f"Codex exited with {completed.returncode}: {stderr[-2000:]}"
+                except InferenceExecutionError as exc:
+                    last_error = str(exc)
                 if attempt < 2:
                     self.sleeper(2**attempt)
-            raise PipelineError(last_error or "Codex decision generation failed")
+            raise PipelineError(last_error or "decision inference generation failed")
 
     def generate(
         self,
@@ -626,7 +591,11 @@ class CodexDecisionGenerator:
                     draft=value,
                     existing_decisions=prompt_index,
                 )
-        raise PipelineError("Codex semantic validation did not produce valid decisions")
+        raise PipelineError("Inference semantic validation did not produce valid decisions")
+
+
+# Backward-compatible import for callers that used the original provider-specific name.
+CodexDecisionGenerator = ProviderDecisionGenerator
 
 
 def _bullets(values: Sequence[str]) -> str:
@@ -689,7 +658,8 @@ def render_decision(
         ("schemaVersion", DECISION_SCHEMA_VERSION),
         ("title", str(data["title"])),
         ("description", str(data["description"])),
-        ("generator", "Codex"),
+        ("generator", provider_name(config.provider)),
+        ("generatorProvider", config.provider),
         ("status", str(data["status"])),
         ("scope", str(data["scope"])),
         ("implementationStatus", str(data["implementationStatus"])),
@@ -777,12 +747,13 @@ def validate_decision_record(path: Path) -> dict[str, Any]:
     required = {
         "type": "decision",
         "schemaVersion": schema_version,
-        "generator": "Codex",
         "automatedValidation": "passed",
     }
     for key, expected in required.items():
         if metadata.get(key) != expected:
             raise PipelineError(f"decision record has invalid {key}: {path}")
+    if not is_supported_generator(metadata.get("generator") or ""):
+        raise PipelineError(f"decision record has invalid generator: {path}")
     if metadata.get("reviewStatus") not in {"unreviewed", "reviewed"}:
         raise PipelineError(f"decision record has invalid reviewStatus: {path}")
     decision_id = f"DR-{match.group(1)}"
@@ -945,7 +916,9 @@ def _extend_existing_decision_sources(
 ) -> str | None:
     text = decision.path.read_text(encoding="utf-8-sig")
     metadata = parse_simple_frontmatter(text)
-    if metadata.get("schemaVersion") != str(DECISION_SCHEMA_VERSION) or metadata.get("generator") != "Codex":
+    if metadata.get("schemaVersion") != str(DECISION_SCHEMA_VERSION) or not is_supported_generator(
+        metadata.get("generator") or ""
+    ):
         return None
     lines, body = split_frontmatter_lines(text)
     merged_refs = unique_ordered(
@@ -1022,7 +995,7 @@ def _commit_batch(
                 decision=str(item["decision"]),
                 source_refs=tuple(merged_source_refs),
                 review_status="unreviewed",
-                generator="Codex",
+                generator=provider_name(config.provider),
                 schema_version=str(DECISION_SCHEMA_VERSION),
                 prompt_version=DECISION_PROFILE.prompt.version,
                 record_excerpt=rendered,
@@ -1051,7 +1024,7 @@ def _commit_batch(
                 decision=str(item["decision"]),
                 source_refs=tuple(str(ref) for ref in item["sourceThreadNoteRefs"]),
                 review_status="unreviewed",
-                generator="Codex",
+                generator=provider_name(config.provider),
                 schema_version=str(DECISION_SCHEMA_VERSION),
                 prompt_version=DECISION_PROFILE.prompt.version,
                 record_excerpt=rendered,
@@ -1156,6 +1129,12 @@ def execute_decision_build(
         "projectId": project.project_id,
         "dryRun": not write,
         "force": force,
+        "generator": {
+            "provider": config.provider,
+            "name": provider_name(config.provider),
+            "model": config.model,
+            "reasoningEffort": config.reasoning_effort,
+        },
         "scan": scan,
         "existingDecisionCount": len(existing),
         "selectedCount": len(candidates),

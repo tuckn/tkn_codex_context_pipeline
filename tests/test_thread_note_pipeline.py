@@ -642,7 +642,7 @@ class ThreadNotePipelineTests(unittest.TestCase):
             return SimpleNamespace(returncode=0, stderr="", stdout="")
 
         runner = CodexSummarizer(self.config, sleeper=lambda _seconds: None)
-        with patch("tkn_codex_context.thread_notes.subprocess.run", side_effect=fake_run):
+        with patch("tkn_codex_context.inference.subprocess.run", side_effect=fake_run):
             result = runner.generate(candidate)
 
         self.assertEqual("Automated Thread Note", result["title"])

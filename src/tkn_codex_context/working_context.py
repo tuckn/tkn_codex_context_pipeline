@@ -18,6 +18,12 @@ from typing import Any, Protocol
 
 from .common import frontmatter
 from .frontmatter import frontmatter_list_value, parse_simple_frontmatter, split_frontmatter_lines
+from .inference import (
+    InferenceExecutionError,
+    invoke_structured,
+    is_supported_generator,
+    provider_name,
+)
 from .safety import has_secret_like_content
 from .summary_resources import validate_summary_output_schema
 from .thread_notes import (
@@ -117,6 +123,7 @@ def working_context_generation_fingerprint(
 ) -> str:
     payload = json.dumps(
         {
+            "provider": config.provider,
             "model": config.model,
             "reasoningEffort": config.reasoning_effort,
             "profileSha256": profile.sha256,
@@ -362,18 +369,18 @@ def validate_working_context_output(
     try:
         validate_summary_output_schema(value, WORKING_CONTEXT_OUTPUT_SCHEMA)
     except ValueError as exc:
-        raise PipelineError(f"Codex output does not match the Working Context schema: {exc}") from exc
+        raise PipelineError(f"Inference output does not match the Working Context schema: {exc}") from exc
     if not isinstance(value, dict):
-        raise PipelineError("Codex Working Context output must be a JSON object")
+        raise PipelineError("Inference Working Context output must be a JSON object")
     strings = _all_strings(value)
     if any("\n" in item or "\r" in item for item in strings):
-        raise PipelineError("Codex Working Context output strings must not contain line breaks")
+        raise PipelineError("Inference Working Context output strings must not contain line breaks")
     secrets = has_secret_like_content(json.dumps(value, ensure_ascii=False))
     if secrets:
-        raise PipelineError("Codex Working Context output contains secret-like content: " + ", ".join(secrets))
+        raise PipelineError("Inference Working Context output contains secret-like content: " + ", ".join(secrets))
     unknown = sorted(set(_item_source_refs(value)) - source_refs)
     if unknown:
-        raise PipelineError("Codex Working Context output references unknown sources: " + ", ".join(unknown))
+        raise PipelineError("Inference Working Context output references unknown sources: " + ", ".join(unknown))
     invalid_decisions = sorted(
         str(item["decisionRef"])
         for item in value["effectiveDecisions"]
@@ -418,11 +425,11 @@ def validate_working_context_output(
     ):
         normalized = [" ".join(str(item[key]).casefold().split()) for item in value[field]]
         if len(normalized) != len(set(normalized)):
-            raise PipelineError(f"Codex Working Context output repeats {field} items")
+            raise PipelineError(f"Inference Working Context output repeats {field} items")
     return value
 
 
-class CodexWorkingContextGenerator:
+class ProviderWorkingContextGenerator:
     def __init__(
         self,
         config: PipelineConfig,
@@ -448,30 +455,6 @@ class CodexWorkingContextGenerator:
     def _invoke(self, prompt: str) -> dict[str, Any]:
         with tempfile.TemporaryDirectory(prefix="tkn-working-context-") as directory:
             temp = Path(directory)
-            schema_path = temp / "schema.json"
-            output_path = temp / "output.json"
-            schema_path.write_text(
-                json.dumps(self.profile.schema.value, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            command = [
-                self.config.codex_bin,
-                "exec",
-                "--ephemeral",
-                "--ignore-user-config",
-                "--skip-git-repo-check",
-                "--sandbox",
-                "read-only",
-                "--model",
-                self.config.model,
-                "-c",
-                f'model_reasoning_effort="{self.config.reasoning_effort}"',
-                "--output-schema",
-                str(schema_path),
-                "--output-last-message",
-                str(output_path),
-                "-",
-            ]
             last_error = ""
             for attempt in range(3):
                 timeout = self.config.model_timeout_seconds
@@ -485,34 +468,18 @@ class CodexWorkingContextGenerator:
                     self.last_metrics["transportRetries"] = self.last_metrics.get("transportRetries", 0) + 1
                 self._emit({"type": "model-attempt", "attempt": attempt + 1, "timeoutSeconds": timeout})
                 try:
-                    completed = subprocess.run(
-                        command,
-                        input=prompt,
+                    return invoke_structured(
+                        self.config,
+                        prompt,
+                        self.profile.schema.value,
                         cwd=temp,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
                         timeout=timeout,
-                        check=False,
                     )
-                except subprocess.TimeoutExpired as exc:
-                    last_error = f"Codex timed out after {exc.timeout} seconds"
-                else:
-                    if completed.returncode == 0 and output_path.is_file():
-                        try:
-                            value = json.loads(output_path.read_text(encoding="utf-8-sig"))
-                        except json.JSONDecodeError as exc:
-                            last_error = f"Codex returned invalid JSON: {exc}"
-                        else:
-                            if isinstance(value, dict):
-                                return value
-                            last_error = "Codex output was not a JSON object"
-                    else:
-                        last_error = f"Codex exited with {completed.returncode}: {completed.stderr.strip()[-2000:]}"
+                except InferenceExecutionError as exc:
+                    last_error = str(exc)
                 if attempt < 2:
                     self.sleeper(2**attempt)
-            raise PipelineError(last_error or "Codex Working Context generation failed")
+            raise PipelineError(last_error or "Working Context inference generation failed")
 
     def _validated_invoke(
         self,
@@ -538,7 +505,7 @@ class CodexWorkingContextGenerator:
                     validation_error=str(exc),
                     draft=value,
                 )
-        raise PipelineError("Codex semantic validation did not produce a valid Working Context")
+        raise PipelineError("Inference semantic validation did not produce a valid Working Context")
 
     def generate(
         self,
@@ -584,6 +551,10 @@ class CodexWorkingContextGenerator:
             source_refs=refs,
             decision_refs=decision_refs,
         )
+
+
+# Backward-compatible import for callers that used the original provider-specific name.
+CodexWorkingContextGenerator = ProviderWorkingContextGenerator
 
 
 def _source_suffix(refs: Sequence[str]) -> str:
@@ -660,7 +631,8 @@ def render_working_context(
         ("title", str(data["title"])),
         ("description", str(data["description"])),
         ("projectId", project.project_id),
-        ("generator", "Codex"),
+        ("generator", provider_name(config.provider)),
+        ("generatorProvider", config.provider),
         ("status", "active"),
         ("projectStatus", str(data["projectStatus"])),
         ("currentFocus", str(data["currentFocus"])),
@@ -730,13 +702,14 @@ def validate_working_context(path: Path) -> dict[str, Any]:
     required = {
         "type": "workingContext",
         "schemaVersion": str(WORKING_CONTEXT_SCHEMA_VERSION),
-        "generator": "Codex",
         "status": "active",
         "automatedValidation": "passed",
     }
     for key, expected in required.items():
         if metadata.get(key) != expected:
             raise PipelineError(f"Working Context has invalid {key}: {path}")
+    if not is_supported_generator(metadata.get("generator") or ""):
+        raise PipelineError(f"Working Context has invalid generator: {path}")
     required_values = (
         "title",
         "description",
@@ -869,6 +842,12 @@ def execute_working_context_build(
         "dryRun": not write,
         "force": force,
         "allowEdited": allow_edited,
+        "generator": {
+            "provider": config.provider,
+            "name": provider_name(config.provider),
+            "model": config.model,
+            "reasoningEffort": config.reasoning_effort,
+        },
         "workingContext": str(output_path),
         "sourceCounts": {
             "threadNotes": sum(source.kind == "threadNote" for source in sources),

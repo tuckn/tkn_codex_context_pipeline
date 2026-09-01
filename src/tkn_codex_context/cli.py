@@ -20,10 +20,11 @@ from .config import (
 from .console_logging import ColorFormatter, log_success, supports_color
 from .decision_resources import load_decision_profile
 from .decisions import (
-    CodexDecisionGenerator,
+    ProviderDecisionGenerator,
     execute_decision_build,
     validate_decision_record,
 )
+from .inference import provider_name
 from .initialization import initialize_application
 from .projects import (
     fetch_projects,
@@ -33,14 +34,14 @@ from .projects import (
 )
 from .summary_resources import load_summary_profile
 from .thread_notes import (
-    CodexSummarizer,
     PipelineError,
+    ProviderSummarizer,
     execute_pipeline,
     execute_rebuild,
     validate_thread_note,
 )
 from .working_context import (
-    CodexWorkingContextGenerator,
+    ProviderWorkingContextGenerator,
     execute_working_context_build,
     validate_working_context,
 )
@@ -59,6 +60,11 @@ def _utf8_console() -> None:
 
 def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", type=Path, help="Explicit YAML config path")
+    parser.add_argument(
+        "--provider",
+        choices=("codex", "claude-code", "github-copilot", "ollama"),
+        help="Inference provider; the source provider remains Codex",
+    )
     parser.add_argument("--model")
     parser.add_argument(
         "--reasoning-effort",
@@ -68,6 +74,9 @@ def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--runtime-minutes", type=int)
     parser.add_argument("--model-timeout-seconds", type=int)
     parser.add_argument("--codex-executable")
+    parser.add_argument("--claude-executable")
+    parser.add_argument("--copilot-executable")
+    parser.add_argument("--ollama-base-url")
     output = parser.add_mutually_exclusive_group()
     output.add_argument(
         "-q",
@@ -309,12 +318,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _overrides(args: argparse.Namespace) -> dict[str, Any]:
     names = (
+        "provider",
         "model",
         "reasoning_effort",
         "idle_minutes",
         "runtime_minutes",
         "model_timeout_seconds",
         "codex_executable",
+        "claude_executable",
+        "copilot_executable",
+        "ollama_base_url",
     )
     return {name: getattr(args, name) for name in names if getattr(args, name, None) is not None}
 
@@ -971,7 +984,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     decision_project.project_id,
                 )
             decision_generator = (
-                CodexDecisionGenerator(pipeline_config, observer=_progress)
+                ProviderDecisionGenerator(pipeline_config, observer=_progress)
                 if write
                 else None
             )
@@ -1058,7 +1071,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     context_project.project_id,
                 )
             context_generator = (
-                CodexWorkingContextGenerator(pipeline_config, observer=_progress)
+                ProviderWorkingContextGenerator(pipeline_config, observer=_progress)
                 if write
                 else None
             )
@@ -1148,14 +1161,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if not dry_run:
             LOGGER.info(
-                "Generator: %s (%s reasoning)",
+                "Generator: %s / %s (%s reasoning)",
+                provider_name(pipeline_config.provider),
                 pipeline_config.model,
                 pipeline_config.reasoning_effort,
             )
         summarizer = (
             None
             if dry_run
-            else CodexSummarizer(
+            else ProviderSummarizer(
                 pipeline_config,
                 observer=_progress,
             )
