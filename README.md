@@ -99,7 +99,9 @@ replaces it. The packaged example remains available after a normal wheel or
 `uv tool` installation.
 
 `config show` emits the effective configuration as JSON, including the
-available configuration layers and the winning source for every setting.
+effective config schema version, each available layer's source and effective
+schema versions, any in-memory migration, and the winning source for every
+setting.
 
 ### Inference providers
 
@@ -129,7 +131,7 @@ Executable names may be replaced with absolute paths when they are not on
 `PATH`.
 
 ```yaml
-schema_version: 2
+schema_version: "2.0.0"
 generation:
   active_provider: codex
   providers:
@@ -177,11 +179,25 @@ generation:
       base_url: http://127.0.0.1:11434
 ```
 
-Configuration schema v2 replaces the former flat `provider`, `model`,
+Every application-managed config file requires a quoted three-part SemVer
+`schema_version`; the current effective version is `"2.0.0"`. The version is
+metadata for that individual source and does not participate in normal
+configuration precedence. Readers accept older compatible versions in the
+same major, and a newer patch in the supported major/minor. A newer minor or
+major, an older major without a migration path, a missing version, or an
+invalid version format stops with an actionable error. `config show` reports
+the source and effective versions and whether an in-memory migration occurred.
+
+The integer `schema_version: 2` emitted by v0.3.0 is recognized as a legacy
+representation and normalized to `"2.0.0"` in memory without rewriting the
+file. Replace that first line with `schema_version: "2.0.0"` to persist the
+current format.
+
+Configuration schema major v2 replaces the former flat `provider`, `model`,
 `reasoning_effort`, `*_executable`, and `ollama_base_url` keys. Schema v1 is
 rejected with a migration message so that a partially migrated configuration
 cannot silently select the wrong backend. Move those values into the matching
-provider block and set `schema_version: 2`.
+provider block and set `schema_version: "2.0.0"`.
 
 The same values can be overridden as global CLI options placed before the
 command:
@@ -190,9 +206,9 @@ command:
 tkn-codex-context --provider ollama --model qwen3.5:9b thread-notes pull
 ```
 
-Use `config show` to inspect the resolved values and their winning configuration
-layers. A dry-run resolves the provider and selects source evidence but does not
-call any inference provider.
+Use `config show` to inspect the resolved values, config schema compatibility,
+and winning configuration layers. A dry-run resolves the provider and selects
+source evidence but does not call any inference provider.
 
 Choosing Codex, Claude Code, or GitHub Copilot sends the selected, redacted
 generation input through the account and service used by that CLI.

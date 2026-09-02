@@ -7,6 +7,7 @@ import pytest
 import yaml
 
 import tkn_codex_context.initialization as initialization
+from tkn_codex_context.config import CONFIG_SCHEMA_VERSION
 from tkn_codex_context.initialization import initialize_application
 from tkn_codex_context.thread_notes import PipelineError
 
@@ -34,7 +35,15 @@ def write_app_state(codex_home: Path) -> None:
 
 def write_config(path: Path, value: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+    document = {"schema_version": CONFIG_SCHEMA_VERSION, **value}
+    schema_version = document.pop("schema_version")
+    schema_text = (
+        json.dumps(schema_version) if isinstance(schema_version, str) else str(schema_version)
+    )
+    path.write_text(
+        f"schema_version: {schema_text}\n{yaml.safe_dump(document, sort_keys=False)}",
+        encoding="utf-8",
+    )
 
 
 def test_init_requires_config_init_first(tmp_path: Path) -> None:
@@ -89,6 +98,10 @@ def test_force_dry_run_and_apply_preserve_settings_and_remove_old_storage(tmp_pa
     initialize_application(config_path, overrides=None, force=True, dry_run=False)
 
     saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert config_path.read_text(encoding="utf-8").splitlines()[0] == (
+        f'schema_version: "{CONFIG_SCHEMA_VERSION}"'
+    )
+    assert saved["schema_version"] == CONFIG_SCHEMA_VERSION
     assert saved["generation"]["providers"]["codex"]["model"] == "custom-model"
     assert saved["installed_at"] != "2026-01-01T00:00:00+00:00"
     assert "context_store_root" not in saved

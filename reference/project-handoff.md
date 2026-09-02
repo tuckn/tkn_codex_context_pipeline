@@ -132,6 +132,7 @@ Configuration precedence is:
 Main defaults:
 
 ```yaml
+schema_version: "2.0.0"
 codex_home: ~/.codex
 data_root: ~/.tkn/codex_context_pipeline/data
 state_root: ~/.tkn/codex_context_pipeline/state
@@ -148,10 +149,17 @@ runtime_minutes: 230
 model_timeout_seconds: 1800
 ```
 
+Each config file requires a quoted three-part SemVer `schema_version`. The
+current effective version is `"2.0.0"`; compatible versions in the same major
+are accepted according to the README contract, while unsupported versions fail
+closed. The legacy integer `2` representation is normalized in memory and is
+reported by `config show` until the file is updated.
+
 `config init` creates the global user configuration from the packaged example,
 reports `unchanged` for identical content, and protects edited content unless
 `--force` backs it up before replacement. `config show` reports the resolved
-values, layers, and winning source for every setting.
+values, per-layer source/effective schema versions and migrations, and the
+winning source for every setting.
 
 `init` requires that configuration, creates the Project registry, records the current
 time as `installed_at`, and creates empty Project storage. Normal pulls process

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 import yaml
 
 from tkn_codex_context.config import (
+    CONFIG_SCHEMA_VERSION,
     config_example_text,
     initialize_user_config,
     load_app_config,
@@ -16,7 +18,15 @@ from tkn_codex_context.thread_notes import PipelineError
 
 def write_yaml(path: Path, value: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(value), encoding="utf-8")
+    document = {"schema_version": CONFIG_SCHEMA_VERSION, **value}
+    schema_version = document.pop("schema_version")
+    schema_text = (
+        json.dumps(schema_version) if isinstance(schema_version, str) else str(schema_version)
+    )
+    path.write_text(
+        f"schema_version: {schema_text}\n{yaml.safe_dump(document, sort_keys=False)}",
+        encoding="utf-8",
+    )
 
 
 def test_packaged_example_config_uses_portable_home_paths() -> None:
@@ -26,7 +36,8 @@ def test_packaged_example_config_uses_portable_home_paths() -> None:
         assert "\\" not in value[key]
         assert value[key].startswith("~/")
     assert value["installed_at"] is None
-    assert value["schema_version"] == 2
+    assert value["schema_version"] == CONFIG_SCHEMA_VERSION
+    assert config_example_text().splitlines()[0] == f'schema_version: "{CONFIG_SCHEMA_VERSION}"'
     assert value["generation"] == {
         "active_provider": "codex",
         "providers": {
@@ -124,14 +135,20 @@ def test_config_resolution_reports_the_winning_source(
 
     assert resolution.config.model == "project"
     assert resolution.config.idle_minutes == 30
-    assert resolution.sources["schema_version"] == "built-in defaults"
+    assert "schema_version" not in resolution.sources
     assert resolution.sources["generation.providers.codex.model"].startswith("project:")
     assert resolution.sources["idle_minutes"] == "CLI option"
     assert [layer["kind"] for layer in resolution.layers] == [
+        "built-in",
         "global",
         "project",
         "explicit",
     ]
+    assert all(
+        layer["effectiveSchemaVersion"] == CONFIG_SCHEMA_VERSION
+        for layer in resolution.layers
+    )
+    assert not resolution.has_in_memory_migrations
 
 
 def test_retired_null_summary_prompt_is_ignored(
@@ -159,15 +176,84 @@ def test_unknown_key_is_rejected(tmp_path: Path) -> None:
         load_app_config(explicit_path=path, cwd=tmp_path)
 
 
+def test_config_file_requires_schema_version(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("idle_minutes: 10\n", encoding="utf-8")
+
+    with pytest.raises(PipelineError, match="schema_version is required"):
+        load_app_config(explicit_path=path, cwd=tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("schema_version", "message"),
+    [
+        ('"2"', "expected a quoted MAJOR.MINOR.PATCH"),
+        ('"2.0"', "expected a quoted MAJOR.MINOR.PATCH"),
+        ('"2.0.0-rc1"', "expected a quoted MAJOR.MINOR.PATCH"),
+        ('"1.9.0"', "schema v1 is no longer supported"),
+        ('"2.1.0"', "unsupported newer configuration schema_version"),
+        ('"3.0.0"', "unsupported newer configuration schema_version"),
+    ],
+)
+def test_unsupported_schema_versions_are_rejected(
+    tmp_path: Path,
+    schema_version: str,
+    message: str,
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(f"schema_version: {schema_version}\n", encoding="utf-8")
+
+    with pytest.raises(PipelineError, match=message):
+        load_app_config(explicit_path=path, cwd=tmp_path)
+
+
+def test_same_major_minor_newer_patch_is_accepted(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    write_yaml(path, {"schema_version": "2.0.7", "idle_minutes": 10})
+
+    resolution = resolve_app_config(explicit_path=path, cwd=tmp_path)
+
+    assert resolution.config.schema_version == CONFIG_SCHEMA_VERSION
+    explicit = resolution.layers[-1]
+    assert explicit["schemaVersion"] == "2.0.7"
+    assert explicit["effectiveSchemaVersion"] == CONFIG_SCHEMA_VERSION
+    assert explicit["migration"] is None
+
+
+def test_legacy_integer_schema_v2_is_migrated_in_memory(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text("schema_version: 2\nidle_minutes: 10\n", encoding="utf-8")
+
+    resolution = resolve_app_config(explicit_path=path, cwd=tmp_path)
+
+    assert resolution.config.schema_version == CONFIG_SCHEMA_VERSION
+    assert resolution.has_in_memory_migrations
+    assert resolution.layers[-1]["migration"] == {
+        "kind": "legacy-integer-version",
+        "fromVersion": 2,
+        "toVersion": CONFIG_SCHEMA_VERSION,
+        "persistentConfigUpdated": False,
+    }
+
+
+def test_schema_version_cannot_be_overridden_as_a_setting(tmp_path: Path) -> None:
+    with pytest.raises(PipelineError, match="cannot be a CLI override"):
+        load_app_config(cwd=tmp_path, overrides={"schema_version": "2.0.7"})
+
+
 def test_schema_v1_flat_generation_settings_are_rejected(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
-    write_yaml(path, {"schema_version": 1, "provider": "codex", "model": "gpt-5.6-sol"})
+    write_yaml(path, {"schema_version": "1.0.0", "provider": "codex", "model": "gpt-5.6-sol"})
 
     with pytest.raises(PipelineError, match="schema v1 is no longer supported"):
         load_app_config(explicit_path=path, cwd=tmp_path)
 
 
-def test_active_provider_requires_matching_provider_settings(tmp_path: Path) -> None:
+def test_active_provider_requires_matching_provider_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     path = tmp_path / "config.yaml"
     write_yaml(path, {"generation": {"active_provider": "ollama"}})
 
@@ -182,7 +268,7 @@ def test_cli_can_select_an_already_configured_provider_without_repeating_its_mod
     write_yaml(
         path,
         {
-            "schema_version": 2,
+            "schema_version": CONFIG_SCHEMA_VERSION,
             "generation": {
                 "providers": {
                     "claude-code": {

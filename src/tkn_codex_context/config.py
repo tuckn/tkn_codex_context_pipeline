@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
@@ -25,7 +26,9 @@ from .thread_notes import (
     atomic_write_text,
 )
 
-CONFIG_SCHEMA_VERSION = 2
+CONFIG_SCHEMA_VERSION: Literal["2.0.0"] = "2.0.0"
+_CONFIG_SCHEMA_VERSION_PARTS = (2, 0, 0)
+_CONFIG_SCHEMA_VERSION_PATTERN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 APP_DIRECTORY_NAME = "codex_context_pipeline"
 CONFIG_EXAMPLE_RESOURCE = "resources/config.example.yaml"
 ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max", "ultra"]
@@ -55,6 +58,8 @@ class ConfigResolution:
     config: AppConfig
     sources: dict[str, str]
     layers: tuple[dict[str, Any], ...]
+    effective_schema_version: str
+    has_in_memory_migrations: bool
 
 
 def default_app_root() -> Path:
@@ -136,7 +141,7 @@ class AppConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[2] = 2
+    schema_version: Literal["2.0.0"] = CONFIG_SCHEMA_VERSION
     installed_at: datetime | None = None
     codex_home: Path = Field(default_factory=lambda: Path.home() / ".codex")
     data_root: Path = Field(default_factory=lambda: default_app_root() / "data")
@@ -304,13 +309,81 @@ def _default_config_document() -> dict[str, Any]:
 
 def _reject_legacy_generation_config(value: dict[str, Any], path: Path) -> None:
     legacy_keys = sorted(LEGACY_GENERATION_KEYS.intersection(value))
-    if value.get("schema_version") == 1 or legacy_keys:
+    schema_version = value.get("schema_version")
+    schema_v1 = schema_version == 1 or (
+        isinstance(schema_version, str) and schema_version.partition(".")[0] == "1"
+    )
+    if schema_v1 or legacy_keys:
         detail = f"; retired keys: {', '.join(legacy_keys)}" if legacy_keys else ""
         raise PipelineError(
             f"configuration schema v1 is no longer supported: {path}{detail}; "
-            "set schema_version: 2 and move generation settings under "
+            f'set schema_version: "{CONFIG_SCHEMA_VERSION}" and move generation settings under '
             "generation.active_provider and generation.providers"
         )
+
+
+def _inspect_config_schema(value: dict[str, Any], path: Path) -> dict[str, Any]:
+    if "schema_version" not in value:
+        raise PipelineError(
+            f'configuration schema_version is required: {path}; set schema_version: "{CONFIG_SCHEMA_VERSION}"'
+        )
+    raw_version = value["schema_version"]
+    if type(raw_version) is int and raw_version == _CONFIG_SCHEMA_VERSION_PARTS[0]:
+        return {
+            "schemaVersion": raw_version,
+            "effectiveSchemaVersion": CONFIG_SCHEMA_VERSION,
+            "migration": {
+                "kind": "legacy-integer-version",
+                "fromVersion": raw_version,
+                "toVersion": CONFIG_SCHEMA_VERSION,
+                "persistentConfigUpdated": False,
+            },
+        }
+    if not isinstance(raw_version, str) or not _CONFIG_SCHEMA_VERSION_PATTERN.fullmatch(raw_version):
+        raise PipelineError(
+            f"invalid configuration schema_version {raw_version!r}: {path}; "
+            f'expected a quoted MAJOR.MINOR.PATCH value such as "{CONFIG_SCHEMA_VERSION}"'
+        )
+    parts = tuple(int(part) for part in raw_version.split("."))
+    current_major, current_minor, _current_patch = _CONFIG_SCHEMA_VERSION_PARTS
+    major, minor, _patch = parts
+    if major != current_major:
+        direction = "newer" if major > current_major else "older"
+        action = (
+            "upgrade tkn-codex-context"
+            if major > current_major
+            else "migrate the configuration explicitly; no migration path is available"
+        )
+        raise PipelineError(
+            f"unsupported {direction} configuration schema_version {raw_version!r}: {path}; "
+            f"this application supports schema versions through {CONFIG_SCHEMA_VERSION} "
+            f"within major {current_major}; {action}"
+        )
+    if minor > current_minor:
+        raise PipelineError(
+            f"unsupported newer configuration schema_version {raw_version!r}: {path}; "
+            f"this application supports schema versions through {CONFIG_SCHEMA_VERSION}; "
+            "upgrade tkn-codex-context"
+        )
+    migration: dict[str, Any] | None = None
+    if minor < current_minor:
+        migration = {
+            "kind": "compatible-version-normalization",
+            "fromVersion": raw_version,
+            "toVersion": CONFIG_SCHEMA_VERSION,
+            "persistentConfigUpdated": False,
+        }
+    return {
+        "schemaVersion": raw_version,
+        "effectiveSchemaVersion": CONFIG_SCHEMA_VERSION,
+        "migration": migration,
+    }
+
+
+def _config_properties(value: dict[str, Any]) -> dict[str, Any]:
+    result = dict(value)
+    result.pop("schema_version", None)
+    return result
 
 
 def _resolve_paths(value: dict[str, Any], base: Path) -> dict[str, Any]:
@@ -363,6 +436,8 @@ def _apply_runtime_overrides(
     working: Path,
     sources: dict[str, str],
 ) -> None:
+    if "schema_version" in overrides:
+        raise PipelineError("schema_version is configuration-source metadata and cannot be a CLI override")
     resolved = _resolve_paths(overrides, working)
     generation_options = {key: resolved.pop(key) for key in tuple(resolved) if key in LEGACY_GENERATION_KEYS}
     _deep_merge(merged, resolved)
@@ -445,7 +520,7 @@ def resolve_app_config(
     working = (cwd or Path.cwd()).absolute()
     merged = _default_config_document()
     sources: dict[str, str] = {}
-    _mark_sources(sources, merged, "built-in defaults")
+    _mark_sources(sources, _config_properties(merged), "built-in defaults")
     layer_specs = [
         ("global", global_config_path()),
         ("project", project_config_path(working)),
@@ -454,21 +529,35 @@ def resolve_app_config(
             explicit_path.expanduser().absolute() if explicit_path else None,
         ),
     ]
-    layer_report: list[dict[str, Any]] = []
+    layer_report: list[dict[str, Any]] = [
+        {
+            "kind": "built-in",
+            "path": None,
+            "exists": True,
+            "schemaVersion": CONFIG_SCHEMA_VERSION,
+            "effectiveSchemaVersion": CONFIG_SCHEMA_VERSION,
+            "migration": None,
+        }
+    ]
     for kind, path in layer_specs:
-        if path is not None:
-            layer_report.append(
-                {
-                    "kind": kind,
-                    "path": str(path),
-                    "exists": path.is_file(),
-                }
-            )
-        if path is not None and path.is_file():
+        if path is None:
+            continue
+        report: dict[str, Any] = {
+            "kind": kind,
+            "path": str(path),
+            "exists": path.is_file(),
+            "schemaVersion": None,
+            "effectiveSchemaVersion": None,
+            "migration": None,
+        }
+        layer_report.append(report)
+        if report["exists"]:
             raw_layer = _read_layer(path)
             _reject_legacy_generation_config(raw_layer, path)
+            schema_report = _inspect_config_schema(raw_layer, path)
+            report.update(schema_report)
             layer, _removed = _without_retired_user_prompt(
-                raw_layer,
+                _config_properties(raw_layer),
                 remove_configured=False,
             )
             resolved_layer = _resolve_paths(layer, path.parent)
@@ -496,6 +585,8 @@ def resolve_app_config(
         config=resolved,
         sources=sources,
         layers=tuple(layer_report),
+        effective_schema_version=CONFIG_SCHEMA_VERSION,
+        has_in_memory_migrations=any(layer["migration"] is not None for layer in layer_report),
     )
 
 
@@ -594,6 +685,8 @@ def initialization_config(
     if target.is_file():
         raw = _read_layer(target)
         _reject_legacy_generation_config(raw, target)
+        _inspect_config_schema(raw, target)
+        raw = _config_properties(raw)
         raw, removed_summary_prompt = _without_retired_user_prompt(
             raw,
             remove_configured=True,
@@ -633,9 +726,11 @@ def initialization_config(
 
 
 def write_config(config: AppConfig, target: Path) -> None:
+    document = config_document(config)
+    schema_version = document.pop("schema_version")
     text = yaml.safe_dump(
-        config_document(config),
+        document,
         allow_unicode=True,
         sort_keys=False,
     )
-    atomic_write_text(target, text)
+    atomic_write_text(target, f'schema_version: "{schema_version}"\n{text}')

@@ -1,4 +1,4 @@
-schema_version: 2
+schema_version: "2.0.0"
 installed_at: null
 codex_home: ~/.codex
 data_root: ~/.tkn/codex_context_pipeline/data

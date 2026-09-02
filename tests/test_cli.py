@@ -15,6 +15,7 @@ from tkn_codex_context.cli import (
     build_parser,
     main,
 )
+from tkn_codex_context.config import CONFIG_SCHEMA_VERSION
 from tkn_codex_context.console_logging import SUCCESS, ColorFormatter
 
 
@@ -232,8 +233,14 @@ def test_config_show_reports_application_owned_summary_profile(
         "profiles/working_context/default/output.schema.json"
     )
     assert working_context_profile["template"]["version"] == "1.0"
+    assert output["config"]["schema_version"] == CONFIG_SCHEMA_VERSION
+    assert output["configSchema"] == {
+        "effectiveVersion": CONFIG_SCHEMA_VERSION,
+        "hasInMemoryMigrations": False,
+    }
     assert output["sources"]["generation.providers.codex.model"] == "built-in defaults"
-    assert [layer["kind"] for layer in output["layers"]] == ["global", "project"]
+    assert [layer["kind"] for layer in output["layers"]] == ["built-in", "global", "project"]
+    assert output["layers"][0]["schemaVersion"] == CONFIG_SCHEMA_VERSION
 
 
 def test_config_init_cli_creates_then_keeps_the_user_config(
@@ -259,6 +266,9 @@ def test_config_init_cli_creates_then_keeps_the_user_config(
     }
     assert unchanged["status"] == "unchanged"
     assert target.is_file()
+    assert target.read_text(encoding="utf-8").splitlines()[0] == (
+        f'schema_version: "{CONFIG_SCHEMA_VERSION}"'
+    )
 
 
 def test_config_init_rejects_runtime_overrides(capsys: CaptureFixture[str]) -> None:
@@ -860,6 +870,7 @@ def test_projects_list_has_human_and_json_output(
     config_path.write_text(
         json.dumps(
             {
+                "schema_version": CONFIG_SCHEMA_VERSION,
                 "data_root": str(data_root),
                 "state_root": str(state_root),
                 "cache_root": str(tmp_path / "cache"),

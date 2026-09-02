@@ -843,6 +843,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 {
                     "command": "config show",
                     "config": config_document(resolved),
+                    "configSchema": {
+                        "effectiveVersion": resolution.effective_schema_version,
+                        "hasInMemoryMigrations": resolution.has_in_memory_migrations,
+                    },
                     "sources": resolution.sources,
                     "layers": list(resolution.layers),
                     "summaryProfile": {

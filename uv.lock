@@ -418,7 +418,7 @@ wheels = [
 
 [[package]]
 name = "tkn-codex-context-pipeline"
-version = "0.3.0"
+version = "0.3.1"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },

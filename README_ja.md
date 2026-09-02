@@ -94,7 +94,8 @@ tkn-codex-context init
 指定した場合だけtimestamp付きbackupを作成してから置換します。package resourceとして
 同梱するため、通常のwheelまたは`uv tool` installation後も利用できます。
 
-`config show`は解決後の設定をJSONで出力し、利用可能な設定layerと各設定値の採用元も
+`config show`は解決後の設定をJSONで出力し、有効な設定schema version、利用可能な
+各layerのsource/effective schema version、in-memory migrationの有無、各設定値の採用元も
 表示します。
 
 ### 推論provider
@@ -122,7 +123,7 @@ YAMLの設定keyは`snake_case`、`claude-code`や`github-copilot`などのprovi
 変更できます。
 
 ```yaml
-schema_version: 2
+schema_version: "2.0.0"
 generation:
   active_provider: codex
   providers:
@@ -170,10 +171,22 @@ generation:
       base_url: http://127.0.0.1:11434
 ```
 
-設定schema v2では、以前のflatな`provider`、`model`、`reasoning_effort`、
+applicationが管理する各config fileには、引用符付き3要素SemVer形式の
+`schema_version`が必要です。現在のeffective versionは`"2.0.0"`です。このversionは
+各設定sourceのmetadataであり、通常の設定優先順位による上書き対象にはしません。
+同じMajorの互換性がある古いversionと、対応中のMajor/Minorに属する新しいPatchは
+読み込めます。新しいMinor/Major、migration経路のない古いMajor、version欠落、不正な
+形式は、必要なactionを示して停止します。`config show`でsource/effective versionと
+in-memory migrationの有無を確認できます。
+
+v0.3.0が出力した整数の`schema_version: 2`はlegacy表現として認識し、fileを書き換えず
+memory上で`"2.0.0"`へ変換します。現在の形式を永続化するには、先頭行を
+`schema_version: "2.0.0"`へ置き換えてください。
+
+設定schema Major v2では、以前のflatな`provider`、`model`、`reasoning_effort`、
 `*_executable`、`ollama_base_url`を廃止しました。移行途中の設定で誤ったbackendが
 暗黙に選ばれないよう、schema v1は移行方法を示して拒否します。各値を対応する
-provider blockへ移し、`schema_version: 2`を指定してください。
+provider blockへ移し、`schema_version: "2.0.0"`を指定してください。
 
 同じ値は、commandより前に置くglobal CLI optionでも上書きできます。
 
@@ -181,8 +194,8 @@ provider blockへ移し、`schema_version: 2`を指定してください。
 tkn-codex-context --provider ollama --model qwen3.5:9b thread-notes pull
 ```
 
-`config show`で、解決後の値と採用された設定layerを確認できます。dry-runはproviderを
-解決してsource evidenceを選択しますが、推論providerは呼びません。
+`config show`で、解決後の値、設定schemaの互換性、採用された設定layerを確認できます。
+dry-runはproviderを解決してsource evidenceを選択しますが、推論providerは呼びません。
 
 Codex、Claude Code、GitHub Copilotを選ぶと、選択・redact済みの生成inputは、各CLIが
 使用するaccountとserviceを通ります。認証、subscription entitlement、利用上限、
