@@ -39,11 +39,11 @@ source objectの標準名がsessionになるわけではありません。
 - [uv](https://docs.astral.sh/uv/)
 - localのCodex app Project状態と`~/.codex/sessions`配下のchat log
 - Thread Note、Decision Record、Working Context生成に使用する、次のいずれかの推論backend
-  - `provider: codex`では`PATH`から実行できる`codex`
+  - `generation.active_provider: codex`では`PATH`から実行できる`codex`
     - Windowsでは`powershell -ExecutionPolicy Bypass -c "irm https://chatgpt.com/codex/install.ps1 | iex"`でインストールします。
-  - `provider: claude-code`では`PATH`から実行できる`claude`、または明示した`claude_executable`
-  - `provider: github-copilot`では`PATH`から実行できる`copilot`、または明示した`copilot_executable`
-  - `provider: ollama`ではlocalのOllama service
+  - `generation.active_provider: claude-code`では`PATH`から実行できる`claude`、または明示した`executable`
+  - `generation.active_provider: github-copilot`では`PATH`から実行できる`copilot`、または明示した`executable`
+  - `generation.active_provider: ollama`ではlocalのOllama service
 
 ## インストール
 
@@ -100,10 +100,10 @@ tkn-codex-context init
 ### 推論provider
 
 Source providerはCodexのままです。Project metadataとchat evidenceはCodex appと
-`~/.codex/sessions`だけから読みます。`provider`は、そのevidenceからThread Note、
-Decision Record、Working Contextを生成する推論backendだけを切り替えます。
+`~/.codex/sessions`だけから読みます。`generation.active_provider`は、そのevidenceから
+Thread Note、Decision Record、Working Contextを生成する推論backendだけを切り替えます。
 
-| `provider` | 呼び出し方法 | 構造化出力contract |
+| provider ID | 呼び出し方法 | 構造化出力contract |
 | --- | --- | --- |
 | `codex` | `codex exec` | native JSON Schema output |
 | `claude-code` | `claude -p` | `--json-schema`と`structured_output` |
@@ -115,43 +115,65 @@ modeで実行します。Ollama endpointはloopback host（`localhost`、`127.0.
 `::1`）だけを許可します。どのproviderでも、application-owned prompt、schema、
 renderer、validation、retry、atomic writeは共通です。
 
-`~/.tkn/codex_context_pipeline/config.yaml`で、`provider`と、そのproviderが認識する
-modelを設定します。実行ファイルが`PATH`にない場合は、executableを絶対pathに
+生成設定は`active_provider + providers`構造です。`active_provider`には使用するstable
+provider IDを1つ指定し、`providers`にはbackendごとのmodelと接続設定を保持します。
+YAMLの設定keyは`snake_case`、`claude-code`や`github-copilot`などのprovider IDは
+`kebab-case`の値です。実行ファイルが`PATH`にない場合は、`executable`を絶対pathに
 変更できます。
 
 ```yaml
-provider: codex
-codex_executable: codex
-claude_executable: claude
-copilot_executable: copilot
-ollama_base_url: http://127.0.0.1:11434
-model: gpt-5.6-sol
-reasoning_effort: high
+schema_version: 2
+generation:
+  active_provider: codex
+  providers:
+    codex:
+      model: gpt-5.6-sol
+      reasoning_effort: high
+      executable: codex
 ```
 
-providerごとの例です。
+他のproviderを使用する場合は、そのprovider blockを追加し、同じIDを
+`active_provider`に指定します。CLI providerの各blockには`model`と`executable`が
+必要です。Ollamaには代わりに`model`と`base_url`が必要です。`reasoning_effort`を
+省略した場合は`high`になります。
 
 ```yaml
 # Claude Code
-provider: claude-code
-model: sonnet
-reasoning_effort: high
+generation:
+  active_provider: claude-code
+  providers:
+    claude-code:
+      model: sonnet
+      reasoning_effort: high
+      executable: claude
 ```
 
 ```yaml
 # GitHub Copilot CLI
-provider: github-copilot
-model: <model-supported-by-copilot>
-reasoning_effort: high
+generation:
+  active_provider: github-copilot
+  providers:
+    github-copilot:
+      model: <model-supported-by-copilot>
+      reasoning_effort: high
+      executable: copilot
 ```
 
 ```yaml
 # Ollama
-provider: ollama
-model: qwen3.5:9b
-reasoning_effort: high
-ollama_base_url: http://127.0.0.1:11434
+generation:
+  active_provider: ollama
+  providers:
+    ollama:
+      model: qwen3.5:9b
+      reasoning_effort: high
+      base_url: http://127.0.0.1:11434
 ```
+
+設定schema v2では、以前のflatな`provider`、`model`、`reasoning_effort`、
+`*_executable`、`ollama_base_url`を廃止しました。移行途中の設定で誤ったbackendが
+暗黙に選ばれないよう、schema v1は移行方法を示して拒否します。各値を対応する
+provider blockへ移し、`schema_version: 2`を指定してください。
 
 同じ値は、commandより前に置くglobal CLI optionでも上書きできます。
 

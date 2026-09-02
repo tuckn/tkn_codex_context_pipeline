@@ -54,14 +54,23 @@ def test_force_dry_run_and_apply_preserve_settings_and_remove_old_storage(tmp_pa
     write_config(
         config_path,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "installed_at": "2026-01-01T00:00:00+00:00",
             "codex_home": str(codex_home),
             "context_store_root": str(tmp_path / "legacy"),
             "data_root": str(data_root),
             "state_root": str(state_root),
             "cache_root": str(cache_root),
-            "model": "custom-model",
+            "generation": {
+                "active_provider": "codex",
+                "providers": {
+                    "codex": {
+                        "model": "custom-model",
+                        "reasoning_effort": "high",
+                        "executable": "codex",
+                    }
+                },
+            },
             "summary_prompt": "retired-custom.md",
         },
     )
@@ -80,7 +89,7 @@ def test_force_dry_run_and_apply_preserve_settings_and_remove_old_storage(tmp_pa
     initialize_application(config_path, overrides=None, force=True, dry_run=False)
 
     saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    assert saved["model"] == "custom-model"
+    assert saved["generation"]["providers"]["codex"]["model"] == "custom-model"
     assert saved["installed_at"] != "2026-01-01T00:00:00+00:00"
     assert "context_store_root" not in saved
     assert "summary_prompt" not in saved

@@ -232,7 +232,7 @@ def test_config_show_reports_application_owned_summary_profile(
         "profiles/working_context/default/output.schema.json"
     )
     assert working_context_profile["template"]["version"] == "1.0"
-    assert output["sources"]["model"] == "built-in defaults"
+    assert output["sources"]["generation.providers.codex.model"] == "built-in defaults"
     assert [layer["kind"] for layer in output["layers"]] == ["global", "project"]
 
 

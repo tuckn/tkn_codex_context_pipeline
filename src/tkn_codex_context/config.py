@@ -8,10 +8,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .inference import InferenceProvider, validate_ollama_base_url
 from .thread_notes import (
@@ -25,9 +25,27 @@ from .thread_notes import (
     atomic_write_text,
 )
 
-CONFIG_SCHEMA_VERSION = 1
+CONFIG_SCHEMA_VERSION = 2
 APP_DIRECTORY_NAME = "codex_context_pipeline"
 CONFIG_EXAMPLE_RESOURCE = "resources/config.example.yaml"
+ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max", "ultra"]
+LEGACY_GENERATION_KEYS = frozenset(
+    {
+        "provider",
+        "model",
+        "reasoning_effort",
+        "codex_executable",
+        "claude_executable",
+        "copilot_executable",
+        "ollama_base_url",
+    }
+)
+PROVIDER_TRANSPORT_DEFAULTS: dict[InferenceProvider, tuple[str, str]] = {
+    "codex": ("executable", "codex"),
+    "claude-code": ("executable", "claude"),
+    "github-copilot": ("executable", "copilot"),
+    "ollama": ("base_url", "http://127.0.0.1:11434"),
+}
 
 
 @dataclass(frozen=True)
@@ -49,28 +67,15 @@ def default_user_cache_root() -> Path:
     return base / APP_DIRECTORY_NAME
 
 
-class AppConfig(BaseModel):
-    """Resolved application configuration and inference backend selection."""
+class ProviderConfig(BaseModel):
+    """Configuration for one inference provider."""
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[1] = 1
-    installed_at: datetime | None = None
-    codex_home: Path = Field(default_factory=lambda: Path.home() / ".codex")
-    data_root: Path = Field(default_factory=lambda: default_app_root() / "data")
-    state_root: Path = Field(default_factory=lambda: default_app_root() / "state")
-    cache_root: Path = Field(default_factory=default_user_cache_root)
-    provider: InferenceProvider = "codex"
-    codex_executable: str = "codex"
-    claude_executable: str = "claude"
-    copilot_executable: str = "copilot"
-    ollama_base_url: str = "http://127.0.0.1:11434"
-    model: str = DEFAULT_MODEL
-    reasoning_effort: Literal["low", "medium", "high", "xhigh", "max", "ultra"] = "high"
-    idle_minutes: int = Field(default=DEFAULT_IDLE_MINUTES, ge=0)
-    runtime_minutes: int = Field(default=DEFAULT_RUNTIME_MINUTES, gt=0)
-    model_timeout_seconds: int = Field(default=DEFAULT_MODEL_TIMEOUT_SECONDS, gt=0)
-    source_id: str = DEFAULT_SOURCE_ID
+    model: str
+    reasoning_effort: ReasoningEffort = "high"
+    executable: str | None = None
+    base_url: str | None = None
 
     @field_validator("model")
     @classmethod
@@ -79,17 +84,69 @@ class AppConfig(BaseModel):
             raise ValueError("model must not be empty")
         return value.strip()
 
-    @field_validator("codex_executable", "claude_executable", "copilot_executable")
+    @field_validator("executable")
     @classmethod
-    def require_executable(cls, value: str) -> str:
+    def require_executable(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         if not value.strip():
             raise ValueError("provider executable must not be empty")
         return value.strip()
 
-    @field_validator("ollama_base_url")
-    @classmethod
-    def require_local_ollama(cls, value: str) -> str:
-        return validate_ollama_base_url(value)
+
+def _default_providers() -> dict[InferenceProvider, ProviderConfig]:
+    return {
+        "codex": ProviderConfig(
+            model=DEFAULT_MODEL,
+            reasoning_effort="high",
+            executable="codex",
+        )
+    }
+
+
+class GenerationConfig(BaseModel):
+    """Active inference provider and provider-specific generation settings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    active_provider: InferenceProvider = "codex"
+    providers: dict[InferenceProvider, ProviderConfig] = Field(default_factory=_default_providers)
+
+    @model_validator(mode="after")
+    def validate_provider_settings(self) -> Self:
+        if self.active_provider not in self.providers:
+            raise ValueError(f"active_provider {self.active_provider!r} must have a matching entry under providers")
+        for provider, settings in self.providers.items():
+            if provider == "ollama":
+                if settings.executable is not None:
+                    raise ValueError("generation.providers.ollama does not support executable")
+                if settings.base_url is None:
+                    raise ValueError("generation.providers.ollama.base_url is required")
+                settings.base_url = validate_ollama_base_url(settings.base_url)
+                continue
+            if settings.base_url is not None:
+                raise ValueError(f"generation.providers.{provider}.base_url is not supported")
+            if settings.executable is None:
+                raise ValueError(f"generation.providers.{provider}.executable is required")
+        return self
+
+
+class AppConfig(BaseModel):
+    """Resolved application configuration and inference backend selection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[2] = 2
+    installed_at: datetime | None = None
+    codex_home: Path = Field(default_factory=lambda: Path.home() / ".codex")
+    data_root: Path = Field(default_factory=lambda: default_app_root() / "data")
+    state_root: Path = Field(default_factory=lambda: default_app_root() / "state")
+    cache_root: Path = Field(default_factory=default_user_cache_root)
+    generation: GenerationConfig = Field(default_factory=GenerationConfig)
+    idle_minutes: int = Field(default=DEFAULT_IDLE_MINUTES, ge=0)
+    runtime_minutes: int = Field(default=DEFAULT_RUNTIME_MINUTES, gt=0)
+    model_timeout_seconds: int = Field(default=DEFAULT_MODEL_TIMEOUT_SECONDS, gt=0)
+    source_id: str = DEFAULT_SOURCE_ID
 
     @field_validator("source_id")
     @classmethod
@@ -121,6 +178,45 @@ class AppConfig(BaseModel):
     @property
     def reports_root(self) -> Path:
         return self.state_root / "reports"
+
+    @property
+    def provider(self) -> InferenceProvider:
+        return self.generation.active_provider
+
+    @property
+    def active_provider_config(self) -> ProviderConfig:
+        return self.generation.providers[self.provider]
+
+    @property
+    def model(self) -> str:
+        return self.active_provider_config.model
+
+    @property
+    def reasoning_effort(self) -> ReasoningEffort:
+        return self.active_provider_config.reasoning_effort
+
+    def _provider_executable(self, provider: InferenceProvider, default: str) -> str:
+        settings = self.generation.providers.get(provider)
+        return settings.executable if settings is not None and settings.executable is not None else default
+
+    @property
+    def codex_executable(self) -> str:
+        return self._provider_executable("codex", "codex")
+
+    @property
+    def claude_executable(self) -> str:
+        return self._provider_executable("claude-code", "claude")
+
+    @property
+    def copilot_executable(self) -> str:
+        return self._provider_executable("github-copilot", "copilot")
+
+    @property
+    def ollama_base_url(self) -> str:
+        settings = self.generation.providers.get("ollama")
+        if settings is not None and settings.base_url is not None:
+            return settings.base_url
+        return "http://127.0.0.1:11434"
 
     def thread_note_pipeline_config(self, *, allow_missing_watermark: bool = False) -> PipelineConfig:
         installed_at = self.installed_at
@@ -165,6 +261,58 @@ def _read_layer(path: Path) -> dict[str, Any]:
     return {str(key): item for key, item in value.items()}
 
 
+def _leaf_paths(value: Any, prefix: str = "") -> tuple[str, ...]:
+    if isinstance(value, dict) and value:
+        return tuple(
+            child
+            for key, item in value.items()
+            for child in _leaf_paths(item, f"{prefix}.{key}" if prefix else str(key))
+        )
+    return (prefix,)
+
+
+def _mark_sources(sources: dict[str, str], value: dict[str, Any], label: str) -> None:
+    for path in _leaf_paths(value):
+        if path:
+            sources[path] = label
+
+
+def _deep_merge(target: dict[str, Any], update: dict[str, Any]) -> None:
+    for key, value in update.items():
+        current = target.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            _deep_merge(current, value)
+        else:
+            target[key] = value
+
+
+def _without_null_provider_settings(value: dict[str, Any]) -> dict[str, Any]:
+    generation = value.get("generation")
+    providers = generation.get("providers") if isinstance(generation, dict) else None
+    if isinstance(providers, dict):
+        for settings in providers.values():
+            if isinstance(settings, dict):
+                for key in tuple(settings):
+                    if settings[key] is None:
+                        settings.pop(key)
+    return value
+
+
+def _default_config_document() -> dict[str, Any]:
+    return _without_null_provider_settings(AppConfig().model_dump(mode="python"))
+
+
+def _reject_legacy_generation_config(value: dict[str, Any], path: Path) -> None:
+    legacy_keys = sorted(LEGACY_GENERATION_KEYS.intersection(value))
+    if value.get("schema_version") == 1 or legacy_keys:
+        detail = f"; retired keys: {', '.join(legacy_keys)}" if legacy_keys else ""
+        raise PipelineError(
+            f"configuration schema v1 is no longer supported: {path}{detail}; "
+            "set schema_version: 2 and move generation settings under "
+            "generation.active_provider and generation.providers"
+        )
+
+
 def _resolve_paths(value: dict[str, Any], base: Path) -> dict[str, Any]:
     result = dict(value)
     for key in ("codex_home", "data_root", "state_root", "cache_root"):
@@ -199,6 +347,93 @@ def _without_retired_user_prompt(
     return result, True
 
 
+def _new_provider_override(provider: InferenceProvider, model: str, effort: str | None) -> dict[str, Any]:
+    transport_key, transport_value = PROVIDER_TRANSPORT_DEFAULTS[provider]
+    return {
+        "model": model,
+        "reasoning_effort": effort or "high",
+        transport_key: transport_value,
+    }
+
+
+def _apply_runtime_overrides(
+    merged: dict[str, Any],
+    overrides: dict[str, Any],
+    *,
+    working: Path,
+    sources: dict[str, str],
+) -> None:
+    resolved = _resolve_paths(overrides, working)
+    generation_options = {key: resolved.pop(key) for key in tuple(resolved) if key in LEGACY_GENERATION_KEYS}
+    _deep_merge(merged, resolved)
+    _mark_sources(sources, resolved, "CLI option")
+    if not generation_options:
+        return
+
+    generation = merged.get("generation")
+    if not isinstance(generation, dict):
+        raise PipelineError("generation must be a YAML mapping")
+    providers = generation.get("providers")
+    if not isinstance(providers, dict):
+        raise PipelineError("generation.providers must be a YAML mapping")
+
+    requested_provider = generation_options.get("provider")
+    active_provider = str(requested_provider or generation.get("active_provider", "codex"))
+    if active_provider not in PROVIDER_TRANSPORT_DEFAULTS:
+        raise PipelineError(f"unsupported inference provider: {active_provider}")
+    if requested_provider is not None:
+        generation["active_provider"] = active_provider
+        sources["generation.active_provider"] = "CLI option"
+
+    provider_settings = providers.get(active_provider)
+    model_override = generation_options.get("model")
+    effort_override = generation_options.get("reasoning_effort")
+    if provider_settings is None:
+        if model_override is None:
+            raise PipelineError(
+                f"provider {active_provider!r} is not configured under generation.providers; "
+                "add its settings or pass --model"
+            )
+        provider_settings = _new_provider_override(
+            active_provider,
+            str(model_override),
+            str(effort_override) if effort_override is not None else None,
+        )
+        providers[active_provider] = provider_settings
+        _mark_sources(
+            sources,
+            {"generation": {"providers": {active_provider: provider_settings}}},
+            "CLI option",
+        )
+    elif not isinstance(provider_settings, dict):
+        raise PipelineError(f"generation.providers.{active_provider} must be a YAML mapping")
+
+    if model_override is not None:
+        provider_settings["model"] = model_override
+        sources[f"generation.providers.{active_provider}.model"] = "CLI option"
+    if effort_override is not None:
+        provider_settings["reasoning_effort"] = effort_override
+        sources[f"generation.providers.{active_provider}.reasoning_effort"] = "CLI option"
+
+    transport_options = {
+        "codex_executable": ("codex", "executable"),
+        "claude_executable": ("claude-code", "executable"),
+        "copilot_executable": ("github-copilot", "executable"),
+        "ollama_base_url": ("ollama", "base_url"),
+    }
+    for option, (provider, setting) in transport_options.items():
+        if option not in generation_options:
+            continue
+        target = providers.get(provider)
+        if not isinstance(target, dict):
+            raise PipelineError(
+                f"provider {provider!r} is not configured under generation.providers; "
+                f"select it with --provider and supply --model before using --{option.replace('_', '-')}"
+            )
+        target[setting] = generation_options[option]
+        sources[f"generation.providers.{provider}.{setting}"] = "CLI option"
+
+
 def resolve_app_config(
     *,
     explicit_path: Path | None = None,
@@ -208,8 +443,9 @@ def resolve_app_config(
     """Load defaults, global, project, explicit, then CLI overrides."""
 
     working = (cwd or Path.cwd()).absolute()
-    merged: dict[str, Any] = {}
-    sources = {name: "built-in defaults" for name in AppConfig.model_fields}
+    merged = _default_config_document()
+    sources: dict[str, str] = {}
+    _mark_sources(sources, merged, "built-in defaults")
     layer_specs = [
         ("global", global_config_path()),
         ("project", project_config_path(working)),
@@ -229,18 +465,21 @@ def resolve_app_config(
                 }
             )
         if path is not None and path.is_file():
+            raw_layer = _read_layer(path)
+            _reject_legacy_generation_config(raw_layer, path)
             layer, _removed = _without_retired_user_prompt(
-                _read_layer(path),
+                raw_layer,
                 remove_configured=False,
             )
             resolved_layer = _resolve_paths(layer, path.parent)
-            merged.update(resolved_layer)
-            for key in resolved_layer:
-                sources[key] = f"{kind}: {path}"
-    resolved_overrides = _resolve_paths(overrides or {}, working)
-    merged.update(resolved_overrides)
-    for key in resolved_overrides:
-        sources[key] = "CLI option"
+            _deep_merge(merged, resolved_layer)
+            _mark_sources(sources, resolved_layer, f"{kind}: {path}")
+    _apply_runtime_overrides(
+        merged,
+        overrides or {},
+        working=working,
+        sources=sources,
+    )
     try:
         config = AppConfig.model_validate(merged)
     except Exception as exc:
@@ -279,9 +518,7 @@ def config_example_text() -> str:
     """Read the application-owned example distributed in the package."""
 
     try:
-        return files("tkn_codex_context").joinpath(CONFIG_EXAMPLE_RESOURCE).read_text(
-            encoding="utf-8"
-        )
+        return files("tkn_codex_context").joinpath(CONFIG_EXAMPLE_RESOURCE).read_text(encoding="utf-8")
     except (FileNotFoundError, OSError) as exc:
         raise PipelineError(f"packaged config example is unavailable: {exc}") from exc
 
@@ -335,7 +572,7 @@ def initialize_user_config(
 
 
 def config_document(config: AppConfig) -> dict[str, Any]:
-    value = config.model_dump(mode="json")
+    value = _without_null_provider_settings(config.model_dump(mode="json"))
     value["installed_at"] = (
         config.installed_at.astimezone().isoformat(timespec="seconds") if config.installed_at else None
     )
@@ -351,13 +588,12 @@ def initialization_config(
 
     target = (path or global_config_path()).expanduser().absolute()
     if not target.is_file():
-        raise PipelineError(
-            f"config not found: {target}; run `tkn-codex-context config init` first"
-        )
+        raise PipelineError(f"config not found: {target}; run `tkn-codex-context config init` first")
     raw: dict[str, Any] = {}
     removed: list[str] = []
     if target.is_file():
         raw = _read_layer(target)
+        _reject_legacy_generation_config(raw, target)
         raw, removed_summary_prompt = _without_retired_user_prompt(
             raw,
             remove_configured=True,
@@ -369,10 +605,17 @@ def initialization_config(
                 raw.pop(key)
                 removed.append(key)
         raw = _resolve_paths(raw, target.parent)
-    raw.update(_resolve_paths(overrides or {}, Path.cwd().absolute()))
-    raw["installed_at"] = datetime.now().astimezone()
+    merged = _default_config_document()
+    _deep_merge(merged, raw)
+    _apply_runtime_overrides(
+        merged,
+        overrides or {},
+        working=Path.cwd().absolute(),
+        sources={},
+    )
+    merged["installed_at"] = datetime.now().astimezone()
     try:
-        config = AppConfig.model_validate(raw)
+        config = AppConfig.model_validate(merged)
     except Exception as exc:
         raise PipelineError(f"invalid configuration: {exc}") from exc
     return (

@@ -26,6 +26,17 @@ def test_packaged_example_config_uses_portable_home_paths() -> None:
         assert "\\" not in value[key]
         assert value[key].startswith("~/")
     assert value["installed_at"] is None
+    assert value["schema_version"] == 2
+    assert value["generation"] == {
+        "active_provider": "codex",
+        "providers": {
+            "codex": {
+                "model": "gpt-5.6-sol",
+                "reasoning_effort": "high",
+                "executable": "codex",
+            }
+        },
+    }
     assert "summary_prompt" not in value
 
 
@@ -56,9 +67,18 @@ def test_precedence_and_relative_paths(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     write_yaml(
         home / ".tkn/codex_context_pipeline/config.yaml",
-        {"idle_minutes": 10, "model": "global"},
+        {
+            "idle_minutes": 10,
+            "generation": {"providers": {"codex": {"model": "global"}}},
+        },
     )
-    write_yaml(cwd / ".tkn/config.yaml", {"idle_minutes": 20, "model": "local"})
+    write_yaml(
+        cwd / ".tkn/config.yaml",
+        {
+            "idle_minutes": 20,
+            "generation": {"providers": {"codex": {"model": "local"}}},
+        },
+    )
     write_yaml(explicit, {"idle_minutes": 25, "state_root": "state"})
 
     config = load_app_config(
@@ -83,8 +103,17 @@ def test_config_resolution_reports_the_winning_source(
     cwd = tmp_path / "work"
     explicit = tmp_path / "explicit.yaml"
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    write_yaml(home / ".tkn/codex_context_pipeline/config.yaml", {"model": "global"})
-    write_yaml(cwd / ".tkn/config.yaml", {"model": "project", "idle_minutes": 10})
+    write_yaml(
+        home / ".tkn/codex_context_pipeline/config.yaml",
+        {"generation": {"providers": {"codex": {"model": "global"}}}},
+    )
+    write_yaml(
+        cwd / ".tkn/config.yaml",
+        {
+            "generation": {"providers": {"codex": {"model": "project"}}},
+            "idle_minutes": 10,
+        },
+    )
     write_yaml(explicit, {"idle_minutes": 20})
 
     resolution = resolve_app_config(
@@ -96,7 +125,7 @@ def test_config_resolution_reports_the_winning_source(
     assert resolution.config.model == "project"
     assert resolution.config.idle_minutes == 30
     assert resolution.sources["schema_version"] == "built-in defaults"
-    assert resolution.sources["model"].startswith("project:")
+    assert resolution.sources["generation.providers.codex.model"].startswith("project:")
     assert resolution.sources["idle_minutes"] == "CLI option"
     assert [layer["kind"] for layer in resolution.layers] == [
         "global",
@@ -128,6 +157,55 @@ def test_unknown_key_is_rejected(tmp_path: Path) -> None:
     write_yaml(path, {"unknown_setting": True})
     with pytest.raises(PipelineError, match="extra"):
         load_app_config(explicit_path=path, cwd=tmp_path)
+
+
+def test_schema_v1_flat_generation_settings_are_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    write_yaml(path, {"schema_version": 1, "provider": "codex", "model": "gpt-5.6-sol"})
+
+    with pytest.raises(PipelineError, match="schema v1 is no longer supported"):
+        load_app_config(explicit_path=path, cwd=tmp_path)
+
+
+def test_active_provider_requires_matching_provider_settings(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    write_yaml(path, {"generation": {"active_provider": "ollama"}})
+
+    with pytest.raises(PipelineError, match="matching entry under providers"):
+        load_app_config(explicit_path=path, cwd=tmp_path)
+
+
+def test_cli_can_select_an_already_configured_provider_without_repeating_its_model(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    write_yaml(
+        path,
+        {
+            "schema_version": 2,
+            "generation": {
+                "providers": {
+                    "claude-code": {
+                        "model": "claude-sonnet-4-6",
+                        "reasoning_effort": "medium",
+                        "executable": "claude",
+                    }
+                }
+            },
+        },
+    )
+
+    resolution = resolve_app_config(
+        explicit_path=path,
+        cwd=tmp_path,
+        overrides={"provider": "claude-code"},
+    )
+
+    assert resolution.config.provider == "claude-code"
+    assert resolution.config.model == "claude-sonnet-4-6"
+    assert resolution.config.reasoning_effort == "medium"
+    assert resolution.sources["generation.active_provider"] == "CLI option"
+    assert resolution.sources["generation.providers.claude-code.model"].startswith("explicit:")
 
 
 @pytest.mark.parametrize(

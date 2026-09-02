@@ -136,9 +136,13 @@ codex_home: ~/.codex
 data_root: ~/.tkn/codex_context_pipeline/data
 state_root: ~/.tkn/codex_context_pipeline/state
 cache_root: ~/.cache/codex_context_pipeline
-provider: codex
-model: gpt-5.6-sol
-reasoning_effort: high
+generation:
+  active_provider: codex
+  providers:
+    codex:
+      model: gpt-5.6-sol
+      reasoning_effort: high
+      executable: codex
 idle_minutes: 30
 runtime_minutes: 230
 model_timeout_seconds: 1800

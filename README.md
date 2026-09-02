@@ -42,11 +42,11 @@ that storage path does not change the source object's canonical name.
 - [uv](https://docs.astral.sh/uv/)
 - Local Codex app Project state and chat logs under `~/.codex/sessions`
 - One supported inference backend for Thread Note, Decision Record, or Working Context generation:
-  - `codex` on `PATH` when `provider: codex` is selected
+  - `codex` on `PATH` when `generation.active_provider: codex` is selected
     - For Windows, install it with `powershell -ExecutionPolicy Bypass -c "irm https://chatgpt.com/codex/install.ps1 | iex"`
-  - `claude` on `PATH` or an explicit `claude_executable` when `provider: claude-code` is selected
-  - `copilot` on `PATH` or an explicit `copilot_executable` when `provider: github-copilot` is selected
-  - A local Ollama service when `provider: ollama` is selected
+  - `claude` on `PATH` or an explicit `executable` when `generation.active_provider: claude-code` is selected
+  - `copilot` on `PATH` or an explicit `executable` when `generation.active_provider: github-copilot` is selected
+  - A local Ollama service when `generation.active_provider: ollama` is selected
 
 ## Installation
 
@@ -104,11 +104,11 @@ available configuration layers and the winning source for every setting.
 ### Inference providers
 
 The source provider remains Codex: Project metadata and chat evidence are read
-only from the Codex app and `~/.codex/sessions`. The `provider` setting selects
-only the inference backend that converts that evidence into Thread Notes,
-Decision Records, and Working Context.
+only from the Codex app and `~/.codex/sessions`.
+`generation.active_provider` selects only the inference backend that converts
+that evidence into Thread Notes, Decision Records, and Working Context.
 
-| `provider` | Transport | Structured-output contract |
+| Provider ID | Transport | Structured-output contract |
 | --- | --- | --- |
 | `codex` | `codex exec` | Native JSON Schema output |
 | `claude-code` | `claude -p` | `--json-schema` and `structured_output` |
@@ -121,43 +121,67 @@ MCP-style tools disabled. Ollama endpoints are restricted to loopback hosts
 application-owned prompt, schema, renderer, validation, retry, and atomic-write
 pipeline.
 
-Set `provider` and a model understood by that provider in
-`~/.tkn/codex_context_pipeline/config.yaml`. Executable names may be replaced
-with absolute paths when they are not on `PATH`.
+Generation settings use an `active_provider + providers` structure. The active
+provider is one stable provider ID, while `providers` retains each backend's
+own model and transport settings. YAML setting names use `snake_case`; provider
+IDs such as `claude-code` and `github-copilot` remain `kebab-case` values.
+Executable names may be replaced with absolute paths when they are not on
+`PATH`.
 
 ```yaml
-provider: codex
-codex_executable: codex
-claude_executable: claude
-copilot_executable: copilot
-ollama_base_url: http://127.0.0.1:11434
-model: gpt-5.6-sol
-reasoning_effort: high
+schema_version: 2
+generation:
+  active_provider: codex
+  providers:
+    codex:
+      model: gpt-5.6-sol
+      reasoning_effort: high
+      executable: codex
 ```
 
-Provider-specific examples:
+To use another provider, add its provider block and select the same ID as
+`active_provider`. Each configured CLI provider requires `model` and
+`executable`; Ollama requires `model` and `base_url` instead.
+`reasoning_effort` defaults to `high` when omitted.
 
 ```yaml
 # Claude Code
-provider: claude-code
-model: sonnet
-reasoning_effort: high
+generation:
+  active_provider: claude-code
+  providers:
+    claude-code:
+      model: sonnet
+      reasoning_effort: high
+      executable: claude
 ```
 
 ```yaml
 # GitHub Copilot CLI
-provider: github-copilot
-model: <model-supported-by-copilot>
-reasoning_effort: high
+generation:
+  active_provider: github-copilot
+  providers:
+    github-copilot:
+      model: <model-supported-by-copilot>
+      reasoning_effort: high
+      executable: copilot
 ```
 
 ```yaml
 # Ollama
-provider: ollama
-model: qwen3.5:9b
-reasoning_effort: high
-ollama_base_url: http://127.0.0.1:11434
+generation:
+  active_provider: ollama
+  providers:
+    ollama:
+      model: qwen3.5:9b
+      reasoning_effort: high
+      base_url: http://127.0.0.1:11434
 ```
+
+Configuration schema v2 replaces the former flat `provider`, `model`,
+`reasoning_effort`, `*_executable`, and `ollama_base_url` keys. Schema v1 is
+rejected with a migration message so that a partially migrated configuration
+cannot silently select the wrong backend. Move those values into the matching
+provider block and set `schema_version: 2`.
 
 The same values can be overridden as global CLI options placed before the
 command:
