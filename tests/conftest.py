@@ -5,6 +5,16 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def isolate_user_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep default application paths inside each test's temporary directory."""
+
+    isolated_home = tmp_path / "home"
+    isolated_home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: isolated_home))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_cmdline_main(config: pytest.Config) -> None:
     """Reject an explicit pytest base temp directory inside the repository."""

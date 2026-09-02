@@ -116,11 +116,32 @@ def test_force_dry_run_and_apply_preserve_settings_and_remove_old_storage(tmp_pa
 def test_init_refuses_existing_storage_without_force(tmp_path: Path) -> None:
     config_path = tmp_path / "app/config.yaml"
     codex_home = tmp_path / "codex"
+    data_root = tmp_path / "app/data"
+    state_root = tmp_path / "app/state"
+    cache_root = tmp_path / "cache"
     write_app_state(codex_home)
-    write_config(config_path, {"codex_home": str(codex_home)})
+    write_config(
+        config_path,
+        {
+            "codex_home": str(codex_home),
+            "data_root": str(data_root),
+            "state_root": str(state_root),
+            "cache_root": str(cache_root),
+        },
+    )
+    for root in (data_root, state_root, cache_root):
+        root.mkdir(parents=True)
+        (root / "existing.txt").write_text("existing", encoding="utf-8")
+    config_before = config_path.read_bytes()
 
     with pytest.raises(PipelineError, match="init --force --dry-run"):
         initialize_application(config_path, overrides=None, force=False, dry_run=False)
+
+    assert config_path.read_bytes() == config_before
+    assert all(
+        (root / "existing.txt").read_text(encoding="utf-8") == "existing"
+        for root in (data_root, state_root, cache_root)
+    )
 
 
 def test_force_rolls_back_storage_and_config_on_failure(
