@@ -330,6 +330,14 @@ Generated notes are completed and validated in the pipeline cache before being
 committed. A note and its refresh state are treated as one transaction:
 failures restore the previous note and state.
 
+Each source JSONL is decoded once per scan or revalidation into thread
+metadata, evidence events, and the final valid record's top-level timestamp.
+That source event time, not filesystem `mtime`, controls the `installed_at`
+window and idle check and is recorded as `sourceLastEventAt` in refresh state.
+Missing or invalid source event time is excluded and counted explicitly.
+Resolved cwd variants use a bounded cache, and root variants are precomputed
+per Project before event attribution.
+
 Decision Records are rendered and validated before their transaction is
 finalized. New records, resynthesized unreviewed generated records, appended
 provenance, and `decision-build-state.json` are committed together; failures
@@ -354,7 +362,7 @@ Source JSONL files are always read-only.
 The current implementation passed:
 
 ```text
-pytest:      131 passed
+pytest:      181 passed
 Ruff:         passed
 strict mypy:  passed
 uv build:     wheel and source distribution built successfully
@@ -376,6 +384,7 @@ Tests cover:
   Glossary and Taxonomy evidence, unchanged no-op, edited-file protection, and
   atomic artifact/state writes
 - source provenance, redaction, size limits, and status consistency
+- source-event-time windowing, one-pass JSONL decoding, and cached path attribution
 - unchanged no-op and stale-generator regeneration
 - note/state rollback and resumable cache
 - rebuild failure recovery, resume, and atomic cutover
@@ -412,6 +421,12 @@ was performed.
 The projectless count in the backfill scan is lower than the app-state count
 because filtering of internal or otherwise ineligible chats occurs before the
 attribution counters.
+
+On 2026-09-03, a read-only normal-pull dry-run exercised the unified JSONL
+reader and event-time selection against 563 real source logs. It found 110
+eligible threads, zero invalid or missing source event times, zero ambiguous
+threads, one projectless thread, and one unmatched thread. It completed with no
+failed or deferred threads and wrote no report.
 
 On 2026-08-03, a second read-only verification of `decisions build` resolved
 the current Project by internal ID with 22/22 Projects bound and no pending

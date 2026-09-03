@@ -439,11 +439,12 @@ If dry-run reports `reportSummary.selectedCount: 0`, no Thread Note is planned
 for creation or update. `reportPath: null` and
 `reportSummary.processedCount: 0` are normal dry-run behavior.
 
-`reportSummary.scan.ignoredFiles` is the total number of excluded files; the later,
-specialized counters are not a complete breakdown. Files rejected early by
-the date window or idle requirement increment only `ignoredFiles`. It is
-therefore not an error when `ignoredFiles` equals `scan.files` while the other
-exclusion counters remain zero.
+`reportSummary.scan.ignoredFiles` is the total number of excluded files; the
+later, specialized counters are not a complete breakdown. Files rejected early
+by the date window or idle requirement increment only `ignoredFiles`. A source
+without a valid event timestamp also increments
+`excludedWithoutEventTime`. It is therefore not an error when `ignoredFiles`
+is larger than the sum of the specialized counters.
 
 After review, generate the notes:
 
@@ -451,7 +452,14 @@ After review, generate the notes:
 tkn-codex-context thread-notes pull
 ```
 
-Normal pulls process chats that have been idle for at least 30 minutes.
+Normal pulls process chats that have been idle for at least 30 minutes. The
+top-level `timestamp` of the last valid JSONL record is the source event time
+used for both the `installed_at` window and idle check. Filesystem modification
+time is not used as a substitute, so copying, restoring, or synchronizing a
+session log does not move it between normal and backfill windows. JSONL is
+decoded once per scan or revalidation, producing metadata, events, and that
+source event time together. Full dry-run output includes `lastEventAt` for each
+selected thread.
 
 #### Existing Thread Note update behavior
 
@@ -484,7 +492,8 @@ tkn-codex-context thread-notes pull --force
 
 #### Backfill historical chats
 
-`pull --backfill` processes chats from before `installed_at`. It uses the same
+`pull --backfill` processes chats whose last source event is before
+`installed_at`. It uses the same
 fingerprint, schema, and model checks as a normal pull, so unchanged current
 notes are skipped. Dry-run does not call the generative AI or write files.
 
@@ -770,7 +779,9 @@ even when they use the same root; the same internal ID remains one Project when
 its name or roots change.
 
 Thread attribution uses an explicit Codex app assignment first, then a unique
-cwd match against all active roots, then saved historical aliases.
+cwd match against all active roots, then saved historical aliases. Resolved cwd
+variants are cached and root variants are calculated once per Project during a
+scan.
 Projectless or ambiguous threads are excluded and reported.
 
 ## Internal-format boundary

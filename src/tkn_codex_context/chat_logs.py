@@ -60,6 +60,13 @@ class ThreadLog:
         return tuple(message for message in self.messages if message.role == "assistant")
 
 
+@dataclass(frozen=True)
+class ThreadSource:
+    thread_log: ThreadLog | None
+    events: tuple[ChatEvent, ...]
+    last_event_at: str
+
+
 def default_sessions_root() -> Path:
     codex_home = os.environ.get("CODEX_HOME")
     if codex_home:
@@ -143,11 +150,6 @@ def iter_json_line_records(path: Path) -> Iterable[tuple[int, dict[str, Any]]]:
                 yield line_number, value
 
 
-def iter_json_lines(path: Path) -> Iterable[dict[str, Any]]:
-    for _line_number, value in iter_json_line_records(path):
-        yield value
-
-
 def event_payload_text(value: Any) -> str:
     if isinstance(value, str):
         return value
@@ -159,13 +161,39 @@ def event_payload_text(value: Any) -> str:
         return str(value)
 
 
-def read_thread_events(path: Path) -> tuple[ChatEvent, ...]:
-    """Extract user, assistant, tool, and validation evidence in source order."""
+def read_thread_source(path: Path) -> ThreadSource:
+    """Read metadata, events, and source event time in one JSONL pass."""
     events: list[ChatEvent] = []
-    seen_messages: set[tuple[str, str, str, str]] = set()
+    seen_events: set[tuple[str, str, str, str]] = set()
+    messages: list[ChatMessage] = []
+    seen_messages: set[tuple[str, str, str]] = set()
+    meta: dict[str, Any] | None = None
     thread_cwd = ""
     turn_cwd = ""
     turn_id = ""
+    last_event_at = ""
+
+    def append_message(role: str, source: str, text: str, timestamp: str) -> None:
+        if role == "user":
+            text = clean_user_text(text)
+        text = text.strip()
+        if not text:
+            return
+        effective_cwd = turn_cwd or str((meta or {}).get("cwd") or "")
+        key = (role, turn_id, normalize_message_text(text))
+        if key in seen_messages:
+            return
+        seen_messages.add(key)
+        messages.append(
+            ChatMessage(
+                role=role,
+                source=source,
+                text=text,
+                timestamp=timestamp,
+                turn_id=turn_id,
+                cwd=effective_cwd,
+            )
+        )
 
     def append_event(
         line_number: int,
@@ -184,9 +212,9 @@ def read_thread_events(path: Path) -> tuple[ChatEvent, ...]:
             return
         if dedupe_message:
             key = (kind, actor, turn_id, normalize_message_text(cleaned))
-            if key in seen_messages:
+            if key in seen_events:
                 return
-            seen_messages.add(key)
+            seen_events.add(key)
         events.append(
             ChatEvent(
                 id=f"L{line_number:06d}",
@@ -213,8 +241,10 @@ def read_thread_events(path: Path) -> tuple[ChatEvent, ...]:
         payload_value = obj.get("payload")
         payload: dict[str, Any] = payload_value if isinstance(payload_value, dict) else {}
         timestamp = str(obj.get("timestamp") or "")
+        last_event_at = timestamp
 
         if event_type == "session_meta":
+            meta = payload
             thread_cwd = str(payload.get("cwd") or thread_cwd)
             turn_cwd = thread_cwd
             continue
@@ -223,21 +253,26 @@ def read_thread_events(path: Path) -> tuple[ChatEvent, ...]:
             turn_cwd = str(payload.get("cwd") or thread_cwd)
             continue
         if not event_type and obj.get("id") and "instructions" in obj:
+            if meta is None:
+                meta = obj
             thread_cwd = str(obj.get("cwd") or thread_cwd)
             turn_cwd = thread_cwd
             continue
 
         if event_type == "response_item":
             payload_type = str(payload.get("type") or "")
+            role = str(payload.get("role") or "")
+            text = content_to_text(payload.get("content"))
+            if role in {"user", "assistant"}:
+                append_message(role, "response_item", text, timestamp)
             if payload_type in {"", "message"}:
-                role = str(payload.get("role") or "")
                 if role in {"user", "assistant"}:
                     append_event(
                         line_number,
                         f"{role}_message",
                         role,
                         str(payload.get("phase") or ""),
-                        content_to_text(payload.get("content")),
+                        text,
                         timestamp,
                         dedupe_message=True,
                     )
@@ -280,12 +315,19 @@ def read_thread_events(path: Path) -> tuple[ChatEvent, ...]:
         if event_type == "message":
             role = str(obj.get("role") or "")
             if role in {"user", "assistant"}:
+                text = content_to_text(obj.get("content"))
+                append_message(
+                    role,
+                    "legacy_message",
+                    text,
+                    timestamp or str((meta or {}).get("timestamp") or ""),
+                )
                 append_event(
                     line_number,
                     f"{role}_message",
                     role,
                     "legacy",
-                    content_to_text(obj.get("content")),
+                    text,
                     timestamp,
                     dedupe_message=True,
                 )
@@ -294,22 +336,26 @@ def read_thread_events(path: Path) -> tuple[ChatEvent, ...]:
         if event_type == "event_msg":
             payload_type = str(payload.get("type") or "")
             if payload_type == "user_message":
+                text = str(payload.get("message") or "")
+                append_message("user", "event_msg", text, timestamp)
                 append_event(
                     line_number,
                     "user_message",
                     "user",
                     "",
-                    str(payload.get("message") or ""),
+                    text,
                     timestamp,
                     dedupe_message=True,
                 )
             elif payload_type == "agent_message":
+                text = str(payload.get("message") or "")
+                append_message("assistant", "event_msg", text, timestamp)
                 append_event(
                     line_number,
                     "assistant_message",
                     "assistant",
                     str(payload.get("phase") or ""),
-                    str(payload.get("message") or ""),
+                    text,
                     timestamp,
                     dedupe_message=True,
                 )
@@ -328,7 +374,31 @@ def read_thread_events(path: Path) -> tuple[ChatEvent, ...]:
                         timestamp,
                     )
 
-    return tuple(events)
+    thread_log: ThreadLog | None = None
+    if meta:
+        git_value = meta.get("git")
+        git: dict[str, Any] = git_value if isinstance(git_value, dict) else {}
+        thread_log = ThreadLog(
+            id=str(meta.get("id") or meta.get("session_id") or ""),
+            timestamp=str(meta.get("timestamp") or ""),
+            cwd=str(meta.get("cwd") or ""),
+            path=str(path),
+            originator=str(meta.get("originator") or ""),
+            source=str(meta.get("source") or ""),
+            thread_source=str(meta.get("thread_source") or ""),
+            repository_url=str(git.get("repository_url") or ""),
+            messages=tuple(messages),
+        )
+    return ThreadSource(
+        thread_log=thread_log,
+        events=tuple(events),
+        last_event_at=last_event_at,
+    )
+
+
+def read_thread_events(path: Path) -> tuple[ChatEvent, ...]:
+    """Extract user, assistant, tool, and validation evidence in source order."""
+    return read_thread_source(path).events
 
 
 def select_events_for_roots(
@@ -365,96 +435,7 @@ def fingerprint_events(
 
 
 def read_thread_log(path: Path) -> ThreadLog | None:
-    meta: dict[str, Any] | None = None
-    messages: list[ChatMessage] = []
-    seen: set[tuple[str, str, str]] = set()
-    turn_id = ""
-    turn_cwd = ""
-
-    def append_message(role: str, source: str, text: str, timestamp: str) -> None:
-        if role == "user":
-            text = clean_user_text(text)
-        text = text.strip()
-        if not text:
-            return
-        effective_cwd = turn_cwd or str((meta or {}).get("cwd") or "")
-        key = (role, turn_id, normalize_message_text(text))
-        if key in seen:
-            return
-        seen.add(key)
-        messages.append(
-            ChatMessage(
-                role=role,
-                source=source,
-                text=text,
-                timestamp=timestamp,
-                turn_id=turn_id,
-                cwd=effective_cwd,
-            )
-        )
-
-    for obj in iter_json_lines(path):
-        event_type = obj.get("type")
-        payload_value = obj.get("payload")
-        payload: dict[str, Any] = payload_value if isinstance(payload_value, dict) else {}
-        timestamp = str(obj.get("timestamp") or "")
-
-        if meta is None and not event_type and obj.get("id") and obj.get("timestamp") and "instructions" in obj:
-            # Legacy Codex JSONL placed thread metadata directly in the first object.
-            meta = obj
-            turn_cwd = str(obj.get("cwd") or "")
-            continue
-
-        if event_type == "session_meta" and isinstance(payload, dict):
-            meta = payload
-            turn_cwd = str(payload.get("cwd") or "")
-            continue
-
-        if event_type == "turn_context" and isinstance(payload, dict):
-            turn_id = str(payload.get("turn_id") or "")
-            turn_cwd = str(payload.get("cwd") or (meta or {}).get("cwd") or "")
-            continue
-
-        if event_type == "response_item" and isinstance(payload, dict):
-            role = payload.get("role")
-            if role in {"user", "assistant"}:
-                append_message(role, "response_item", content_to_text(payload.get("content")), timestamp)
-            continue
-
-        if event_type == "message":
-            role = obj.get("role")
-            if role in {"user", "assistant"}:
-                append_message(
-                    role,
-                    "legacy_message",
-                    content_to_text(obj.get("content")),
-                    timestamp or str((meta or {}).get("timestamp") or ""),
-                )
-            continue
-
-        if event_type == "event_msg" and isinstance(payload, dict):
-            payload_type = payload.get("type")
-            if payload_type == "user_message":
-                append_message("user", "event_msg", str(payload.get("message") or ""), timestamp)
-            elif payload_type == "agent_message":
-                append_message("assistant", "event_msg", str(payload.get("message") or ""), timestamp)
-
-    if not meta:
-        return None
-
-    git_value = meta.get("git")
-    git: dict[str, Any] = git_value if isinstance(git_value, dict) else {}
-    return ThreadLog(
-        id=str(meta.get("id") or meta.get("session_id") or ""),
-        timestamp=str(meta.get("timestamp") or ""),
-        cwd=str(meta.get("cwd") or ""),
-        path=str(path),
-        originator=str(meta.get("originator") or ""),
-        source=str(meta.get("source") or ""),
-        thread_source=str(meta.get("thread_source") or ""),
-        repository_url=str(git.get("repository_url") or ""),
-        messages=tuple(messages),
-    )
+    return read_thread_source(path).thread_log
 
 
 def is_approval_review(thread_log: ThreadLog) -> bool:

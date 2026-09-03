@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tkn-codex-context-pipeline"
-version = "0.3.3"
+version = "0.3.4"
 description = "Distill local Codex chats into Thread Notes, Decision Records, and Working Context dashboards."
 readme = "README.md"
 requires-python = ">=3.11"

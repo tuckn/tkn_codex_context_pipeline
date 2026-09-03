@@ -407,10 +407,11 @@ dry-runで`reportSummary.selectedCount: 0`なら、今回作成・更新するTh
 ありません。`reportPath: null`と`reportSummary.processedCount: 0`はdry-runの
 通常動作です。
 
-`reportSummary.scan.ignoredFiles`は対象外fileの合計であり、後続の個別counterは完全な内訳では
-ありません。日時範囲またはidle条件で早期に除外されたfileは、
-`ignoredFiles`だけが増えます。そのため`ignoredFiles`が全file数と同じで、
-他の除外counterが0でもエラーではありません。
+`reportSummary.scan.ignoredFiles`は対象外fileの合計であり、後続の個別counterは完全な
+内訳ではありません。日時範囲またはidle条件で早期に除外されたfileは、
+`ignoredFiles`だけが増えます。有効なevent timestampがないsourceは、
+`excludedWithoutEventTime`も増えます。そのため`ignoredFiles`が個別counterの合計より
+大きくてもエラーではありません。
 
 確認後に生成します。
 
@@ -418,7 +419,12 @@ dry-runで`reportSummary.selectedCount: 0`なら、今回作成・更新するTh
 tkn-codex-context thread-notes pull
 ```
 
-通常のpullは30分以上idleのchatだけを処理します。過去分は明示的に実行します。
+通常のpullは30分以上idleのchatだけを処理します。`installed_at`による期間分割とidle
+判定には、JSONLで最後に有効だったrecordのtop-level `timestamp`をsource event time
+として使用します。filesystemの更新時刻では代用しないため、session logのcopy、restore、
+同期によって通常処理とbackfillの間を移動しません。1回のscanまたは再検証につきJSONLを
+1回だけdecodeし、metadata、events、source event timeを一緒に取得します。dry-runの
+完全出力では、選択した各threadの`lastEventAt`も確認できます。過去分は明示的に実行します。
 
 #### 既存Thread Noteの更新判定
 
@@ -450,7 +456,7 @@ tkn-codex-context thread-notes pull --force
 
 #### 過去chatをbackfillする
 
-`pull --backfill`は、`installed_at`より前のchatを取り込みます。通常のpullと
+`pull --backfill`は、最後のsource eventが`installed_at`より前のchatを取り込みます。通常のpullと
 同じfingerprint・schema・model判定を使用するため、変更のない最新ノートは
 スキップします。dry-runでは生成AIも書き込みも発生しません。
 
@@ -703,7 +709,8 @@ Project IDをそのまま使用します。`--project-id`でNameまたはCURRENT
 同じ内部IDなら名前やrootが変わっても同じProjectとして扱います。
 
 threadは、Codex appの明示assignment、全active rootに対する一意なcwd一致、
-保存済みhistorical aliasの順で同定します。projectlessまたはambiguousなthreadは
+保存済みhistorical aliasの順で同定します。cwdの解決済みvariantはcacheし、rootの
+variantはscan中にProjectごとに1回計算します。projectlessまたはambiguousなthreadは
 除外してreportへ残します。
 
 ## Codex内部形式への依存

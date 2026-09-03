@@ -11,7 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from tkn_codex_context.chat_logs import ChatEvent, read_thread_events
+import tkn_codex_context.chat_logs as chat_logs
+from tkn_codex_context.chat_logs import ChatEvent, read_thread_events, read_thread_source
 from tkn_codex_context.thread_notes import (
     Candidate,
     CodexSummarizer,
@@ -23,7 +24,9 @@ from tkn_codex_context.thread_notes import (
     execute_rebuild,
     load_config,
     make_config,
+    path_variants,
     prepare_events,
+    project_roots,
     render_note,
     scan_candidates,
     validate_note_data,
@@ -35,38 +38,50 @@ def json_line(event_type: str, payload: dict, timestamp: str) -> str:
     return json.dumps({"timestamp": timestamp, "type": event_type, "payload": payload})
 
 
-def write_chat(path: Path, *, thread_id: str, cwd: Path, request: str = "do work") -> None:
+def write_chat(
+    path: Path,
+    *,
+    thread_id: str,
+    cwd: Path,
+    request: str = "do work",
+    started_at: str = "2026-07-01T00:00:00Z",
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+
+    def event_time(seconds: int) -> str:
+        return (started + timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
+
     lines = [
         json_line(
             "session_meta",
             {
                 "id": thread_id,
-                "timestamp": "2026-07-01T00:00:00Z",
+                "timestamp": started_at,
                 "cwd": str(cwd),
                 "thread_source": "user",
             },
-            "2026-07-01T00:00:00Z",
+            event_time(0),
         ),
         json_line(
             "turn_context",
             {"turn_id": "turn-1", "cwd": str(cwd)},
-            "2026-07-01T00:00:01Z",
+            event_time(1),
         ),
         json_line(
             "response_item",
             {"type": "message", "role": "user", "content": [{"text": request}]},
-            "2026-07-01T00:00:02Z",
+            event_time(2),
         ),
         json_line(
             "event_msg",
             {"type": "user_message", "message": request},
-            "2026-07-01T00:00:02Z",
+            event_time(2),
         ),
         json_line(
             "response_item",
             {"type": "custom_tool_call", "name": "exec", "input": {"cmd": "test"}},
-            "2026-07-01T00:00:03Z",
+            event_time(3),
         ),
         json_line(
             "response_item",
@@ -75,7 +90,7 @@ def write_chat(path: Path, *, thread_id: str, cwd: Path, request: str = "do work
                 "call_id": "call-1",
                 "output": "password=0123456789abcdef and tests passed",
             },
-            "2026-07-01T00:00:04Z",
+            event_time(4),
         ),
         json_line(
             "response_item",
@@ -85,7 +100,7 @@ def write_chat(path: Path, *, thread_id: str, cwd: Path, request: str = "do work
                 "phase": "final_answer",
                 "content": [{"text": "completed"}],
             },
-            "2026-07-01T00:00:05Z",
+            event_time(5),
         ),
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -158,6 +173,20 @@ class MutatingSummarizer:
         return note_data(candidate)
 
 
+class ActivityOnlyMutatingSummarizer:
+    def generate(self, candidate: Candidate) -> dict:
+        with candidate.source_path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json_line(
+                    "event_msg",
+                    {"type": "token_count", "input_tokens": 1},
+                    "2026-07-01T00:00:06Z",
+                )
+                + "\n"
+            )
+        return note_data(candidate)
+
+
 class ThreadNotePipelineTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -204,6 +233,24 @@ class ThreadNotePipelineTests(unittest.TestCase):
         self.assertIn("[REDACTED]", tool_result.text)
         self.assertNotIn("0123456789abcdef", tool_result.text)
 
+    def test_thread_source_reads_metadata_events_and_last_event_time_once(self) -> None:
+        path = self.sessions / "chat.jsonl"
+        write_chat(path, thread_id="thread-1", cwd=self.repo)
+
+        with patch.object(
+            chat_logs,
+            "iter_json_line_records",
+            wraps=chat_logs.iter_json_line_records,
+        ) as read_records:
+            source = read_thread_source(path)
+
+        self.assertEqual(1, read_records.call_count)
+        self.assertIsNotNone(source.thread_log)
+        assert source.thread_log is not None
+        self.assertEqual("thread-1", source.thread_log.id)
+        self.assertEqual(4, len(source.events))
+        self.assertEqual("2026-07-01T00:00:05Z", source.last_event_at)
+
     def test_chunking_preserves_event_boundaries(self) -> None:
         path = self.sessions / "chat.jsonl"
         write_chat(path, thread_id="thread-1", cwd=self.repo)
@@ -230,11 +277,16 @@ class ThreadNotePipelineTests(unittest.TestCase):
 
         self.assertEqual(str(launcher.absolute()), configured.codex_bin)
 
-    def test_daily_scan_skips_preinstallation_history_but_backfill_finds_it(self) -> None:
+    def test_event_time_selects_preinstallation_history_even_when_mtime_is_new(self) -> None:
         path = self.sessions / "2025" / "12" / "31" / "old.jsonl"
-        write_chat(path, thread_id="thread-old", cwd=self.repo)
-        old = datetime(2025, 12, 31).astimezone().timestamp()
-        os.utime(path, (old, old))
+        write_chat(
+            path,
+            thread_id="thread-old",
+            cwd=self.repo,
+            started_at="2025-12-31T00:00:00Z",
+        )
+        current_mtime = datetime.now().astimezone().timestamp()
+        os.utime(path, (current_mtime, current_mtime))
 
         daily, _counts = scan_candidates(self.config, [self.project])
         backfill, _counts = scan_candidates(self.config, [self.project], backfill=True)
@@ -252,6 +304,33 @@ class ThreadNotePipelineTests(unittest.TestCase):
         )
 
         self.assertEqual([], candidates)
+
+    def test_scan_reports_source_without_event_timestamp(self) -> None:
+        path = self.sessions / "missing-time.jsonl"
+        write_chat(path, thread_id="thread-missing-time", cwd=self.repo)
+        records = path.read_text(encoding="utf-8").splitlines()
+        final_record = json.loads(records[-1])
+        final_record.pop("timestamp", None)
+        records[-1] = json.dumps(final_record)
+        path.write_text("\n".join(records) + "\n", encoding="utf-8")
+
+        candidates, counts = scan_candidates(self.config, [self.project])
+
+        self.assertEqual([], candidates)
+        self.assertEqual(1, counts["ignoredFiles"])
+        self.assertEqual(1, counts["excludedWithoutEventTime"])
+
+    def test_scan_reads_each_jsonl_once(self) -> None:
+        write_chat(self.sessions / "chat.jsonl", thread_id="thread-1", cwd=self.repo)
+
+        with patch(
+            "tkn_codex_context.thread_notes.read_thread_source",
+            wraps=read_thread_source,
+        ) as read_source:
+            candidates, _counts = scan_candidates(self.config, [self.project])
+
+        self.assertEqual(["thread-1"], [item.thread_id for item in candidates])
+        self.assertEqual(1, read_source.call_count)
 
     def test_secondary_root_is_active_and_explicit_assignment_precedes_cwd(self) -> None:
         secondary = self.root / "secondary"
@@ -301,16 +380,25 @@ class ThreadNotePipelineTests(unittest.TestCase):
         )
         project = Project("project-1", "Project 1", target, self.context)
         original_resolve = Path.resolve
+        resolve_calls = 0
 
         def resolve_alias(path: Path, strict: bool = False) -> Path:
+            nonlocal resolve_calls
+            resolve_calls += 1
             try:
                 relative = path.relative_to(alias)
             except ValueError:
                 return original_resolve(path, strict=strict)
             return target / relative
 
+        path_variants.cache_clear()
+        project_roots.cache_clear()
         with patch.object(Path, "resolve", new=resolve_alias):
             self.assertTrue(event_matches_project(event, project))
+            self.assertTrue(event_matches_project(event, project))
+        self.assertEqual(2, resolve_calls)
+        path_variants.cache_clear()
+        project_roots.cache_clear()
 
     def test_projectless_and_ambiguous_threads_are_excluded(self) -> None:
         nested = self.repo / "nested"
@@ -348,13 +436,14 @@ class ThreadNotePipelineTests(unittest.TestCase):
 
     def test_daily_scan_requires_idle_source(self) -> None:
         path = self.sessions / "chat.jsonl"
-        write_chat(path, thread_id="thread-1", cwd=self.repo)
-        current = datetime.now().astimezone().timestamp()
-        os.utime(path, (current, current))
+        recent_start = (datetime.now().astimezone() - timedelta(seconds=10)).isoformat()
+        write_chat(path, thread_id="thread-1", cwd=self.repo, started_at=recent_start)
 
         active, _counts = scan_candidates(self.config, [self.project])
-        old = (datetime.now().astimezone() - timedelta(hours=1)).timestamp()
-        os.utime(path, (old, old))
+        old_start = (datetime.now().astimezone() - timedelta(hours=1)).isoformat()
+        write_chat(path, thread_id="thread-1", cwd=self.repo, started_at=old_start)
+        current_mtime = datetime.now().astimezone().timestamp()
+        os.utime(path, (current_mtime, current_mtime))
         idle, _counts = scan_candidates(self.config, [self.project])
 
         self.assertEqual([], active)
@@ -392,7 +481,8 @@ class ThreadNotePipelineTests(unittest.TestCase):
         self.assertIn("### Request", text)
         self.assertIn("### Reported Result", text)
         state = json.loads(self.project.state_path.read_text(encoding="utf-8"))
-        self.assertIn("thread-1", state["sources"]["windows"]["threads"])
+        thread_state = state["sources"]["windows"]["threads"]["thread-1"]
+        self.assertEqual("2026-07-01T00:00:05Z", thread_state["sourceLastEventAt"])
 
         with path.open("a", encoding="utf-8") as handle:
             handle.write(
@@ -573,6 +663,22 @@ class ThreadNotePipelineTests(unittest.TestCase):
 
         self.assertEqual([], report["processed"])
         self.assertEqual(1, len(report["failed"]))
+        self.assertFalse(self.project.thread_notes_path.exists())
+        self.assertFalse(self.project.state_path.exists())
+
+    def test_new_source_activity_during_generation_is_not_written(self) -> None:
+        write_chat(self.sessions / "chat.jsonl", thread_id="thread-1", cwd=self.repo)
+
+        report, _report_path = execute_pipeline(
+            self.config,
+            [self.project],
+            summarizer=ActivityOnlyMutatingSummarizer(),
+            cache_root=self.cache,
+        )
+
+        self.assertEqual([], report["processed"])
+        self.assertEqual(1, len(report["failed"]))
+        self.assertIn("source log changed", report["failed"][0]["error"])
         self.assertFalse(self.project.thread_notes_path.exists())
         self.assertFalse(self.project.state_path.exists())
 

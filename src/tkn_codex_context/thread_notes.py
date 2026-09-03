@@ -14,6 +14,7 @@ from collections.abc import Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Protocol
@@ -27,8 +28,7 @@ from .chat_logs import (
     is_known_internal_thread,
     normalize_path_text,
     path_is_within,
-    read_thread_events,
-    read_thread_log,
+    read_thread_source,
     source_ref,
 )
 from .common import frontmatter, slugify
@@ -174,8 +174,7 @@ class Candidate:
     source_relative_ref: str
     fingerprint: str
     events: tuple[ChatEvent, ...]
-    source_mtime_ns: int
-    source_size: int
+    source_last_event_at: str
 
 
 @dataclass(frozen=True)
@@ -458,6 +457,7 @@ def update_refresh_state(
     processed_at = now_iso()
     source["threads"][candidate.thread_id] = {
         "fingerprint": candidate.fingerprint,
+        "sourceLastEventAt": candidate.source_last_event_at or None,
         "generationFingerprint": generation_fingerprint(config, candidate),
         "threadNoteSchemaVersion": THREAD_NOTE_SCHEMA_VERSION,
         "generatorProvider": config.provider,
@@ -482,6 +482,7 @@ def update_refresh_state(
     atomic_write_json(project.state_path, state)
 
 
+@lru_cache(maxsize=8192)
 def path_variants(value: str | Path) -> tuple[str, ...]:
     path = Path(value).expanduser().absolute()
     values: list[str] = []
@@ -493,6 +494,7 @@ def path_variants(value: str | Path) -> tuple[str, ...]:
     return tuple(dict.fromkeys(values))
 
 
+@lru_cache(maxsize=512)
 def project_roots(project: Project) -> tuple[str, ...]:
     values: list[str] = []
     for root in (
@@ -517,10 +519,14 @@ def project_with_state_roots(
 
 
 def event_matches_project(event: ChatEvent, project: Project) -> bool:
+    return event_matches_roots(event, project_roots(project))
+
+
+def event_matches_roots(event: ChatEvent, roots: Sequence[str]) -> bool:
     return any(
         path_is_within(cwd, root)
         for cwd in path_variants(event.cwd)
-        for root in project_roots(project)
+        for root in roots
     )
 
 
@@ -533,7 +539,17 @@ def events_for_project(
 
     if thread_id in project.assigned_thread_ids:
         return tuple(events)
-    return tuple(event for event in events if event_matches_project(event, project))
+    roots = project_roots(project)
+    return tuple(event for event in events if event_matches_roots(event, roots))
+
+
+def source_event_time(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return parse_datetime(value)
+    except PipelineError:
+        return None
 
 
 def candidate_for_project(
@@ -543,20 +559,22 @@ def candidate_for_project(
     *,
     backfill: bool,
 ) -> Candidate | None:
-    stat = path.stat()
-    if not backfill and datetime.fromtimestamp(stat.st_mtime, tz=now_local().tzinfo) < parse_datetime(
-        config.installed_at
-    ):
+    source = read_thread_source(path)
+    last_event_at = source_event_time(source.last_event_at)
+    if last_event_at is None:
+        return None
+    watermark = parse_datetime(config.installed_at)
+    if (not backfill and last_event_at < watermark) or (backfill and last_event_at >= watermark):
         return None
     idle_cutoff = now_local() - timedelta(minutes=config.idle_minutes)
-    if datetime.fromtimestamp(stat.st_mtime, tz=idle_cutoff.tzinfo) > idle_cutoff:
+    if last_event_at > idle_cutoff:
         return None
-    thread_log = read_thread_log(path)
+    thread_log = source.thread_log
     if not thread_log or is_approval_review(thread_log) or is_known_internal_thread(thread_log):
         return None
     if not has_clean_user_message(thread_log):
         return None
-    events = events_for_project(thread_log.id, read_thread_events(path), project)
+    events = events_for_project(thread_log.id, source.events, project)
     if not any(event.kind == "user_message" for event in events):
         return None
     relative_ref = source_ref(path, config.sessions_root)
@@ -570,8 +588,7 @@ def candidate_for_project(
         source_relative_ref=relative_ref,
         fingerprint=fingerprint_events(thread_log.id, events, qualified_ref),
         events=events,
-        source_mtime_ns=stat.st_mtime_ns,
-        source_size=stat.st_size,
+        source_last_event_at=source.last_event_at,
     )
 
 
@@ -606,6 +623,9 @@ def scan_candidates(
         raise PipelineError(f"unknown or inactive projectId: {', '.join(sorted(missing))}")
     states = {project.project_id: load_refresh_state(project, config) for project in selected_projects}
     selected_projects = [project_with_state_roots(project, states[project.project_id]) for project in selected_projects]
+    project_root_sets = {
+        project.project_id: project_roots(project) for project in selected_projects
+    }
     groups: dict[str, list[Candidate]] = {project.project_id: [] for project in selected_projects}
     counts = {
         "files": 0,
@@ -613,6 +633,7 @@ def scan_candidates(
         "unchanged": 0,
         "staleGenerator": 0,
         "ignoredFiles": 0,
+        "excludedWithoutEventTime": 0,
         "excludedApprovalOrInternal": 0,
         "excludedWithoutUserMessage": 0,
         "assigned": 0,
@@ -629,19 +650,23 @@ def scan_candidates(
             if prior != project.project_id:
                 raise PipelineError(f"thread {thread_id} is assigned to multiple context projects")
     thread_filter = set(thread_ids)
+    watermark = parse_datetime(config.installed_at)
+    idle_cutoff = now_local() - timedelta(minutes=config.idle_minutes)
     for path in sorted(config.sessions_root.rglob("*.jsonl")):
         counts["files"] += 1
-        stat = path.stat()
-        modified_at = datetime.fromtimestamp(stat.st_mtime, tz=now_local().tzinfo)
-        watermark = parse_datetime(config.installed_at)
-        if (not backfill and modified_at < watermark) or (backfill and modified_at >= watermark):
+        source = read_thread_source(path)
+        last_event_at = source_event_time(source.last_event_at)
+        if last_event_at is None:
+            counts["ignoredFiles"] += 1
+            counts["excludedWithoutEventTime"] += 1
+            continue
+        if (not backfill and last_event_at < watermark) or (backfill and last_event_at >= watermark):
             counts["ignoredFiles"] += 1
             continue
-        idle_cutoff = now_local() - timedelta(minutes=config.idle_minutes)
-        if datetime.fromtimestamp(stat.st_mtime, tz=idle_cutoff.tzinfo) > idle_cutoff:
+        if last_event_at > idle_cutoff:
             counts["ignoredFiles"] += 1
             continue
-        thread_log = read_thread_log(path)
+        thread_log = source.thread_log
         if not thread_log:
             counts["ignoredFiles"] += 1
             continue
@@ -653,7 +678,7 @@ def scan_candidates(
             counts["ignoredFiles"] += 1
             counts["excludedWithoutUserMessage"] += 1
             continue
-        all_events = read_thread_events(path)
+        all_events = source.events
         if thread_log.id in projectless:
             counts["projectless"] += 1
             counts["ignoredFiles"] += 1
@@ -672,7 +697,10 @@ def scan_candidates(
             matched_projects = [
                 project
                 for project in selected_projects
-                if any(event_matches_project(event, project) for event in all_events)
+                if any(
+                    event_matches_roots(event, project_root_sets[project.project_id])
+                    for event in all_events
+                )
             ]
         if len(matched_projects) > 1:
             counts["ambiguous"] += 1
@@ -700,8 +728,7 @@ def scan_candidates(
                 source_relative_ref=relative_ref,
                 fingerprint=fingerprint_events(thread_log.id, events, qualified_ref),
                 events=events,
-                source_mtime_ns=stat.st_mtime_ns,
-                source_size=stat.st_size,
+                source_last_event_at=source.last_event_at,
             )
             if thread_filter and candidate.thread_id not in thread_filter:
                 continue
@@ -1189,19 +1216,19 @@ def render_note(
 
 def revalidate_candidate(candidate: Candidate, config: PipelineConfig) -> None:
     try:
-        candidate.source_path.stat()
+        source = read_thread_source(candidate.source_path)
     except OSError as exc:
         raise PipelineError(f"source log disappeared: {candidate.source_relative_ref}") from exc
-    thread_log = read_thread_log(candidate.source_path)
+    thread_log = source.thread_log
     if not thread_log:
         raise PipelineError(f"source log no longer has metadata: {candidate.source_relative_ref}")
     events = events_for_project(
         thread_log.id,
-        read_thread_events(candidate.source_path),
+        source.events,
         candidate.project,
     )
     current = fingerprint_events(thread_log.id, events, candidate.source_ref)
-    if current != candidate.fingerprint:
+    if current != candidate.fingerprint or source.last_event_at != candidate.source_last_event_at:
         raise PipelineError(f"source log changed during generation: {candidate.source_relative_ref}")
 
 
@@ -1364,7 +1391,8 @@ def scan_rebuild_candidates(
     }
     for path in sorted(config.sessions_root.rglob("*.jsonl")):
         counts["files"] += 1
-        thread_log = read_thread_log(path)
+        source = read_thread_source(path)
+        thread_log = source.thread_log
         if not thread_log:
             counts["unmatchedProject"] += 1
             continue
@@ -1374,8 +1402,7 @@ def scan_rebuild_candidates(
         ):
             counts["unmatchedProject"] += 1
             continue
-        all_events = read_thread_events(path)
-        project_events = events_for_project(thread_log.id, all_events, project)
+        project_events = events_for_project(thread_log.id, source.events, project)
         if not project_events:
             counts["unmatchedProject"] += 1
             continue
@@ -1388,7 +1415,6 @@ def scan_rebuild_candidates(
         ):
             counts["excludedWithoutUserMessage"] += 1
             continue
-        stat = path.stat()
         relative_ref = source_ref(path, config.sessions_root)
         qualified_ref = f"{config.source_id}/{relative_ref}"
         candidates.append(
@@ -1401,8 +1427,7 @@ def scan_rebuild_candidates(
                 source_relative_ref=relative_ref,
                 fingerprint=fingerprint_events(thread_log.id, project_events, qualified_ref),
                 events=project_events,
-                source_mtime_ns=stat.st_mtime_ns,
-                source_size=stat.st_size,
+                source_last_event_at=source.last_event_at,
             )
         )
         counts["eligible"] += 1
@@ -1650,6 +1675,7 @@ def rebuild_state(
     for candidate in candidates:
         threads[candidate.thread_id] = {
             "fingerprint": candidate.fingerprint,
+            "sourceLastEventAt": candidate.source_last_event_at or None,
             "generationFingerprint": generation_fingerprint(config, candidate),
             "threadNoteSchemaVersion": THREAD_NOTE_SCHEMA_VERSION,
             "generatorProvider": config.provider,
@@ -1705,6 +1731,7 @@ def rebuild_work_signature(
         "candidates": {
             candidate.thread_id: {
                 "sourceFingerprint": candidate.fingerprint,
+                "sourceLastEventAt": candidate.source_last_event_at or None,
                 "generationFingerprint": generation_fingerprint(config, candidate),
             }
             for candidate in candidates
@@ -2218,6 +2245,7 @@ def execute_pipeline(
                 "threadId": item.thread_id,
                 "sourceRef": item.source_ref,
                 "startedAt": item.started_at,
+                "lastEventAt": item.source_last_event_at,
             }
             for item in candidates
         ]
