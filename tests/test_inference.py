@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+import tkn_codex_context.inference as inference
 from tkn_codex_context.inference import (
     InferenceExecutionError,
     invoke_structured,
@@ -59,11 +60,40 @@ def test_explicit_provider_executable_path_is_preserved(tmp_path: Path) -> None:
     )
 
 
+def test_codex_rejects_explicit_windowsapps_executable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "Microsoft" / "WindowsApps" / "codex.exe"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"test")
+    monkeypatch.setattr(inference, "os", SimpleNamespace(name="nt"))
+
+    with pytest.raises(InferenceExecutionError, match="Codex App WindowsApps executable"):
+        resolve_provider_executable(str(executable), provider="codex")
+
+
+def test_codex_rejects_windowsapps_executable_resolved_from_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolved = r"C:\Users\ExampleUser\AppData\Local\Microsoft\WindowsApps\codex.exe"
+    monkeypatch.setattr(inference, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(inference.shutil, "which", lambda _value: resolved)
+
+    with pytest.raises(InferenceExecutionError, match="Codex App WindowsApps executable"):
+        resolve_provider_executable("codex", provider="codex")
+
+
 def test_codex_uses_native_output_schema(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
+    resolver_calls: list[tuple[str, str]] = []
+
+    def fake_resolve(value: str, *, provider: str) -> str:
+        resolver_calls.append((value, provider))
+        return "resolved-codex"
 
     def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         captured["command"] = command
@@ -72,7 +102,8 @@ def test_codex_uses_native_output_schema(
         output_path.write_text('{"answer":"codex"}', encoding="utf-8")
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-    monkeypatch.setattr("tkn_codex_context.inference.subprocess.run", fake_run)
+    monkeypatch.setattr(inference, "resolve_provider_executable", fake_resolve)
+    monkeypatch.setattr(inference.subprocess, "run", fake_run)
     result = invoke_structured(
         inference_config("codex"),
         "prompt",
@@ -82,6 +113,8 @@ def test_codex_uses_native_output_schema(
     )
 
     assert result == {"answer": "codex"}
+    assert resolver_calls == [("codex", "codex")]
+    assert captured["command"][0] == "resolved-codex"
     assert "--output-schema" in captured["command"]
     assert captured["input"] == "prompt"
 

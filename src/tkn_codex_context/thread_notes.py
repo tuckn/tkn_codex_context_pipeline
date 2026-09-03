@@ -37,7 +37,12 @@ from .frontmatter import (
     parse_simple_frontmatter,
     split_frontmatter_lines,
 )
-from .inference import InferenceExecutionError, invoke_structured, provider_name
+from .inference import (
+    InferenceExecutionError,
+    invoke_structured,
+    provider_name,
+    resolve_provider_executable,
+)
 from .prompting import (
     render_chunk_prompt,
     render_reduction_prompt,
@@ -252,15 +257,11 @@ def atomic_write_json(path: Path, value: Any) -> None:
 
 
 def resolve_codex_bin(value: str = "") -> str:
-    candidate = value.strip() or shutil.which("codex") or ""
-    if not candidate:
-        raise PipelineError("standalone Codex CLI was not found")
-    resolved = str(Path(candidate).expanduser().absolute())
-    if "\\windowsapps\\" in resolved.casefold():
-        raise PipelineError("the Codex App WindowsApps executable cannot be used for automation")
-    if not Path(resolved).is_file():
+    resolved = resolve_provider_executable(value.strip() or "codex", provider="codex")
+    candidate = Path(resolved).expanduser().absolute()
+    if not candidate.is_file():
         raise PipelineError(f"Codex CLI executable not found: {resolved}")
-    return resolved
+    return str(candidate)
 
 
 def make_config(

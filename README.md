@@ -128,7 +128,9 @@ provider is one stable provider ID, while `providers` retains each backend's
 own model and transport settings. YAML setting names use `snake_case`; provider
 IDs such as `claude-code` and `github-copilot` remain `kebab-case` values.
 Executable names may be replaced with absolute paths when they are not on
-`PATH`.
+`PATH`. On Windows, the Codex App executable under `WindowsApps` is rejected
+because it is not the standalone CLI required for automation; install the
+standalone Codex CLI and configure that executable instead.
 
 ```yaml
 schema_version: "2.0.0"

@@ -89,18 +89,28 @@ def schema_grounded_prompt(prompt: str, schema: dict[str, Any]) -> str:
     )
 
 
+def _validate_provider_executable(value: str, *, provider: str) -> str:
+    normalized = value.replace("/", "\\").casefold()
+    if os.name == "nt" and provider == "codex" and "\\windowsapps\\" in normalized:
+        raise InferenceExecutionError(
+            "the Codex App WindowsApps executable cannot be used for automation; "
+            "install the standalone Codex CLI and configure its executable path"
+        )
+    return value
+
+
 def resolve_provider_executable(value: str, *, provider: str) -> str:
     """Resolve a configured CLI, including common Windows per-user install locations."""
 
     configured = value.strip()
     candidate = Path(configured).expanduser()
     if candidate.is_file():
-        return str(candidate.absolute())
+        return _validate_provider_executable(str(candidate.absolute()), provider=provider)
     discovered = shutil.which(configured)
     if discovered:
-        return discovered
+        return _validate_provider_executable(discovered, provider=provider)
     if os.name != "nt" or configured.casefold() not in {provider, f"{provider}.exe"}:
-        return configured
+        return _validate_provider_executable(configured, provider=provider)
     local_app_data = os.getenv("LOCALAPPDATA")
     roaming_app_data = os.getenv("APPDATA")
     fallbacks: list[Path] = [Path.home() / ".local" / "bin" / f"{provider}.exe"]
@@ -111,8 +121,8 @@ def resolve_provider_executable(value: str, *, provider: str) -> str:
             fallbacks.append(Path(roaming_app_data) / "npm" / "copilot.cmd")
     for fallback in fallbacks:
         if fallback.is_file():
-            return str(fallback.absolute())
-    return configured
+            return _validate_provider_executable(str(fallback.absolute()), provider=provider)
+    return _validate_provider_executable(configured, provider=provider)
 
 
 def _parse_json_object(text: str, *, provider: str) -> dict[str, Any]:
@@ -169,7 +179,7 @@ def _invoke_codex(
     output_path = cwd / "output.json"
     schema_path.write_text(json.dumps(schema, ensure_ascii=False, indent=2), encoding="utf-8")
     command = [
-        config.codex_bin,
+        resolve_provider_executable(config.codex_bin, provider="codex"),
         "exec",
         "--ephemeral",
         "--ignore-user-config",

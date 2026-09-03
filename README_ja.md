@@ -120,7 +120,9 @@ renderer、validation、retry、atomic writeは共通です。
 provider IDを1つ指定し、`providers`にはbackendごとのmodelと接続設定を保持します。
 YAMLの設定keyは`snake_case`、`claude-code`や`github-copilot`などのprovider IDは
 `kebab-case`の値です。実行ファイルが`PATH`にない場合は、`executable`を絶対pathに
-変更できます。
+変更できます。Windowsでは、`WindowsApps`配下のCodex App実行ファイルはautomation用の
+standalone CLIではないため拒否します。standalone Codex CLIをinstallし、その実行ファイルを
+指定してください。
 
 ```yaml
 schema_version: "2.0.0"
