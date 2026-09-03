@@ -57,7 +57,7 @@ CLI:     tkn-codex-context
 Implemented commands:
 
 ```text
-init [--force] [--dry-run]
+init [--force | --adopt-existing] [--dry-run]
 config init [--force]
 config show
 projects fetch [--dry-run]
@@ -161,11 +161,15 @@ reports `unchanged` for identical content, and protects edited content unless
 values, per-layer source/effective schema versions and migrations, and the
 winning source for every setting.
 
-`init` requires that configuration, creates the Project registry, records the current
-time as `installed_at`, and creates empty Project storage. Normal pulls process
-only chats created or updated at or after this time. Older chats require
-explicit `pull --backfill` or rebuild. `init --force` preserves configuration values,
-refreshes `installed_at`, and transactionally replaces data, state, and cache.
+`init` requires that configuration, creates the Project registry, records the
+current time as `installed_at`, creates empty Project storage, and writes a
+`.tkn-codex-context-root.json` ownership marker to the data, state, and cache
+roots. Normal pulls process only chats created or updated at or after this
+time. Older chats require explicit `pull --backfill` or rebuild. `init --force`
+preserves configuration values, refreshes `installed_at`, and transactionally
+replaces only missing, empty, or validly marked roots. Non-empty unmarked roots
+must first be inspected and explicitly marked with `init --adopt-existing`;
+adoption changes only the marker and refuses invalid or foreign markers.
 
 Normal and backfill pulls skip notes whose source fingerprint, current schema,
 model, reasoning effort, prompt version, and renderer version still match.

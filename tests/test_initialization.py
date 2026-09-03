@@ -8,7 +8,13 @@ import yaml
 
 import tkn_codex_context.initialization as initialization
 from tkn_codex_context.config import CONFIG_SCHEMA_VERSION
-from tkn_codex_context.initialization import initialize_application
+from tkn_codex_context.initialization import (
+    ROOT_KINDS,
+    ROOT_OWNER_APPLICATION_ID,
+    ROOT_OWNERSHIP_MARKER,
+    ROOT_OWNERSHIP_SCHEMA_VERSION,
+    initialize_application,
+)
 from tkn_codex_context.thread_notes import PipelineError
 
 
@@ -44,6 +50,21 @@ def write_config(path: Path, value: dict[str, object]) -> None:
         f"schema_version: {schema_text}\n{yaml.safe_dump(document, sort_keys=False)}",
         encoding="utf-8",
     )
+
+
+def write_root_ownership_markers(*roots: Path) -> None:
+    for kind, root in zip(ROOT_KINDS, roots, strict=True):
+        root.mkdir(parents=True, exist_ok=True)
+        (root / ROOT_OWNERSHIP_MARKER).write_text(
+            json.dumps(
+                {
+                    "schemaVersion": ROOT_OWNERSHIP_SCHEMA_VERSION,
+                    "applicationId": ROOT_OWNER_APPLICATION_ID,
+                    "rootKind": kind,
+                }
+            ),
+            encoding="utf-8",
+        )
 
 
 def test_init_requires_config_init_first(tmp_path: Path) -> None:
@@ -86,6 +107,7 @@ def test_force_dry_run_and_apply_preserve_settings_and_remove_old_storage(tmp_pa
     for root in (data_root, state_root, cache_root):
         root.mkdir(parents=True)
         (root / "old.txt").write_text("old", encoding="utf-8")
+    write_root_ownership_markers(data_root, state_root, cache_root)
     before = config_path.read_bytes()
 
     preview = initialize_application(config_path, overrides=None, force=True, dry_run=True)
@@ -94,6 +116,12 @@ def test_force_dry_run_and_apply_preserve_settings_and_remove_old_storage(tmp_pa
     assert all((root / "old.txt").is_file() for root in (data_root, state_root, cache_root))
     assert preview["removedConfigKeys"] == ["summary_prompt", "context_store_root"]
     assert preview["projectFetch"]["projects"][0]["projectId"] == "local-project"
+    assert [item["status"] for item in preview["rootOwnership"]] == [
+        "owned",
+        "owned",
+        "owned",
+    ]
+    assert preview["safeToReset"] is True
 
     initialize_application(config_path, overrides=None, force=True, dry_run=False)
 
@@ -111,6 +139,7 @@ def test_force_dry_run_and_apply_preserve_settings_and_remove_old_storage(tmp_pa
     assert not any((data_root / "projects/local-project/thread-notes").iterdir())
     assert (state_root / "projects/local-project").is_dir()
     assert not (state_root / "projects/local-project/chat-refresh-state.json").exists()
+    assert all((root / ROOT_OWNERSHIP_MARKER).is_file() for root in (data_root, state_root, cache_root))
 
 
 def test_init_refuses_existing_storage_without_force(tmp_path: Path) -> None:
@@ -132,6 +161,7 @@ def test_init_refuses_existing_storage_without_force(tmp_path: Path) -> None:
     for root in (data_root, state_root, cache_root):
         root.mkdir(parents=True)
         (root / "existing.txt").write_text("existing", encoding="utf-8")
+    write_root_ownership_markers(data_root, state_root, cache_root)
     config_before = config_path.read_bytes()
 
     with pytest.raises(PipelineError, match="init --force --dry-run"):
@@ -167,6 +197,7 @@ def test_force_rolls_back_storage_and_config_on_failure(
     for root in (data_root, state_root, cache_root):
         root.mkdir(parents=True)
         (root / "old.txt").write_text("old", encoding="utf-8")
+    write_root_ownership_markers(data_root, state_root, cache_root)
     config_before = config_path.read_bytes()
     real_create = initialization.create_fresh_projects
 
@@ -207,6 +238,7 @@ def test_force_does_not_delete_storage_when_staging_fails(
     for root in (data_root, state_root, cache_root):
         root.mkdir(parents=True)
         (root / "old.txt").write_text("old", encoding="utf-8")
+    write_root_ownership_markers(data_root, state_root, cache_root)
     real_replace = Path.replace
 
     def fail_data_stage(path: Path, target: Path) -> Path:
@@ -220,6 +252,150 @@ def test_force_does_not_delete_storage_when_staging_fails(
         initialize_application(config_path, overrides=None, force=True, dry_run=False)
 
     assert all((root / "old.txt").read_text(encoding="utf-8") == "old" for root in (data_root, state_root, cache_root))
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_force_rejects_unowned_nonempty_storage(
+    tmp_path: Path,
+    dry_run: bool,
+) -> None:
+    config_path = tmp_path / "app/config.yaml"
+    codex_home = tmp_path / "codex"
+    roots = (tmp_path / "app/data", tmp_path / "app/state", tmp_path / "cache")
+    write_config(
+        config_path,
+        {
+            "installed_at": "2026-01-01T00:00:00+00:00",
+            "codex_home": str(codex_home),
+            "data_root": str(roots[0]),
+            "state_root": str(roots[1]),
+            "cache_root": str(roots[2]),
+        },
+    )
+    for root in roots:
+        root.mkdir(parents=True)
+        (root / "keep.txt").write_text("keep", encoding="utf-8")
+    config_before = config_path.read_bytes()
+
+    with pytest.raises(PipelineError, match="without valid ownership markers") as exc:
+        initialize_application(config_path, overrides=None, force=True, dry_run=dry_run)
+
+    assert "--adopt-existing --dry-run" in str(exc.value)
+    assert config_path.read_bytes() == config_before
+    assert all((root / "keep.txt").read_text(encoding="utf-8") == "keep" for root in roots)
+    assert not any((root / ROOT_OWNERSHIP_MARKER).exists() for root in roots)
+
+
+def test_adopt_existing_previews_then_marks_roots_without_rebuilding(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "app/config.yaml"
+    codex_home = tmp_path / "codex"
+    roots = (tmp_path / "app/data", tmp_path / "app/state", tmp_path / "cache")
+    write_config(
+        config_path,
+        {
+            "installed_at": "2026-01-01T00:00:00+00:00",
+            "codex_home": str(codex_home),
+            "data_root": str(roots[0]),
+            "state_root": str(roots[1]),
+            "cache_root": str(roots[2]),
+        },
+    )
+    for root in roots:
+        root.mkdir(parents=True)
+        (root / "keep.txt").write_text("keep", encoding="utf-8")
+    config_before = config_path.read_bytes()
+
+    preview = initialize_application(
+        config_path,
+        overrides=None,
+        force=False,
+        dry_run=True,
+        adopt_existing=True,
+    )
+
+    assert preview["adoptExisting"] is True
+    assert preview["plannedAdoptions"] == [str(root.resolve()) for root in roots]
+    assert preview["adoptedTargets"] == []
+    assert [item["status"] for item in preview["rootOwnership"]] == [
+        "unowned",
+        "unowned",
+        "unowned",
+    ]
+    assert config_path.read_bytes() == config_before
+    assert not any((root / ROOT_OWNERSHIP_MARKER).exists() for root in roots)
+
+    applied = initialize_application(
+        config_path,
+        overrides=None,
+        force=False,
+        dry_run=False,
+        adopt_existing=True,
+    )
+
+    assert applied["adoptedTargets"] == [str(root.resolve()) for root in roots]
+    assert [item["status"] for item in applied["rootOwnership"]] == [
+        "owned",
+        "owned",
+        "owned",
+    ]
+    assert config_path.read_bytes() == config_before
+    assert all((root / "keep.txt").read_text(encoding="utf-8") == "keep" for root in roots)
+    for kind, root in zip(ROOT_KINDS, roots, strict=True):
+        marker = json.loads((root / ROOT_OWNERSHIP_MARKER).read_text(encoding="utf-8"))
+        assert marker == {
+            "schemaVersion": ROOT_OWNERSHIP_SCHEMA_VERSION,
+            "applicationId": ROOT_OWNER_APPLICATION_ID,
+            "rootKind": kind,
+        }
+
+    write_app_state(codex_home)
+    force_preview = initialize_application(
+        config_path,
+        overrides=None,
+        force=True,
+        dry_run=True,
+    )
+    assert force_preview["safeToReset"] is True
+
+
+def test_adopt_existing_rejects_foreign_marker(tmp_path: Path) -> None:
+    config_path = tmp_path / "app/config.yaml"
+    roots = (tmp_path / "app/data", tmp_path / "app/state", tmp_path / "cache")
+    write_config(
+        config_path,
+        {
+            "codex_home": str(tmp_path / "codex"),
+            "data_root": str(roots[0]),
+            "state_root": str(roots[1]),
+            "cache_root": str(roots[2]),
+        },
+    )
+    for root in roots:
+        root.mkdir(parents=True)
+    (roots[0] / ROOT_OWNERSHIP_MARKER).write_text(
+        json.dumps(
+            {
+                "schemaVersion": ROOT_OWNERSHIP_SCHEMA_VERSION,
+                "applicationId": "another-application",
+                "rootKind": "data",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PipelineError, match="invalid ownership state"):
+        initialize_application(
+            config_path,
+            overrides=None,
+            force=False,
+            dry_run=True,
+            adopt_existing=True,
+        )
+
+    assert not (roots[1] / ROOT_OWNERSHIP_MARKER).exists()
+    assert not (roots[2] / ROOT_OWNERSHIP_MARKER).exists()
 
 
 def test_force_rejects_unsafe_reset_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

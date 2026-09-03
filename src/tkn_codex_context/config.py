@@ -674,6 +674,7 @@ def initialization_config(
     path: Path | None = None,
     *,
     overrides: dict[str, Any] | None = None,
+    refresh_installed_at: bool = True,
 ) -> tuple[AppConfig, Path, tuple[str, ...]]:
     """Load the target config for init, tolerating only retired init-owned keys."""
 
@@ -706,7 +707,8 @@ def initialization_config(
         working=Path.cwd().absolute(),
         sources={},
     )
-    merged["installed_at"] = datetime.now().astimezone()
+    if refresh_installed_at:
+        merged["installed_at"] = datetime.now().astimezone()
     try:
         config = AppConfig.model_validate(merged)
     except Exception as exc:

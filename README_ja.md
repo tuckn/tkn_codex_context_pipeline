@@ -209,20 +209,40 @@ Codex、Claude Code、GitHub Copilotを選ぶと、選択・redact済みの生�
 model、reasoning effortは生成fingerprintに含まれるため、providerを変更すると、以前の
 生成artifactは再生成対象になります。
 
-`init`は作成済み設定を読み、Project registryとCodex app左ペインの
-Projectごとに空の`thread-notes/`と`decisions/`を用意します。Thread Noteや
-Decision Record、Working Contextは生成しません。
-実行日時は`installed_at`として保存され、通常実行が
-自動処理するのは、この日時以後に作成または更新されたchatだけです。それ以前の
-chatは、明示的な`pull --backfill`または`rebuild`で処理します。
+`init`は作成済み設定を読み、Project registryとCodex app左ペインのProjectごとに
+空の`thread-notes/`と`decisions/`を用意します。また、設定されたdata、state、cacheの
+各rootへ`.tkn-codex-context-root.json`所有権markerを書き込みます。Thread Noteや
+Decision Record、Working Contextは生成しません。実行日時は`installed_at`として
+保存され、通常実行が自動処理するのは、この日時以後に作成または更新されたchatだけ
+です。それ以前のchatは、明示的な`pull --backfill`または`rebuild`で処理します。
 
 既存のpipelineを完全に作り直す場合は、まず削除対象を確認してからforce初期化
 します。modelや保存先などの設定は維持され、`installed_at`だけが更新されます。
+`--force`が置換できるのは、存在しないroot、空のdirectory、またはこのapplicationと
+root種別に一致する有効な所有権markerを持つdirectoryだけです。非空でmarkerがない
+directory、別applicationのmarker、不正なmarkerは、保存先を退避する前に拒否します。
+force dry-runが成功した場合は各rootの所有権statusを表示し、拒否した場合は安全でない
+すべてのrootと理由をerrorに示します。
 
 ```console
 tkn-codex-context init --force --dry-run
 tkn-codex-context init --force
 ```
+
+以前のversionが作成したstorageには所有権markerがありません。設定されたpathと内容を
+確認し、force再構築の前に既存directoryを明示的に採用します。
+
+```console
+tkn-codex-context init --adopt-existing --dry-run
+tkn-codex-context init --adopt-existing
+tkn-codex-context init --force --dry-run
+tkn-codex-context init --force
+```
+
+採用dry-runは各rootの所有権statusと理由を表示します。採用はoperatorによる独立した
+所有権表明です。適用時も所有権markerだけを書き、storageの再構築、configの書き換え、
+`installed_at`の更新は行いません。別applicationのmarkerや不正なmarkerを上書きせず
+拒否します。
 
 Project名や現在のrootから内部IDを確認する場合は、登録済みProjectを一覧表示します。
 
@@ -240,6 +260,7 @@ tkn-codex-context projects list --json
 ~/.tkn/codex_context_pipeline/
 ├── config.yaml
 ├── data/
+│   ├── .tkn-codex-context-root.json
 │   ├── project-registry.jsonl
 │   └── projects/
 │       └── <projectId>/
@@ -247,6 +268,7 @@ tkn-codex-context projects list --json
 │           ├── thread-notes/
 │           └── decisions/
 └── state/
+    ├── .tkn-codex-context-root.json
     ├── projects/
     │   └── <projectId>/
     │       ├── chat-refresh-state.json
@@ -255,6 +277,7 @@ tkn-codex-context projects list --json
     └── reports/
 
 ~/.cache/codex_context_pipeline/
+├── .tkn-codex-context-root.json
 └── 中断した処理を再開するためのcache
 ```
 

@@ -225,21 +225,45 @@ its display name. Provider ID, model, and reasoning effort are included in
 generation fingerprints, so changing providers makes previously generated
 artifacts eligible for regeneration.
 
-`init` reads the existing configuration, creates the Project registry, and creates empty
-`thread-notes/` and `decisions/` directories for each Project in the Codex app
-sidebar. It does not generate Thread Notes, Decision Records, or Working Contexts. The command records the current time as
-`installed_at`. A normal pull
-automatically processes only chats created or updated at or after that time.
-Older chats require an explicit `pull --backfill` or `rebuild`.
+`init` reads the existing configuration, creates the Project registry, and
+creates empty `thread-notes/` and `decisions/` directories for each Project in
+the Codex app sidebar. It also writes a `.tkn-codex-context-root.json`
+ownership marker to each configured data, state, and cache root. It does not
+generate Thread Notes, Decision Records, or Working Contexts. The command
+records the current time as `installed_at`. A normal pull automatically
+processes only chats created or updated at or after that time. Older chats
+require an explicit `pull --backfill` or `rebuild`.
 
 To rebuild existing pipeline storage, inspect the destructive plan and then
 force initialization. Model, path, and runtime settings are preserved;
-`installed_at` is refreshed.
+`installed_at` is refreshed. `--force` can replace only a missing root, an empty
+directory, or a directory with a valid ownership marker for this application
+and root kind. A non-empty unmarked directory, a foreign marker, or a malformed
+marker is rejected before any storage is staged. A successful force dry-run
+includes every root's ownership status; a refusal identifies every unsafe root
+and its reason.
 
 ```console
 tkn-codex-context init --force --dry-run
 tkn-codex-context init --force
 ```
+
+Storage created by an earlier version does not have ownership markers. Inspect
+the configured paths and explicitly adopt those existing directories before a
+forced rebuild:
+
+```console
+tkn-codex-context init --adopt-existing --dry-run
+tkn-codex-context init --adopt-existing
+tkn-codex-context init --force --dry-run
+tkn-codex-context init --force
+```
+
+The adoption dry-run reports the ownership status and reason for every root.
+Adoption is a separate operator assertion: applying it writes only the
+ownership markers and does not rebuild storage, rewrite the config, or refresh
+`installed_at`. It refuses foreign or malformed markers rather than replacing
+them.
 
 List the registered Projects when you need to map a Project name or current
 root back to its internal ID:
@@ -259,6 +283,7 @@ The application separates its own files by purpose:
 ~/.tkn/codex_context_pipeline/
 ├── config.yaml
 ├── data/
+│   ├── .tkn-codex-context-root.json
 │   ├── project-registry.jsonl
 │   └── projects/
 │       └── <projectId>/
@@ -266,6 +291,7 @@ The application separates its own files by purpose:
 │           ├── thread-notes/
 │           └── decisions/
 └── state/
+    ├── .tkn-codex-context-root.json
     ├── projects/
     │   └── <projectId>/
     │       ├── chat-refresh-state.json
@@ -274,6 +300,7 @@ The application separates its own files by purpose:
     └── reports/
 
 ~/.cache/codex_context_pipeline/
+├── .tkn-codex-context-root.json
 └── resumable work cache
 ```
 

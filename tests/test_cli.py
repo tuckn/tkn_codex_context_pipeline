@@ -17,6 +17,7 @@ from tkn_codex_context.cli import (
 )
 from tkn_codex_context.config import CONFIG_SCHEMA_VERSION
 from tkn_codex_context.console_logging import SUCCESS, ColorFormatter
+from tkn_codex_context.initialization import ROOT_OWNERSHIP_MARKER
 
 
 def write_app_state(
@@ -305,6 +306,56 @@ def test_init_dry_run_keeps_config_and_creates_no_storage(
     assert output["projectFetch"]["projects"][0]["projectId"] == "local-project"
 
 
+def test_init_parser_keeps_force_and_adoption_mutually_exclusive() -> None:
+    parser = build_parser()
+
+    adoption = parser.parse_args(["init", "--adopt-existing", "--dry-run"])
+
+    assert adoption.adopt_existing is True
+    assert adoption.force is False
+    assert adoption.dry_run is True
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["init", "--force", "--adopt-existing"])
+    assert exc.value.code == 2
+
+
+def test_init_adopt_existing_cli_only_marks_configured_roots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    target = home / ".tkn" / "codex_context_pipeline" / "config.yaml"
+    roots = (
+        target.parent / "data",
+        target.parent / "state",
+        home / ".cache/codex_context_pipeline",
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    assert main(["config", "init"]) == 0
+    capsys.readouterr()
+    for root in roots:
+        root.mkdir(parents=True)
+        (root / "keep.txt").write_text("keep", encoding="utf-8")
+    config_before = target.read_bytes()
+
+    assert main(["init", "--adopt-existing", "--dry-run"]) == 0
+    preview = json.loads(capsys.readouterr().out)
+
+    assert preview["plannedAdoptions"] == [str(root.resolve()) for root in roots]
+    assert preview["adoptedTargets"] == []
+    assert not any((root / ROOT_OWNERSHIP_MARKER).exists() for root in roots)
+
+    assert main(["init", "--adopt-existing"]) == 0
+    applied = json.loads(capsys.readouterr().out)
+
+    assert applied["adoptedTargets"] == [str(root.resolve()) for root in roots]
+    assert target.read_bytes() == config_before
+    assert all((root / "keep.txt").read_text(encoding="utf-8") == "keep" for root in roots)
+    assert all((root / ROOT_OWNERSHIP_MARKER).is_file() for root in roots)
+
+
 def test_init_uses_existing_config_and_creates_project_directories(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -326,6 +377,9 @@ def test_init_uses_existing_config_and_creates_project_directories(
     assert (app_root / "state/projects/local-project").is_dir()
     assert (home / ".cache/codex_context_pipeline").is_dir()
     assert not any((app_root / "data/projects/local-project/thread-notes").iterdir())
+    assert (app_root / "data" / ROOT_OWNERSHIP_MARKER).is_file()
+    assert (app_root / "state" / ROOT_OWNERSHIP_MARKER).is_file()
+    assert (home / ".cache/codex_context_pipeline" / ROOT_OWNERSHIP_MARKER).is_file()
 
 
 def test_projects_fetch_replaces_sync(

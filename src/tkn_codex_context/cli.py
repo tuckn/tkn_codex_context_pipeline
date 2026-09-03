@@ -101,7 +101,8 @@ def build_parser() -> argparse.ArgumentParser:
         "init",
         help="Initialize or cleanly rebuild pipeline storage (writes by default)",
         description=(
-            "Writes pipeline config, data, state, and registry storage by default. "
+            "Initializes or rebuilds pipeline config, data, state, and registry storage by default. "
+            "--adopt-existing writes only ownership markers for existing configured roots. "
             "Use --dry-run for a read-only preview."
         ),
     )
@@ -110,7 +111,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Preview storage changes without writing config, data, state, cache, or reports",
     )
-    init.add_argument("--force", action="store_true")
+    init_mode = init.add_mutually_exclusive_group()
+    init_mode.add_argument(
+        "--force",
+        action="store_true",
+        help="Rebuild storage only when each existing non-empty root has a valid ownership marker",
+    )
+    init_mode.add_argument(
+        "--adopt-existing",
+        action="store_true",
+        help=(
+            "Mark existing configured data, state, and cache directories as application-owned "
+            "without rebuilding them"
+        ),
+    )
 
     config = commands.add_parser("config", help="Manage pipeline configuration")
     config_commands = config.add_subparsers(dest="config_command", required=True)
@@ -791,15 +805,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     LOGGER.debug("Parsed command: %s", args.command)
     try:
         if args.command == "init":
-            LOGGER.info("%s pipeline storage", "Previewing" if args.dry_run else "Initializing")
+            if args.adopt_existing:
+                LOGGER.info(
+                    "%s existing pipeline storage ownership",
+                    "Previewing" if args.dry_run else "Adopting",
+                )
+            else:
+                LOGGER.info("%s pipeline storage", "Previewing" if args.dry_run else "Initializing")
             report = initialize_application(
                 args.config,
                 overrides=_overrides(args),
                 force=args.force,
                 dry_run=args.dry_run,
+                adopt_existing=args.adopt_existing,
             )
             if args.dry_run:
                 LOGGER.info("Dry run complete")
+            elif args.adopt_existing:
+                log_success(LOGGER, "Storage ownership adoption complete")
             else:
                 log_success(LOGGER, "Initialization complete")
             _emit({"command": "init", **report})
