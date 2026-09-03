@@ -654,6 +654,10 @@ class ThreadNotePipelineTests(unittest.TestCase):
             cache_root=self.cache,
         )
         note = next(self.project.thread_notes_path.glob("*.md"))
+        note.write_bytes(b"\xef\xbb\xbf" + note.read_bytes().replace(b"\n", b"\r\n"))
+        self.project.state_path.write_bytes(
+            b"\xef\xbb\xbf" + self.project.state_path.read_bytes().replace(b"\n", b"\r\n")
+        )
         old_note = note.read_bytes()
         old_state = self.project.state_path.read_bytes()
         with source.open("a", encoding="utf-8") as handle:

@@ -7,9 +7,11 @@ from pathlib import Path
 import pytest
 from pytest import CaptureFixture
 
+from tkn_codex_context.chat_logs import read_thread_source
 from tkn_codex_context.cli import (
     LOGGER,
     _configure_logging,
+    _decision_output,
     _progress,
     _thread_note_output,
     build_parser,
@@ -98,6 +100,28 @@ def test_quiet_and_verbose_logging_levels() -> None:
     verbose = build_parser().parse_args(["-v", "config", "show"])
     _configure_logging(verbose)
     assert logging.getLogger().level == logging.DEBUG
+
+
+def test_jsonl_parse_warning_uses_configured_logging(
+    tmp_path: Path,
+    capsys: CaptureFixture[str],
+) -> None:
+    source = tmp_path / "invalid.jsonl"
+    source.write_text("{invalid}\n", encoding="utf-8")
+
+    normal = build_parser().parse_args(["config", "show"])
+    _configure_logging(normal)
+    read_thread_source(source)
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"[WARNING] {source}:1:" in captured.err
+
+    quiet = build_parser().parse_args(["--quiet", "config", "show"])
+    _configure_logging(quiet)
+    read_thread_source(source)
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
 
 
 def test_progress_events_are_human_readable(
@@ -655,6 +679,27 @@ def test_compact_thread_note_output_summarizes_rebuild_counts(tmp_path: Path) ->
     assert output["reportSummary"]["preservedCurrentCount"] == 1
     assert output["reportSummary"]["replacedCurrentCount"] == 2
     assert output["reportSummary"]["scan"] == {"files": 370, "eligible": 3}
+
+
+def test_compact_decision_output_includes_index_warning() -> None:
+    output = _decision_output(
+        {"pendingCount": 0},
+        {
+            "dryRun": True,
+            "projectId": "project-1",
+            "failed": [],
+            "warnings": ["Existing Decision prompt index reached its limit."],
+            "existingDecisionCount": 201,
+            "existingDecisionIndexLimit": 200,
+            "existingDecisionIndexOmittedCount": 1,
+        },
+        None,
+        full_output=False,
+    )
+
+    assert output["reportSummary"]["warningCount"] == 1
+    assert output["reportSummary"]["existingDecisionIndexLimit"] == 200
+    assert output["reportSummary"]["existingDecisionIndexOmittedCount"] == 1
 
 
 @pytest.mark.parametrize(

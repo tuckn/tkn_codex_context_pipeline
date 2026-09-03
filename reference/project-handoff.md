@@ -331,7 +331,8 @@ codex exec
 
 Generated notes are completed and validated in the pipeline cache before being
 committed. A note and its refresh state are treated as one transaction:
-failures restore the previous note and state.
+failures restore the previous note and state byte-for-byte, including an
+existing BOM or newline style.
 
 Each source JSONL is decoded once per scan or revalidation into thread
 metadata, evidence events, and the final valid record's top-level timestamp.
@@ -339,19 +340,24 @@ That source event time, not filesystem `mtime`, controls the `installed_at`
 window and idle check and is recorded as `sourceLastEventAt` in refresh state.
 Missing or invalid source event time is excluded and counted explicitly.
 Resolved cwd variants use a bounded cache, and root variants are precomputed
-per Project before event attribution.
+per Project before event attribution. Invalid JSONL records are reported
+through the configured logger, so `--quiet` suppresses those warnings too.
 
 Decision Records are rendered and validated before their transaction is
 finalized. New records, resynthesized unreviewed generated records, appended
 provenance, and `decision-build-state.json` are committed together; failures
 remove new records and restore existing records and prior state. Source Thread
 Notes are not part of normal Decision generation writes. Reviewed central
-judgment content is not automatically rewritten.
+judgment content is not automatically rewritten. The inference prompt indexes
+at most the newest 200 existing Decision Records; reaching that limit produces
+a report warning and compact `warningCount`, `existingDecisionIndexLimit`, and
+`existingDecisionIndexOmittedCount` fields without turning the run into a
+failure.
 
 Working Context is rendered and validated before replacing the live artifact.
 Its sources are fingerprinted again after model generation. Source changes,
 validation failure, or state-write failure restore the previous artifact and
-state.
+state byte-for-byte. Decision rollback uses the same byte-exact preservation.
 
 Incomplete normal-run and rebuild artifacts remain resumable in the pipeline
 cache. Successful work removes its pending cache. Rebuild performs a staged,
@@ -365,9 +371,9 @@ Source JSONL files are always read-only.
 The current implementation passed:
 
 ```text
-pytest:      181 passed
+pytest:      184 passed
 Ruff:         passed
-strict mypy:  passed
+strict mypy:  passed on native Windows and Linux targets
 uv build:     wheel and source distribution built successfully
 wheel check:  decision modules and prompt/schema/template resources included
 ```
@@ -387,9 +393,11 @@ Tests cover:
   Glossary and Taxonomy evidence, unchanged no-op, edited-file protection, and
   atomic artifact/state writes
 - source provenance, redaction, size limits, and status consistency
-- source-event-time windowing, one-pass JSONL decoding, and cached path attribution
+- source-event-time windowing, one-pass JSONL decoding, cached path attribution,
+  and logger-controlled parse warnings
 - unchanged no-op and stale-generator regeneration
-- note/state rollback and resumable cache
+- byte-exact note/state, Decision, and Working Context rollback
+- Decision inference-index threshold warnings and compact summary fields
 - rebuild failure recovery, resume, and atomic cutover
 - CLI JSON output, exit behavior, dry-run, and validation
 

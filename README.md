@@ -592,6 +592,13 @@ the final create, update, and existing-reference counts are known only during
 normal execution. Use `--full-output` to inspect the individual selected Thread
 Notes and planned synthesis batches.
 
+Only the newest 200 existing Decision Records are included in the inference
+index. When the index reaches that limit, the report increments `warningCount`
+and exposes `existingDecisionIndexLimit` and
+`existingDecisionIndexOmittedCount`. This is a quality warning rather than a
+run failure; it makes the point at which older records begin leaving the model
+context explicit.
+
 Without `--dry-run`, the command calls generative AI, generates decisions, and
 writes Decision Records, state, and a run report:
 
@@ -855,26 +862,37 @@ src/tkn_codex_context/profiles/
 | Resource | Role |
 | --- | --- |
 | `prompt.md` | Versioned editorial policy, field meanings, development-label definitions, and source/merge/repair mode instructions |
-| `output.schema.json` | Strict generated-JSON fields, types, enums, and limits used by Codex structured output and Python validation |
+| `output.schema.json` | Strict generated-JSON fields, types, enums, and limits used by inference-provider structured output and Python validation |
 | `template.md` | Versioned deterministic Markdown heading order and section placement |
 
 The resources form one pipeline:
 
-```text
-source events + prompt + output schema
-    -> validated intermediate JSON
-    -> Python renderer + template
-    -> Thread Note
-
-Thread Note + existing decision index + prompt + output schema
-    -> validated intermediate decision JSON
-    -> Python renderer + template
-    -> Decision Record
-
-Thread Notes + Decision Records + repository evidence + prompt + output schema
-    -> validated intermediate current-context JSON
-    -> Python renderer + template
-    -> Working Context
+```mermaid
+flowchart LR
+  SE["Source events"] --> TI["Thread Note inference"]
+  TN["Thread Notes"] --> DI["Decision inference"]
+  EI["Existing Decision index"] --> DI
+  TN --> WI["Working Context inference"]
+  DR["Decision Records"] --> WI
+  RE["Repository evidence"] --> WI
+  P["Profile prompt"] --> TI
+  P --> DI
+  P --> WI
+  S["Profile output schema"] --> TV["Validated summary JSON"]
+  S --> DV["Validated decision JSON"]
+  S --> WV["Validated context JSON"]
+  TI --> TV
+  DI --> DV
+  WI --> WV
+  TV --> TR["Template renderer"]
+  DV --> DRR["Template renderer"]
+  WV --> WR["Template renderer"]
+  T["Profile Markdown template"] --> TR
+  T --> DRR
+  T --> WR
+  TR --> TNO["Thread Note"]
+  DRR --> DRO["Decision Record"]
+  WR --> WCO["Working Context"]
 ```
 
 The output schema governs the model's intermediate JSON, not the completed

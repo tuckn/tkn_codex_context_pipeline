@@ -240,15 +240,19 @@ def parse_datetime(value: str) -> datetime:
     return parsed
 
 
-def atomic_write_text(path: Path, text: str) -> None:
+def atomic_write_bytes(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.parent / f".tmp-{uuid.uuid4().hex[:12]}"
     try:
-        temporary.write_text(text, encoding="utf-8", newline="\n")
+        temporary.write_bytes(content)
         os.replace(temporary, path)
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    atomic_write_bytes(path, text.encode("utf-8"))
 
 
 def atomic_write_json(path: Path, value: Any) -> None:
@@ -1377,15 +1381,12 @@ def write_candidate_note(
             if note_path.exists():
                 note_path.unlink()
         else:
-            atomic_write_text(note_path, old_note.decode("utf-8-sig"))
+            atomic_write_bytes(note_path, old_note)
         if old_state is None:
             if candidate.project.state_path.exists():
                 candidate.project.state_path.unlink()
         else:
-            atomic_write_text(
-                candidate.project.state_path,
-                old_state.decode("utf-8-sig"),
-            )
+            atomic_write_bytes(candidate.project.state_path, old_state)
         raise
     if work_root.parent != pending_parent:
         raise PipelineError(f"refusing to remove unmanaged pending cache: {work_root}")
@@ -1934,10 +1935,7 @@ def replace_thread_notes_and_state(
             if project.state_path.exists():
                 project.state_path.unlink()
         else:
-            atomic_write_text(
-                project.state_path,
-                original_state.decode("utf-8-sig"),
-            )
+            atomic_write_bytes(project.state_path, original_state)
         raise
     if backup.exists():
         try:

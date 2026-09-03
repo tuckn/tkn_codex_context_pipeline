@@ -42,6 +42,7 @@ from .thread_notes import (
     PipelineConfig,
     PipelineError,
     Project,
+    atomic_write_bytes,
     atomic_write_json,
     atomic_write_text,
     now_iso,
@@ -238,6 +239,25 @@ def load_existing_decisions(project: Project) -> list[ExistingDecision]:
             )
         )
     return result
+
+
+def _refresh_existing_decision_index_report(report: dict[str, Any], existing_count: int) -> None:
+    prefix = "Existing Decision prompt index"
+    warnings = [str(value) for value in report.get("warnings", []) if not str(value).startswith(prefix)]
+    omitted_count = max(0, existing_count - MAX_EXISTING_DECISION_INDEX)
+    report["existingDecisionIndexOmittedCount"] = omitted_count
+    if existing_count >= MAX_EXISTING_DECISION_INDEX:
+        if omitted_count:
+            warnings.append(
+                f"{prefix} is limited to the newest {MAX_EXISTING_DECISION_INDEX} records; "
+                f"{omitted_count} older record{'s are' if omitted_count != 1 else ' is'} omitted."
+            )
+        else:
+            warnings.append(
+                f"{prefix} has reached its {MAX_EXISTING_DECISION_INDEX}-record limit; "
+                "older records will be omitted as new Decisions are added."
+            )
+    report["warnings"] = warnings
 
 
 def _thread_note_source(path: Path, project: Project) -> DecisionSource:
@@ -1082,12 +1102,12 @@ def _commit_batch(
             if path.exists():
                 path.unlink()
         for path, content in old_decisions.items():
-            atomic_write_text(path, content.decode("utf-8-sig"))
+            atomic_write_bytes(path, content)
         if old_state is None:
             if state_path.exists():
                 state_path.unlink()
         else:
-            atomic_write_text(state_path, old_state.decode("utf-8-sig"))
+            atomic_write_bytes(state_path, old_state)
         state.clear()
         state.update(previous_state)
         raise
@@ -1137,6 +1157,8 @@ def execute_decision_build(
         },
         "scan": scan,
         "existingDecisionCount": len(existing),
+        "existingDecisionIndexLimit": MAX_EXISTING_DECISION_INDEX,
+        "existingDecisionIndexOmittedCount": 0,
         "selectedCount": len(candidates),
         "synthesisBatchCount": len(batches),
         "batches": [],
@@ -1147,7 +1169,9 @@ def execute_decision_build(
         "noAction": [],
         "failed": list(scan_failures),
         "deferred": [],
+        "warnings": [],
     }
+    _refresh_existing_decision_index_report(report, len(existing))
     if not write:
         report["selected"] = [
             {
@@ -1221,6 +1245,7 @@ def execute_decision_build(
             updated_by_id = {item.decision_id: item for item in committed.updated}
             existing = [updated_by_id.get(item.decision_id, item) for item in existing]
         existing.extend(committed.created)
+        _refresh_existing_decision_index_report(report, len(existing))
         duration = round(time.monotonic() - batch_started, 3)
         metrics = deepcopy(getattr(generator, "last_metrics", {}))
         created_values = [

@@ -30,6 +30,7 @@ from .thread_notes import (
     PipelineConfig,
     PipelineError,
     Project,
+    atomic_write_bytes,
     atomic_write_json,
     atomic_write_text,
     now_iso,
@@ -926,12 +927,12 @@ def execute_working_context_build(
                 if output_path.exists():
                     output_path.unlink()
             else:
-                atomic_write_text(output_path, old_output.decode("utf-8-sig"))
+                atomic_write_bytes(output_path, old_output)
             if old_state is None:
                 if state_path.exists():
                     state_path.unlink()
             else:
-                atomic_write_text(state_path, old_state.decode("utf-8-sig"))
+                atomic_write_bytes(state_path, old_state)
             state.clear()
             state.update(previous_state)
             raise

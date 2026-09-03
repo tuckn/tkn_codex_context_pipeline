@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
-import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +15,7 @@ from typing import Any
 
 APPROVAL_REVIEW_PREFIX = "The following is the Codex agent history"
 KNOWN_INTERNAL_THREAD_SOURCES = {"approval_review", "subagent"}
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -144,7 +145,7 @@ def iter_json_line_records(path: Path) -> Iterable[tuple[int, dict[str, Any]]]:
             try:
                 value = json.loads(line)
             except json.JSONDecodeError as exc:
-                print(f"warning: {path}:{line_number}: {exc}", file=sys.stderr)
+                LOGGER.warning("%s:%s: %s", path, line_number, exc)
                 continue
             if isinstance(value, dict):
                 yield line_number, value

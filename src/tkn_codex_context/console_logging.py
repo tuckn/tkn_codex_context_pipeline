@@ -32,8 +32,10 @@ def _enable_windows_virtual_terminal(stream: TextIO) -> bool:
         import msvcrt
         from ctypes import wintypes
 
-        handle = wintypes.HANDLE(msvcrt.get_osfhandle(file_descriptor))
-        kernel32 = ctypes.windll.kernel32
+        msvcrt_api: Any = msvcrt
+        ctypes_api: Any = ctypes
+        handle = wintypes.HANDLE(msvcrt_api.get_osfhandle(file_descriptor))
+        kernel32 = ctypes_api.windll.kernel32
         kernel32.GetConsoleMode.argtypes = [
             wintypes.HANDLE,
             ctypes.POINTER(wintypes.DWORD),

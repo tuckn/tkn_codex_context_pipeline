@@ -699,7 +699,10 @@ def _decision_report_summary(report: dict[str, Any]) -> dict[str, Any]:
         "noActionCount": _list_count(report.get("noAction")),
         "failedCount": failed_count,
         "deferredCount": _list_count(report.get("deferred")),
+        "warningCount": _list_count(report.get("warnings")),
         "existingDecisionCount": int(report.get("existingDecisionCount") or 0),
+        "existingDecisionIndexLimit": int(report.get("existingDecisionIndexLimit") or 0),
+        "existingDecisionIndexOmittedCount": int(report.get("existingDecisionIndexOmittedCount") or 0),
         "synthesisBatchCount": int(report.get("synthesisBatchCount") or 0),
     }
     scan = report.get("scan")
@@ -1051,6 +1054,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     report.get("selectedCount", 0),
                     report.get("existingDecisionCount", 0),
                     failed,
+                )
+            decision_warnings = report.get("warnings", [])
+            if decision_warnings:
+                LOGGER.warning(
+                    "Decision build completed with %s warning%s",
+                    len(decision_warnings),
+                    "s" if len(decision_warnings) != 1 else "",
                 )
             _emit(
                 _decision_output(

@@ -269,6 +269,43 @@ def test_unreviewed_v2_can_be_resynthesized_as_v4(
     assert "None." not in record.read_text(encoding="utf-8")
 
 
+def test_decision_build_warns_when_existing_index_reaches_limit(
+    decision_project: tuple[Project, PipelineConfig],
+    tmp_path: Path,
+) -> None:
+    project, config = decision_project
+    existing = [
+        ExistingDecision(
+            decision_id=f"DR-{index:04d}",
+            path=tmp_path / f"DR-{index:04d}-decision.md",
+            title=f"Decision {index}",
+            status="Accepted",
+            decision=f"Keep decision {index}.",
+            source_refs=(),
+            review_status="reviewed",
+            generator="Codex",
+            schema_version="4",
+            prompt_version="4.0",
+        )
+        for index in range(1, 201)
+    ]
+
+    with patch("tkn_codex_context.decisions.load_existing_decisions", return_value=existing):
+        report, report_path = execute_decision_build(
+            config,
+            project,
+            generator=None,
+            write=False,
+            cache_root=tmp_path / "reports",
+        )
+
+    assert report_path is None
+    assert report["existingDecisionIndexLimit"] == 200
+    assert report["existingDecisionIndexOmittedCount"] == 0
+    assert len(report["warnings"]) == 1
+    assert "has reached its 200-record limit" in report["warnings"][0]
+
+
 def test_decision_output_requires_known_existing_id() -> None:
     with pytest.raises(PipelineError, match="unknown decisionId"):
         validate_decision_output(

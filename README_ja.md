@@ -545,6 +545,11 @@ tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --dry-run
 省略するため、最終的な作成・更新・既存参照件数は通常実行時に確定します。選択した個別の
 Thread Noteと予定するsynthesis batchを確認する場合は`--full-output`を使用します。
 
+推論用indexへ含める既存Decision Recordは新しい順に200件までです。indexが上限へ到達すると
+reportの`warningCount`を増やし、`existingDecisionIndexLimit`と
+`existingDecisionIndexOmittedCount`を表示します。これはrunの失敗ではなく、古いrecordが
+model contextから外れ始める境界を明示する品質warningです。
+
 `--dry-run`を付けない場合は生成AIを呼び出し、Decision Record、state、run reportを
 生成・保存します。
 
@@ -778,26 +783,37 @@ src/tkn_codex_context/profiles/
 | resource | 役割 |
 | --- | --- |
 | `prompt.md` | version付きの編集方針、各fieldの意味、development label、source・merge・repair modeの指示 |
-| `output.schema.json` | Codex structured outputとPython検証が共用する、生成JSONのfield・型・enum・上限 |
+| `output.schema.json` | inference providerのstructured outputとPython検証が共用する、生成JSONのfield・型・enum・上限 |
 | `template.md` | version付きの決定的なMarkdown見出し順序とsection配置 |
 
 3つは次の生成pipelineとして連携します。
 
-```text
-source event + prompt + output schema
-    -> 検証済みの中間JSON
-    -> Python renderer + template
-    -> Thread Note
-
-Thread Note + existing decision index + prompt + output schema
-    -> 検証済みのdecision中間JSON
-    -> Python renderer + template
-    -> Decision Record
-
-Thread Notes + Decision Records + repository evidence + prompt + output schema
-    -> 検証済みのcurrent-context中間JSON
-    -> Python renderer + template
-    -> Working Context
+```mermaid
+flowchart LR
+  SE["Source events"] --> TI["Thread Note inference"]
+  TN["Thread Notes"] --> DI["Decision inference"]
+  EI["Existing Decision index"] --> DI
+  TN --> WI["Working Context inference"]
+  DR["Decision Records"] --> WI
+  RE["Repository evidence"] --> WI
+  P["Profile prompt"] --> TI
+  P --> DI
+  P --> WI
+  S["Profile output schema"] --> TV["Validated summary JSON"]
+  S --> DV["Validated decision JSON"]
+  S --> WV["Validated context JSON"]
+  TI --> TV
+  DI --> DV
+  WI --> WV
+  TV --> TR["Template renderer"]
+  DV --> DRR["Template renderer"]
+  WV --> WR["Template renderer"]
+  T["Profile Markdown template"] --> TR
+  T --> DRR
+  T --> WR
+  TR --> TNO["Thread Note"]
+  DRR --> DRO["Decision Record"]
+  WR --> WCO["Working Context"]
 ```
 
 output schemaは完成したMarkdownではなく、生成AIが返す中間JSONの契約です。
