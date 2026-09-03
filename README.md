@@ -423,17 +423,40 @@ The main compact output fields mean:
 | `reportSummary.failedCount` | Number of failed threads |
 | `reportSummary.deferredCount` | Number of threads postponed by the runtime limit |
 | `reportSummary.warningCount` | Number of run warnings |
+| `reportSummary.excludedCount` | Number of identifiable chats listed in the detailed `excluded` array |
 | `reportSummary.scan.*` | Numeric scan counters such as files, eligible, unchanged, and ignored files |
 
-The default output intentionally omits large `projects`, `selected`,
+The default output intentionally omits large `projects`, `selected`, `excluded`,
 `processed`, and error-detail arrays. For a non-dry-run command, inspect the
 file at `reportPath` for those details. Dry-run does not write a report, so use
-`--full-output` when the exact selected Projects, threads, and sources must be
-reviewed:
+`--full-output` when the exact selected or excluded Projects, threads, and
+sources must be reviewed:
 
 ```powershell
 tkn-codex-context thread-notes pull --dry-run --full-output
 ```
+
+The full report's `excluded` array identifies chats rejected because of their
+classification, a persistent source/content condition, or a Project
+attribution result. Every entry has
+`threadId`, the sessions-root-relative `sourceRef`, `reason`, and
+`candidateProjectIds`. The reason codes are:
+
+| Reason | Meaning |
+| --- | --- |
+| `without-event-time` | The last valid JSONL record has no usable source event timestamp |
+| `approval-or-internal` | The chat is an approval review or a known internal Codex chat |
+| `without-user-message` | No usable user message exists in the chat |
+| `projectless` | Codex app state explicitly marks the thread as projectless |
+| `assigned-to-other-project` | The thread is explicitly assigned outside the selected Project set |
+| `ambiguous-project` | cwd evidence matches more than one candidate Project |
+| `unmatched-project` | Neither explicit assignment nor cwd evidence identifies a Project |
+| `without-project-user-message` | A Project matched, but no user message belongs to that Project |
+
+Date-window, idle, explicit thread-filter, and unchanged-note decisions are not
+added to `excluded`; they remain scan counters. Consequently,
+`reportSummary.excludedCount` and `reportSummary.scan.ignoredFiles` need not be
+equal.
 
 If dry-run reports `reportSummary.selectedCount: 0`, no Thread Note is planned
 for creation or update. `reportPath: null` and

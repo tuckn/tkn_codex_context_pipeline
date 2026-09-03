@@ -392,16 +392,36 @@ tkn-codex-context thread-notes pull --dry-run
 | `reportSummary.failedCount` | 失敗したthread数 |
 | `reportSummary.deferredCount` | runtime上限により次回へ延期したthread数 |
 | `reportSummary.warningCount` | run warningの件数 |
+| `reportSummary.excludedCount` | 詳細な`excluded`配列に記録された識別可能なchat数 |
 | `reportSummary.scan.*` | file数、候補数、変更なし、対象外などの数値counter |
 
-既定出力では、大きくなりやすい`projects`、`selected`、`processed`、error詳細の
+既定出力では、大きくなりやすい`projects`、`selected`、`excluded`、`processed`、error詳細の
 配列を省略します。通常実行の詳細は`reportPath`のfileを確認してください。
-dry-runはreportを保存しないため、選択されたProject、thread、sourceの詳細を
+dry-runはreportを保存しないため、選択または除外されたProject、thread、sourceの詳細を
 確認するときは`--full-output`を使います。
 
 ```powershell
 tkn-codex-context thread-notes pull --dry-run --full-output
 ```
+
+完全なreportの`excluded`配列には、chat種別、継続的なsource/content条件、またはProject
+帰属判定によって除外したchatを記録します。各項目は`threadId`、sessions rootからの相対参照
+である`sourceRef`、`reason`、`candidateProjectIds`を持ちます。reason codeは次のとおりです。
+
+| reason | 意味 |
+| --- | --- |
+| `without-event-time` | JSONLで最後に有効だったrecordに利用可能なsource event timestampがない |
+| `approval-or-internal` | approval reviewまたは既知のCodex内部chat |
+| `without-user-message` | chat内に利用可能なuser messageがない |
+| `projectless` | Codex app stateでthreadが明示的にprojectlessとされている |
+| `assigned-to-other-project` | 選択したProject集合の外側へthreadが明示的に割り当てられている |
+| `ambiguous-project` | cwd evidenceが複数の候補Projectに一致する |
+| `unmatched-project` | 明示的割当とcwd evidenceのどちらでもProjectを特定できない |
+| `without-project-user-message` | Projectには一致したが、そのProjectに属するuser messageがない |
+
+日時範囲、idle、明示的なthread filter、変更なしの判定は`excluded`へ追加せず、scan counterに
+残します。そのため`reportSummary.excludedCount`と`reportSummary.scan.ignoredFiles`は一致しない
+場合があります。
 
 dry-runで`reportSummary.selectedCount: 0`なら、今回作成・更新するThread Noteは
 ありません。`reportPath: null`と`reportSummary.processedCount: 0`はdry-runの

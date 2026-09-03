@@ -552,6 +552,20 @@ def source_event_time(value: str) -> datetime | None:
         return None
 
 
+def excluded_chat(
+    thread_id: str,
+    source_reference: str,
+    reason: str,
+    candidate_project_ids: Sequence[str] = (),
+) -> dict[str, Any]:
+    return {
+        "threadId": thread_id,
+        "sourceRef": source_reference,
+        "reason": reason,
+        "candidateProjectIds": sorted(set(candidate_project_ids)),
+    }
+
+
 def candidate_for_project(
     path: Path,
     project: Project,
@@ -616,7 +630,7 @@ def scan_candidates(
     project_ids: Sequence[str] = (),
     thread_ids: Sequence[str] = (),
     ignore_fingerprints: bool = False,
-) -> tuple[list[Candidate], dict[str, int]]:
+) -> tuple[list[Candidate], dict[str, int], list[dict[str, Any]]]:
     selected_projects = [project for project in projects if not project_ids or project.project_id in set(project_ids)]
     missing = set(project_ids) - {project.project_id for project in selected_projects}
     if missing:
@@ -641,6 +655,7 @@ def scan_candidates(
         "projectless": 0,
         "unmatched": 0,
     }
+    excluded: list[dict[str, Any]] = []
     assigned_to: dict[str, str] = {}
     projectless: set[str] = set()
     for project in selected_projects:
@@ -655,10 +670,20 @@ def scan_candidates(
     for path in sorted(config.sessions_root.rglob("*.jsonl")):
         counts["files"] += 1
         source = read_thread_source(path)
+        relative_ref = source_ref(path, config.sessions_root)
+        qualified_ref = f"{config.source_id}/{relative_ref}"
         last_event_at = source_event_time(source.last_event_at)
         if last_event_at is None:
             counts["ignoredFiles"] += 1
             counts["excludedWithoutEventTime"] += 1
+            if source.thread_log and source.thread_log.id:
+                excluded.append(
+                    excluded_chat(
+                        source.thread_log.id,
+                        qualified_ref,
+                        "without-event-time",
+                    )
+                )
             continue
         if (not backfill and last_event_at < watermark) or (backfill and last_event_at >= watermark):
             counts["ignoredFiles"] += 1
@@ -673,21 +698,43 @@ def scan_candidates(
         if is_approval_review(thread_log) or is_known_internal_thread(thread_log):
             counts["ignoredFiles"] += 1
             counts["excludedApprovalOrInternal"] += 1
+            excluded.append(
+                excluded_chat(
+                    thread_log.id,
+                    qualified_ref,
+                    "approval-or-internal",
+                )
+            )
             continue
         if not has_clean_user_message(thread_log):
             counts["ignoredFiles"] += 1
             counts["excludedWithoutUserMessage"] += 1
+            excluded.append(
+                excluded_chat(
+                    thread_log.id,
+                    qualified_ref,
+                    "without-user-message",
+                )
+            )
             continue
         all_events = source.events
         if thread_log.id in projectless:
             counts["projectless"] += 1
             counts["ignoredFiles"] += 1
+            excluded.append(excluded_chat(thread_log.id, qualified_ref, "projectless"))
             continue
         if thread_log.id not in assigned_to and any(
             thread_log.id in project.foreign_assigned_thread_ids for project in selected_projects
         ):
             counts["unmatched"] += 1
             counts["ignoredFiles"] += 1
+            excluded.append(
+                excluded_chat(
+                    thread_log.id,
+                    qualified_ref,
+                    "assigned-to-other-project",
+                )
+            )
             continue
         explicit_project_id = assigned_to.get(thread_log.id)
         if explicit_project_id:
@@ -705,20 +752,35 @@ def scan_candidates(
         if len(matched_projects) > 1:
             counts["ambiguous"] += 1
             counts["ignoredFiles"] += 1
+            excluded.append(
+                excluded_chat(
+                    thread_log.id,
+                    qualified_ref,
+                    "ambiguous-project",
+                    tuple(project.project_id for project in matched_projects),
+                )
+            )
             continue
         if not matched_projects:
             counts["unmatched"] += 1
             counts["ignoredFiles"] += 1
+            excluded.append(excluded_chat(thread_log.id, qualified_ref, "unmatched-project"))
             continue
         project = matched_projects[0]
         events = events_for_project(thread_log.id, all_events, project)
         if not any(event.kind == "user_message" for event in events):
             counts["ignoredFiles"] += 1
+            excluded.append(
+                excluded_chat(
+                    thread_log.id,
+                    qualified_ref,
+                    "without-project-user-message",
+                    (project.project_id,),
+                )
+            )
             continue
         matched_file = False
         for project in matched_projects:
-            relative_ref = source_ref(path, config.sessions_root)
-            qualified_ref = f"{config.source_id}/{relative_ref}"
             candidate = Candidate(
                 project=project,
                 thread_id=thread_log.id,
@@ -749,7 +811,7 @@ def scan_candidates(
             counts["ignoredFiles"] += 1
     for candidates in groups.values():
         candidates.sort(key=lambda item: (item.started_at, item.thread_id))
-    return round_robin(groups), counts
+    return round_robin(groups), counts, excluded
 
 
 def truncate_text(text: str, limit: int = MAX_EVENT_TEXT_CHARACTERS) -> str:
@@ -1379,8 +1441,9 @@ def verify_historical_root(project: Project, historical_root: Path) -> Path:
 def scan_rebuild_candidates(
     config: PipelineConfig,
     project: Project,
-) -> tuple[list[Candidate], dict[str, int]]:
+) -> tuple[list[Candidate], dict[str, int], list[dict[str, Any]]]:
     candidates: list[Candidate] = []
+    excluded: list[dict[str, Any]] = []
     counts = {
         "files": 0,
         "matchedProject": 0,
@@ -1396,27 +1459,52 @@ def scan_rebuild_candidates(
         if not thread_log:
             counts["unmatchedProject"] += 1
             continue
-        if (
-            thread_log.id in project.projectless_thread_ids
-            or thread_log.id in project.foreign_assigned_thread_ids
-        ):
+        relative_ref = source_ref(path, config.sessions_root)
+        qualified_ref = f"{config.source_id}/{relative_ref}"
+        if thread_log.id in project.projectless_thread_ids:
             counts["unmatchedProject"] += 1
+            excluded.append(excluded_chat(thread_log.id, qualified_ref, "projectless"))
+            continue
+        if thread_log.id in project.foreign_assigned_thread_ids:
+            counts["unmatchedProject"] += 1
+            excluded.append(
+                excluded_chat(
+                    thread_log.id,
+                    qualified_ref,
+                    "assigned-to-other-project",
+                )
+            )
             continue
         project_events = events_for_project(thread_log.id, source.events, project)
         if not project_events:
             counts["unmatchedProject"] += 1
+            excluded.append(excluded_chat(thread_log.id, qualified_ref, "unmatched-project"))
             continue
         counts["matchedProject"] += 1
         if is_approval_review(thread_log) or is_known_internal_thread(thread_log):
             counts["excludedApprovalOrInternal"] += 1
+            excluded.append(
+                excluded_chat(
+                    thread_log.id,
+                    qualified_ref,
+                    "approval-or-internal",
+                    (project.project_id,),
+                )
+            )
             continue
         if not has_clean_user_message(thread_log) or not any(
             event.kind == "user_message" for event in project_events
         ):
             counts["excludedWithoutUserMessage"] += 1
+            excluded.append(
+                excluded_chat(
+                    thread_log.id,
+                    qualified_ref,
+                    "without-project-user-message",
+                    (project.project_id,),
+                )
+            )
             continue
-        relative_ref = source_ref(path, config.sessions_root)
-        qualified_ref = f"{config.source_id}/{relative_ref}"
         candidates.append(
             Candidate(
                 project=project,
@@ -1439,7 +1527,7 @@ def scan_rebuild_candidates(
     )
     if duplicate_threads:
         raise PipelineError("duplicate source thread ids in rebuild input: " + ", ".join(duplicate_threads))
-    return candidates, counts
+    return candidates, counts, excluded
 
 
 def thread_note_metadata(path: Path) -> tuple[dict[str, str], list[str], list[str], str]:
@@ -1886,7 +1974,7 @@ def execute_rebuild(
         project,
         historical_roots=tuple(dict.fromkeys((*project.historical_roots, *approved))),
     )
-    candidates, scan_counts = scan_rebuild_candidates(config, project)
+    candidates, scan_counts, excluded = scan_rebuild_candidates(config, project)
     prompt = SUMMARY_PROMPT_RESOURCE
     candidates_by_thread = {item.thread_id: item for item in candidates}
 
@@ -1972,6 +2060,7 @@ def execute_rebuild(
         },
         "approvedHistoricalRoots": [str(root) for root in approved],
         "scan": scan_counts,
+        "excluded": excluded,
         "selectedCount": len(candidates),
         "preservedCurrent": [path.name for path in preserve],
         "generatorVersions": generator_versions,
@@ -2206,7 +2295,7 @@ def execute_pipeline(
     started = now_local()
     start_deadline = started + timedelta(minutes=config.runtime_minutes)
     hard_deadline = start_deadline + timedelta(minutes=IN_FLIGHT_GRACE_MINUTES)
-    candidates, scan_counts = scan_candidates(
+    candidates, scan_counts, excluded = scan_candidates(
         config,
         projects,
         backfill=backfill,
@@ -2233,6 +2322,7 @@ def execute_pipeline(
             "fingerprint": generator_fingerprint(config),
         },
         "scan": scan_counts,
+        "excluded": excluded,
         "selectedCount": len(candidates),
         "processed": [],
         "failed": [],

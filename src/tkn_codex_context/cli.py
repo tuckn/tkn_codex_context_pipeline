@@ -628,6 +628,7 @@ def _thread_note_report_summary(report: dict[str, Any]) -> dict[str, Any]:
         "failedCount": failed_count,
         "deferredCount": _list_count(report.get("deferred")),
         "warningCount": _list_count(report.get("warnings")),
+        "excludedCount": _list_count(report.get("excluded")),
     }
     optional_scalars = (
         "projectId",

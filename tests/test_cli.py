@@ -635,6 +635,7 @@ def test_compact_thread_note_output_summarizes_rebuild_counts(tmp_path: Path) ->
             "failed": [],
             "deferred": [],
             "warnings": ["warning"],
+            "excluded": [{"threadId": "excluded-1"}, {"threadId": "excluded-2"}],
             "preservedCurrent": ["old.md"],
             "replacedCurrent": [{}, {}],
             "deletedLegacy": [],
@@ -650,6 +651,7 @@ def test_compact_thread_note_output_summarizes_rebuild_counts(tmp_path: Path) ->
     assert "projects" not in output["projectFetchSummary"]
     assert output["reportSummary"]["processedCount"] == 3
     assert output["reportSummary"]["warningCount"] == 1
+    assert output["reportSummary"]["excludedCount"] == 2
     assert output["reportSummary"]["preservedCurrentCount"] == 1
     assert output["reportSummary"]["replacedCurrentCount"] == 2
     assert output["reportSummary"]["scan"] == {"files": 370, "eligible": 3}
@@ -819,6 +821,7 @@ def test_thread_notes_full_output_preserves_detailed_dry_run(
     output = json.loads(capsys.readouterr().out)
     assert output["report"]["mode"] == "rebuild"
     assert output["report"]["dryRun"] is True
+    assert "excluded" in output["report"]
     assert "projects" in output["projectFetch"]
     assert "reportSummary" not in output
 

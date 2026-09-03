@@ -216,7 +216,10 @@ Attribution precedence:
 2. unique cwd match against every active root
 3. saved historical aliases
 
-Projectless and ambiguous threads are excluded and reported. Explicit
+Projectless, externally assigned, ambiguous, unmatched, and user-evidence
+exclusions are listed in the full run report under `excluded`. Each entry has
+`threadId`, a sessions-root-relative `sourceRef`, a stable `reason`, and
+`candidateProjectIds`; compact output exposes `excludedCount`. Explicit
 assignment wins even if the chat cwd is outside the currently active roots.
 
 ## Thread Note v3 contract
@@ -423,10 +426,11 @@ because filtering of internal or otherwise ineligible chats occurs before the
 attribution counters.
 
 On 2026-09-03, a read-only normal-pull dry-run exercised the unified JSONL
-reader and event-time selection against 563 real source logs. It found 110
-eligible threads, zero invalid or missing source event times, zero ambiguous
-threads, one projectless thread, and one unmatched thread. It completed with no
-failed or deferred threads and wrote no report.
+reader, event-time selection, and exclusion details against 563 real source
+logs. It found 112 eligible threads and listed 105 exclusions: 103 approval or
+internal chats, one projectless thread, and one unmatched thread. Every listed
+item had all required fields. It completed with no failed or deferred threads,
+zero invalid or missing source event times, and no report write.
 
 On 2026-08-03, a second read-only verification of `decisions build` resolved
 the current Project by internal ID with 22/22 Projects bound and no pending

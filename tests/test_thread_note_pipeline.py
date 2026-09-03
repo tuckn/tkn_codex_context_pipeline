@@ -288,8 +288,8 @@ class ThreadNotePipelineTests(unittest.TestCase):
         current_mtime = datetime.now().astimezone().timestamp()
         os.utime(path, (current_mtime, current_mtime))
 
-        daily, _counts = scan_candidates(self.config, [self.project])
-        backfill, _counts = scan_candidates(self.config, [self.project], backfill=True)
+        daily, _counts, _excluded = scan_candidates(self.config, [self.project])
+        backfill, _counts, _excluded = scan_candidates(self.config, [self.project], backfill=True)
 
         self.assertEqual([], daily)
         self.assertEqual(["thread-old"], [item.thread_id for item in backfill])
@@ -297,7 +297,7 @@ class ThreadNotePipelineTests(unittest.TestCase):
     def test_backfill_excludes_post_watermark_chat(self) -> None:
         write_chat(self.sessions / "new.jsonl", thread_id="thread-new", cwd=self.repo)
 
-        candidates, _counts = scan_candidates(
+        candidates, _counts, _excluded = scan_candidates(
             self.config,
             [self.project],
             backfill=True,
@@ -314,11 +314,13 @@ class ThreadNotePipelineTests(unittest.TestCase):
         records[-1] = json.dumps(final_record)
         path.write_text("\n".join(records) + "\n", encoding="utf-8")
 
-        candidates, counts = scan_candidates(self.config, [self.project])
+        candidates, counts, excluded = scan_candidates(self.config, [self.project])
 
         self.assertEqual([], candidates)
         self.assertEqual(1, counts["ignoredFiles"])
         self.assertEqual(1, counts["excludedWithoutEventTime"])
+        self.assertEqual("without-event-time", excluded[0]["reason"])
+        self.assertEqual("thread-missing-time", excluded[0]["threadId"])
 
     def test_scan_reads_each_jsonl_once(self) -> None:
         write_chat(self.sessions / "chat.jsonl", thread_id="thread-1", cwd=self.repo)
@@ -327,7 +329,7 @@ class ThreadNotePipelineTests(unittest.TestCase):
             "tkn_codex_context.thread_notes.read_thread_source",
             wraps=read_thread_source,
         ) as read_source:
-            candidates, _counts = scan_candidates(self.config, [self.project])
+            candidates, _counts, _excluded = scan_candidates(self.config, [self.project])
 
         self.assertEqual(["thread-1"], [item.thread_id for item in candidates])
         self.assertEqual(1, read_source.call_count)
@@ -356,7 +358,7 @@ class ThreadNotePipelineTests(unittest.TestCase):
             cwd=outside,
         )
 
-        candidates, counts = scan_candidates(self.config, [project])
+        candidates, counts, _excluded = scan_candidates(self.config, [project])
 
         self.assertEqual(
             {"thread-secondary", "thread-assigned"},
@@ -403,11 +405,14 @@ class ThreadNotePipelineTests(unittest.TestCase):
     def test_projectless_and_ambiguous_threads_are_excluded(self) -> None:
         nested = self.repo / "nested"
         nested.mkdir()
+        outside = self.root / "outside"
+        outside.mkdir()
         first = Project(
             "first",
             "First",
             self.repo,
             self.context / "first",
+            foreign_assigned_thread_ids=frozenset({"thread-foreign"}),
             projectless_thread_ids=frozenset({"thread-projectless"}),
         )
         second = Project(
@@ -415,7 +420,13 @@ class ThreadNotePipelineTests(unittest.TestCase):
             "Second",
             nested,
             self.context / "second",
+            foreign_assigned_thread_ids=frozenset({"thread-foreign"}),
             projectless_thread_ids=frozenset({"thread-projectless"}),
+        )
+        write_chat(
+            self.sessions / "foreign.jsonl",
+            thread_id="thread-foreign",
+            cwd=outside,
         )
         write_chat(
             self.sessions / "projectless.jsonl",
@@ -427,27 +438,72 @@ class ThreadNotePipelineTests(unittest.TestCase):
             thread_id="thread-ambiguous",
             cwd=nested,
         )
+        write_chat(
+            self.sessions / "unmatched.jsonl",
+            thread_id="thread-unmatched",
+            cwd=outside,
+        )
 
-        candidates, counts = scan_candidates(self.config, [first, second])
+        candidates, counts, excluded = scan_candidates(self.config, [first, second])
 
         self.assertEqual([], candidates)
         self.assertEqual(1, counts["projectless"])
         self.assertEqual(1, counts["ambiguous"])
+        self.assertEqual(2, counts["unmatched"])
+        self.assertEqual(
+            [
+                {
+                    "threadId": "thread-ambiguous",
+                    "sourceRef": "windows/ambiguous.jsonl",
+                    "reason": "ambiguous-project",
+                    "candidateProjectIds": ["first", "second"],
+                },
+                {
+                    "threadId": "thread-foreign",
+                    "sourceRef": "windows/foreign.jsonl",
+                    "reason": "assigned-to-other-project",
+                    "candidateProjectIds": [],
+                },
+                {
+                    "threadId": "thread-projectless",
+                    "sourceRef": "windows/projectless.jsonl",
+                    "reason": "projectless",
+                    "candidateProjectIds": [],
+                },
+                {
+                    "threadId": "thread-unmatched",
+                    "sourceRef": "windows/unmatched.jsonl",
+                    "reason": "unmatched-project",
+                    "candidateProjectIds": [],
+                },
+            ],
+            excluded,
+        )
+        report, report_path = execute_pipeline(
+            self.config,
+            [first, second],
+            summarizer=None,
+            dry_run=True,
+        )
+        self.assertIsNone(report_path)
+        self.assertEqual(excluded, report["excluded"])
 
     def test_daily_scan_requires_idle_source(self) -> None:
         path = self.sessions / "chat.jsonl"
         recent_start = (datetime.now().astimezone() - timedelta(seconds=10)).isoformat()
         write_chat(path, thread_id="thread-1", cwd=self.repo, started_at=recent_start)
 
-        active, _counts = scan_candidates(self.config, [self.project])
+        active, _counts, active_excluded = scan_candidates(self.config, [self.project])
         old_start = (datetime.now().astimezone() - timedelta(hours=1)).isoformat()
         write_chat(path, thread_id="thread-1", cwd=self.repo, started_at=old_start)
         current_mtime = datetime.now().astimezone().timestamp()
         os.utime(path, (current_mtime, current_mtime))
-        idle, _counts = scan_candidates(self.config, [self.project])
+        idle, _counts, idle_excluded = scan_candidates(self.config, [self.project])
 
         self.assertEqual([], active)
+        self.assertEqual([], active_excluded)
         self.assertEqual(["thread-1"], [item.thread_id for item in idle])
+        self.assertEqual([], idle_excluded)
 
     def test_scan_has_no_daily_item_cap(self) -> None:
         for index in range(25):
@@ -457,7 +513,7 @@ class ThreadNotePipelineTests(unittest.TestCase):
                 cwd=self.repo,
             )
 
-        candidates, _counts = scan_candidates(self.config, [self.project])
+        candidates, _counts, _excluded = scan_candidates(self.config, [self.project])
 
         self.assertEqual(25, len(candidates))
 
@@ -518,7 +574,7 @@ class ThreadNotePipelineTests(unittest.TestCase):
         state["sources"]["windows"]["threads"]["thread-1"]["generationFingerprint"] = "old"
         self.project.state_path.write_text(json.dumps(state), encoding="utf-8")
 
-        candidates, counts = scan_candidates(self.config, [self.project])
+        candidates, counts, _excluded = scan_candidates(self.config, [self.project])
 
         self.assertEqual(["thread-1"], [item.thread_id for item in candidates])
         self.assertEqual(1, counts["staleGenerator"])
@@ -559,7 +615,7 @@ class ThreadNotePipelineTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        candidates, counts = scan_candidates(self.config, [self.project])
+        candidates, counts, _excluded = scan_candidates(self.config, [self.project])
 
         self.assertEqual(["thread-1"], [item.thread_id for item in candidates])
         self.assertEqual(1, counts["staleGenerator"])
@@ -930,7 +986,7 @@ class ThreadNotePipelineTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        candidates, _counts = scan_candidates(self.config, [self.project])
+        candidates, _counts, _excluded = scan_candidates(self.config, [self.project])
 
         self.assertEqual(["thread-old-root"], [item.thread_id for item in candidates])
 
