@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from collections.abc import Iterable
 
 from .common import yaml_string
@@ -10,9 +11,9 @@ from .common import yaml_string
 FRONTMATTER_PATTERN = re.compile(r"\A---\r?\n.*?\r?\n---\r?\n?", re.DOTALL)
 LEGACY_ARTIFACT_SCHEMA_VERSION = "1"
 SUPPORTED_ARTIFACT_SCHEMA_VERSIONS = {
-    "thread note": {"3"},
-    "decision record": {"1", "2", "3", "4"},
-    "working context": {"1", "2", "3"},
+    "thread note": {"3", "4"},
+    "decision record": {"1", "2", "3", "4", "5"},
+    "working context": {"1", "2", "3", "4"},
 }
 
 
@@ -152,3 +153,13 @@ def unique_ordered(values: Iterable[str]) -> list[str]:
         seen.add(value)
         result.append(value)
     return result
+
+
+def canonical_uuid4(value: str) -> str:
+    """Return a canonical lowercase UUIDv4 string or raise ValueError."""
+
+    parsed = uuid.UUID(value)
+    canonical = str(parsed)
+    if parsed.version != 4 or value != canonical:
+        raise ValueError("expected a canonical lowercase UUIDv4")
+    return canonical

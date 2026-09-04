@@ -78,6 +78,68 @@ def initialize_cli_pipeline(config_path: Path | None = None) -> None:
     assert main([*prefix, "init"]) == 0
 
 
+def test_raw_ingest_cli_copies_source_and_reports_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    write_app_state(home)
+    initialize_cli_pipeline()
+    capsys.readouterr()
+    source = home / ".codex" / "sessions" / "chat.jsonl"
+    source.parent.mkdir(parents=True)
+    original = b'{"type":"event_msg","payload":{}}\n'
+    source.write_bytes(original)
+
+    result = main(["raw", "ingest"])
+
+    assert result == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["command"] == "raw ingest"
+    assert output["reportSummary"]["capturedCount"] == 1
+    assert output["reportPath"]
+    assert Path(output["reportPath"]).is_file()
+    assert source.read_bytes() == original
+    captures = list((home / ".tkn" / "codex_context_pipeline" / "raw").rglob("*.jsonl"))
+    assert len([path for path in captures if path.name != "manifest.jsonl"]) == 1
+
+
+def test_artifact_id_migration_cli_has_read_only_preview_and_explicit_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    write_app_state(home)
+    initialize_cli_pipeline()
+    capsys.readouterr()
+    note = home / ".tkn" / "codex_context_pipeline" / "data" / "projects" / "local-project" / "thread-notes" / "note.md"
+    note.write_bytes((Path(__file__).parent / "fixtures" / "thread-note-v3.md").read_bytes())
+    original = note.read_bytes()
+
+    preview_result = main(["artifacts", "migrate-ids", "--all", "--dry-run"])
+
+    assert preview_result == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["reportSummary"]["plannedCount"] == 1
+    assert preview["reportPath"] is None
+    assert note.read_bytes() == original
+
+    write_result = main(["artifacts", "migrate-ids", "--all"])
+
+    assert write_result == 0
+    written = json.loads(capsys.readouterr().out)
+    assert written["reportSummary"]["assignedCount"] == 1
+    assert written["reportPath"]
+    assert "id:" in note.read_text(encoding="utf-8")
+    assert "schemaVersion: 3" in note.read_text(encoding="utf-8")
+
+
 def test_logging_uses_readable_stderr_prefixes(
     capsys: CaptureFixture[str],
 ) -> None:

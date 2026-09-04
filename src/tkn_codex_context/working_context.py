@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .common import frontmatter
-from .frontmatter import frontmatter_list_value, parse_simple_frontmatter, split_frontmatter_lines
+from .frontmatter import canonical_uuid4, frontmatter_list_value, parse_simple_frontmatter, split_frontmatter_lines
 from .inference import (
     InferenceExecutionError,
     invoke_structured,
@@ -50,9 +50,9 @@ from .working_context_resources import (
     render_working_context_template,
 )
 
-WORKING_CONTEXT_SCHEMA_VERSION = 3
+WORKING_CONTEXT_SCHEMA_VERSION = 4
 WORKING_CONTEXT_STATE_SCHEMA_VERSION = 1
-WORKING_CONTEXT_RENDERER_VERSION = 1
+WORKING_CONTEXT_RENDERER_VERSION = 2
 WORKING_CONTEXT_FILENAME = "working-context.md"
 WORKING_CONTEXT_STATE_FILENAME = "working-context-build-state.json"
 MAX_SOURCE_CHARACTERS = 30_000
@@ -616,6 +616,7 @@ def render_working_context(
     config: PipelineConfig,
     generated_at: str | None = None,
     record_date: str | None = None,
+    note_id: str | None = None,
     template: WorkingContextTemplate = WORKING_CONTEXT_PROFILE.template,
 ) -> str:
     timestamp = generated_at or now_iso()
@@ -629,6 +630,7 @@ def render_working_context(
     fields: list[tuple[str, str | int | bool | list[str]]] = [
         ("type", "workingContext"),
         ("schemaVersion", WORKING_CONTEXT_SCHEMA_VERSION),
+        ("id", note_id or str(uuid.uuid4())),
         ("title", str(data["title"])),
         ("description", str(data["description"])),
         ("projectId", project.project_id),
@@ -700,15 +702,23 @@ def validate_working_context(path: Path) -> dict[str, Any]:
         raise PipelineError(f"invalid Working Context filename: {path.name}")
     text = path.read_text(encoding="utf-8-sig")
     metadata = parse_simple_frontmatter(text)
+    schema_version = metadata.get("schemaVersion") or "1"
+    if schema_version not in {"3", str(WORKING_CONTEXT_SCHEMA_VERSION)}:
+        raise PipelineError(f"unsupported Working Context schemaVersion {schema_version}: {path}")
     required = {
         "type": "workingContext",
-        "schemaVersion": str(WORKING_CONTEXT_SCHEMA_VERSION),
+        "schemaVersion": schema_version,
         "status": "active",
         "automatedValidation": "passed",
     }
     for key, expected in required.items():
         if metadata.get(key) != expected:
             raise PipelineError(f"Working Context has invalid {key}: {path}")
+    if schema_version == str(WORKING_CONTEXT_SCHEMA_VERSION):
+        try:
+            canonical_uuid4(metadata.get("id") or "")
+        except ValueError as exc:
+            raise PipelineError(f"Working Context has invalid id: {path}") from exc
     if not is_supported_generator(metadata.get("generator") or ""):
         raise PipelineError(f"Working Context has invalid generator: {path}")
     required_values = (
@@ -793,7 +803,8 @@ def validate_working_context(path: Path) -> dict[str, Any]:
     return {
         "valid": True,
         "path": str(path.absolute()),
-        "schemaVersion": WORKING_CONTEXT_SCHEMA_VERSION,
+        "schemaVersion": int(schema_version),
+        "id": metadata.get("id"),
         "projectId": metadata["projectId"],
         "projectStatus": metadata["projectStatus"],
         "reviewStatus": metadata["reviewStatus"],
@@ -805,6 +816,13 @@ def _existing_record_date(path: Path) -> str | None:
         return None
     metadata = parse_simple_frontmatter(path.read_text(encoding="utf-8-sig"))
     return metadata.get("date") or None
+
+
+def _existing_note_id(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    metadata = parse_simple_frontmatter(path.read_text(encoding="utf-8-sig"))
+    return metadata.get("id") or None
 
 
 def execute_working_context_build(
@@ -904,6 +922,7 @@ def execute_working_context_build(
             config=config,
             generated_at=timestamp,
             record_date=_existing_record_date(output_path),
+            note_id=_existing_note_id(output_path),
         )
         old_output = output_path.read_bytes() if output_path.exists() else None
         old_state = state_path.read_bytes() if state_path.exists() else None

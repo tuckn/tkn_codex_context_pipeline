@@ -167,6 +167,7 @@ def decision_project(tmp_path: Path) -> tuple[Project, PipelineConfig]:
     config = PipelineConfig(
         installed_at="2026-08-01T00:00:00+09:00",
         sessions_root=tmp_path / "codex-sessions",
+        raw_root=tmp_path / "raw",
         source_id="windows",
         codex_bin=str(tmp_path / "codex.exe"),
     )
@@ -264,7 +265,7 @@ def test_unreviewed_v2_can_be_resynthesized_as_v4(
 
     assert [item["decisionId"] for item in report["updated"]] == ["DR-0003"]
     metadata = parse_simple_frontmatter(record.read_text(encoding="utf-8"))
-    assert metadata["schemaVersion"] == "4"
+    assert metadata["schemaVersion"] == "5"
     assert metadata["date"] == original_date
     assert "None." not in record.read_text(encoding="utf-8")
 
@@ -407,9 +408,9 @@ def test_decision_write_creates_record_without_mutating_source_and_becomes_uncha
     decision = project.context_path / report["created"][0]["decisionRecord"]
     validation = validate_decision_record(decision)
     assert validation["decisionId"] == "DR-0001"
-    assert validation["schemaVersion"] == 4
+    assert validation["schemaVersion"] == 5
     decision_text = decision.read_text(encoding="utf-8")
-    assert "schemaVersion: 4" in decision_text
+    assert "schemaVersion: 5" in decision_text
     assert "## Decision" in decision_text
     assert "## Why" in decision_text
     assert "## Follow-up" in decision_text

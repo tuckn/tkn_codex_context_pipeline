@@ -6,6 +6,7 @@ import json
 import re
 import tempfile
 import time
+import uuid
 from collections.abc import Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ from .decision_resources import (
     render_decision_template,
 )
 from .frontmatter import (
+    canonical_uuid4,
     frontmatter_list_value,
     parse_simple_frontmatter,
     replace_frontmatter_list,
@@ -51,9 +53,9 @@ from .thread_notes import (
     write_run_report,
 )
 
-DECISION_SCHEMA_VERSION = 4
+DECISION_SCHEMA_VERSION = 5
 DECISION_STATE_SCHEMA_VERSION = 1
-DECISION_RENDERER_VERSION = 4
+DECISION_RENDERER_VERSION = 5
 DECISION_STATE_FILENAME = "decision-build-state.json"
 MAX_EXISTING_DECISION_INDEX = 200
 MAX_SOURCE_NOTE_CHARACTERS = 20_000
@@ -95,7 +97,7 @@ class ExistingDecision:
     @property
     def update_allowed(self) -> bool:
         return (
-            self.schema_version in {"2", "3", str(DECISION_SCHEMA_VERSION)}
+            self.schema_version in {"2", "3", "4", str(DECISION_SCHEMA_VERSION)}
             and is_supported_generator(self.generator)
             and self.review_status == "unreviewed"
         )
@@ -214,8 +216,13 @@ def load_existing_decisions(project: Project) -> list[ExistingDecision]:
         text = path.read_text(encoding="utf-8-sig")
         metadata = parse_simple_frontmatter(text)
         version = metadata.get("schemaVersion") or "1"
-        if version not in {"1", "2", "3", "4"}:
+        if version not in {"1", "2", "3", "4", str(DECISION_SCHEMA_VERSION)}:
             raise PipelineError(f"unsupported decision schemaVersion {version}: {path.name}")
+        if version == str(DECISION_SCHEMA_VERSION):
+            try:
+                canonical_uuid4(metadata.get("id") or "")
+            except ValueError as exc:
+                raise PipelineError(f"decision record has invalid id: {path}") from exc
         decision_id = metadata.get("decisionId") or f"DR-{match.group(1)}"
         if decision_id != f"DR-{match.group(1)}":
             raise PipelineError(f"decisionId does not match filename: {path.name}")
@@ -263,8 +270,13 @@ def _refresh_existing_decision_index_report(report: dict[str, Any], existing_cou
 def _thread_note_source(path: Path, project: Project) -> DecisionSource:
     text = path.read_text(encoding="utf-8-sig")
     metadata, thread_ids, _source_refs, version = thread_note_metadata(path)
-    if version != "3":
-        raise PipelineError(f"decision distillation requires Thread Note v3: {path.name}")
+    if version not in {"3", "4"}:
+        raise PipelineError(f"decision distillation requires Thread Note v3 or v4: {path.name}")
+    if version == "4":
+        try:
+            canonical_uuid4(metadata.get("id") or "")
+        except ValueError as exc:
+            raise PipelineError(f"Thread Note v4 has invalid id: {path.name}") from exc
     if metadata.get("type") != "threadNote":
         raise PipelineError(f"invalid Thread Note type for decision distillation: {path.name}")
     if len(thread_ids) != 1:
@@ -653,6 +665,7 @@ def render_decision(
     *,
     generated_at: str | None = None,
     record_date: str | None = None,
+    note_id: str | None = None,
     source_refs_override: Sequence[str] | None = None,
     config: PipelineConfig,
     template: DecisionTemplate = DECISION_PROFILE.template,
@@ -676,6 +689,7 @@ def render_decision(
     fields: list[tuple[str, str | int | list[str]]] = [
         ("type", "decision"),
         ("schemaVersion", DECISION_SCHEMA_VERSION),
+        ("id", note_id or str(uuid.uuid4())),
         ("title", str(data["title"])),
         ("description", str(data["description"])),
         ("generator", provider_name(config.provider)),
@@ -762,7 +776,7 @@ def validate_decision_record(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8-sig")
     metadata = parse_simple_frontmatter(text)
     schema_version = metadata.get("schemaVersion") or "1"
-    if schema_version not in {"2", "3", str(DECISION_SCHEMA_VERSION)}:
+    if schema_version not in {"2", "3", "4", str(DECISION_SCHEMA_VERSION)}:
         raise PipelineError(f"unsupported decision schemaVersion {schema_version}: {path.name}")
     required = {
         "type": "decision",
@@ -772,6 +786,11 @@ def validate_decision_record(path: Path) -> dict[str, Any]:
     for key, expected in required.items():
         if metadata.get(key) != expected:
             raise PipelineError(f"decision record has invalid {key}: {path}")
+    if schema_version == str(DECISION_SCHEMA_VERSION):
+        try:
+            canonical_uuid4(metadata.get("id") or "")
+        except ValueError as exc:
+            raise PipelineError(f"decision record has invalid id: {path}") from exc
     if not is_supported_generator(metadata.get("generator") or ""):
         raise PipelineError(f"decision record has invalid generator: {path}")
     if metadata.get("reviewStatus") not in {"unreviewed", "reviewed"}:
@@ -898,6 +917,7 @@ def validate_decision_record(path: Path) -> dict[str, Any]:
         "valid": True,
         "path": str(path.absolute()),
         "schemaVersion": int(schema_version),
+        "id": metadata.get("id"),
         "decisionId": decision_id,
         "status": metadata["status"],
         "implementationStatus": metadata["implementationStatus"],
@@ -1003,6 +1023,7 @@ def _commit_batch(
                 decision_id,
                 generated_at=timestamp,
                 record_date=metadata.get("date") or timestamp,
+                note_id=metadata.get("id") or None,
                 source_refs_override=merged_source_refs,
                 config=config,
             )

@@ -80,6 +80,7 @@ def test_force_dry_run_and_apply_preserve_settings_and_remove_old_storage(tmp_pa
     data_root = tmp_path / "app/data"
     state_root = tmp_path / "app/state"
     cache_root = tmp_path / "cache"
+    raw_root = tmp_path / "app/raw"
     write_app_state(codex_home)
     write_config(
         config_path,
@@ -91,6 +92,7 @@ def test_force_dry_run_and_apply_preserve_settings_and_remove_old_storage(tmp_pa
             "data_root": str(data_root),
             "state_root": str(state_root),
             "cache_root": str(cache_root),
+            "raw_root": str(raw_root),
             "generation": {
                 "active_provider": "codex",
                 "providers": {
@@ -104,19 +106,20 @@ def test_force_dry_run_and_apply_preserve_settings_and_remove_old_storage(tmp_pa
             "summary_prompt": "retired-custom.md",
         },
     )
-    for root in (data_root, state_root, cache_root):
+    for root in (data_root, state_root, cache_root, raw_root):
         root.mkdir(parents=True)
         (root / "old.txt").write_text("old", encoding="utf-8")
-    write_root_ownership_markers(data_root, state_root, cache_root)
+    write_root_ownership_markers(data_root, state_root, cache_root, raw_root)
     before = config_path.read_bytes()
 
     preview = initialize_application(config_path, overrides=None, force=True, dry_run=True)
 
     assert config_path.read_bytes() == before
-    assert all((root / "old.txt").is_file() for root in (data_root, state_root, cache_root))
+    assert all((root / "old.txt").is_file() for root in (data_root, state_root, cache_root, raw_root))
     assert preview["removedConfigKeys"] == ["summary_prompt", "context_store_root"]
     assert preview["projectFetch"]["projects"][0]["projectId"] == "local-project"
     assert [item["status"] for item in preview["rootOwnership"]] == [
+        "owned",
         "owned",
         "owned",
         "owned",
@@ -134,12 +137,15 @@ def test_force_dry_run_and_apply_preserve_settings_and_remove_old_storage(tmp_pa
     assert saved["installed_at"] != "2026-01-01T00:00:00+00:00"
     assert "context_store_root" not in saved
     assert "summary_prompt" not in saved
-    assert not any((root / "old.txt").exists() for root in (data_root, state_root, cache_root))
+    assert not any((root / "old.txt").exists() for root in (data_root, state_root, cache_root, raw_root))
     assert (data_root / "projects/local-project/thread-notes").is_dir()
     assert not any((data_root / "projects/local-project/thread-notes").iterdir())
     assert (state_root / "projects/local-project").is_dir()
     assert not (state_root / "projects/local-project/chat-refresh-state.json").exists()
-    assert all((root / ROOT_OWNERSHIP_MARKER).is_file() for root in (data_root, state_root, cache_root))
+    assert all(
+        (root / ROOT_OWNERSHIP_MARKER).is_file()
+        for root in (data_root, state_root, cache_root, raw_root)
+    )
 
 
 def test_init_refuses_existing_storage_without_force(tmp_path: Path) -> None:
@@ -148,6 +154,7 @@ def test_init_refuses_existing_storage_without_force(tmp_path: Path) -> None:
     data_root = tmp_path / "app/data"
     state_root = tmp_path / "app/state"
     cache_root = tmp_path / "cache"
+    raw_root = tmp_path / "app/raw"
     write_app_state(codex_home)
     write_config(
         config_path,
@@ -156,12 +163,13 @@ def test_init_refuses_existing_storage_without_force(tmp_path: Path) -> None:
             "data_root": str(data_root),
             "state_root": str(state_root),
             "cache_root": str(cache_root),
+            "raw_root": str(raw_root),
         },
     )
-    for root in (data_root, state_root, cache_root):
+    for root in (data_root, state_root, cache_root, raw_root):
         root.mkdir(parents=True)
         (root / "existing.txt").write_text("existing", encoding="utf-8")
-    write_root_ownership_markers(data_root, state_root, cache_root)
+    write_root_ownership_markers(data_root, state_root, cache_root, raw_root)
     config_before = config_path.read_bytes()
 
     with pytest.raises(PipelineError, match="init --force --dry-run"):
@@ -170,7 +178,7 @@ def test_init_refuses_existing_storage_without_force(tmp_path: Path) -> None:
     assert config_path.read_bytes() == config_before
     assert all(
         (root / "existing.txt").read_text(encoding="utf-8") == "existing"
-        for root in (data_root, state_root, cache_root)
+        for root in (data_root, state_root, cache_root, raw_root)
     )
 
 
@@ -183,6 +191,7 @@ def test_force_rolls_back_storage_and_config_on_failure(
     data_root = tmp_path / "app/data"
     state_root = tmp_path / "app/state"
     cache_root = tmp_path / "cache"
+    raw_root = tmp_path / "app/raw"
     write_app_state(codex_home)
     write_config(
         config_path,
@@ -192,12 +201,13 @@ def test_force_rolls_back_storage_and_config_on_failure(
             "data_root": str(data_root),
             "state_root": str(state_root),
             "cache_root": str(cache_root),
+            "raw_root": str(raw_root),
         },
     )
-    for root in (data_root, state_root, cache_root):
+    for root in (data_root, state_root, cache_root, raw_root):
         root.mkdir(parents=True)
         (root / "old.txt").write_text("old", encoding="utf-8")
-    write_root_ownership_markers(data_root, state_root, cache_root)
+    write_root_ownership_markers(data_root, state_root, cache_root, raw_root)
     config_before = config_path.read_bytes()
     real_create = initialization.create_fresh_projects
 
@@ -212,7 +222,10 @@ def test_force_rolls_back_storage_and_config_on_failure(
         initialize_application(config_path, overrides=None, force=True, dry_run=False)
 
     assert config_path.read_bytes() == config_before
-    assert all((root / "old.txt").read_text(encoding="utf-8") == "old" for root in (data_root, state_root, cache_root))
+    assert all(
+        (root / "old.txt").read_text(encoding="utf-8") == "old"
+        for root in (data_root, state_root, cache_root, raw_root)
+    )
 
 
 def test_force_does_not_delete_storage_when_staging_fails(
@@ -224,6 +237,7 @@ def test_force_does_not_delete_storage_when_staging_fails(
     data_root = tmp_path / "app/data"
     state_root = tmp_path / "app/state"
     cache_root = tmp_path / "cache"
+    raw_root = tmp_path / "app/raw"
     write_app_state(codex_home)
     write_config(
         config_path,
@@ -233,12 +247,13 @@ def test_force_does_not_delete_storage_when_staging_fails(
             "data_root": str(data_root),
             "state_root": str(state_root),
             "cache_root": str(cache_root),
+            "raw_root": str(raw_root),
         },
     )
-    for root in (data_root, state_root, cache_root):
+    for root in (data_root, state_root, cache_root, raw_root):
         root.mkdir(parents=True)
         (root / "old.txt").write_text("old", encoding="utf-8")
-    write_root_ownership_markers(data_root, state_root, cache_root)
+    write_root_ownership_markers(data_root, state_root, cache_root, raw_root)
     real_replace = Path.replace
 
     def fail_data_stage(path: Path, target: Path) -> Path:
@@ -251,7 +266,10 @@ def test_force_does_not_delete_storage_when_staging_fails(
     with pytest.raises(PipelineError, match="cannot stage reset target"):
         initialize_application(config_path, overrides=None, force=True, dry_run=False)
 
-    assert all((root / "old.txt").read_text(encoding="utf-8") == "old" for root in (data_root, state_root, cache_root))
+    assert all(
+        (root / "old.txt").read_text(encoding="utf-8") == "old"
+        for root in (data_root, state_root, cache_root, raw_root)
+    )
 
 
 @pytest.mark.parametrize("dry_run", [True, False])
@@ -261,7 +279,7 @@ def test_force_rejects_unowned_nonempty_storage(
 ) -> None:
     config_path = tmp_path / "app/config.yaml"
     codex_home = tmp_path / "codex"
-    roots = (tmp_path / "app/data", tmp_path / "app/state", tmp_path / "cache")
+    roots = (tmp_path / "app/data", tmp_path / "app/state", tmp_path / "cache", tmp_path / "app/raw")
     write_config(
         config_path,
         {
@@ -270,6 +288,7 @@ def test_force_rejects_unowned_nonempty_storage(
             "data_root": str(roots[0]),
             "state_root": str(roots[1]),
             "cache_root": str(roots[2]),
+            "raw_root": str(roots[3]),
         },
     )
     for root in roots:
@@ -291,7 +310,7 @@ def test_adopt_existing_previews_then_marks_roots_without_rebuilding(
 ) -> None:
     config_path = tmp_path / "app/config.yaml"
     codex_home = tmp_path / "codex"
-    roots = (tmp_path / "app/data", tmp_path / "app/state", tmp_path / "cache")
+    roots = (tmp_path / "app/data", tmp_path / "app/state", tmp_path / "cache", tmp_path / "app/raw")
     write_config(
         config_path,
         {
@@ -300,6 +319,7 @@ def test_adopt_existing_previews_then_marks_roots_without_rebuilding(
             "data_root": str(roots[0]),
             "state_root": str(roots[1]),
             "cache_root": str(roots[2]),
+            "raw_root": str(roots[3]),
         },
     )
     for root in roots:
@@ -322,6 +342,7 @@ def test_adopt_existing_previews_then_marks_roots_without_rebuilding(
         "unowned",
         "unowned",
         "unowned",
+        "unowned",
     ]
     assert config_path.read_bytes() == config_before
     assert not any((root / ROOT_OWNERSHIP_MARKER).exists() for root in roots)
@@ -336,6 +357,7 @@ def test_adopt_existing_previews_then_marks_roots_without_rebuilding(
 
     assert applied["adoptedTargets"] == [str(root.resolve()) for root in roots]
     assert [item["status"] for item in applied["rootOwnership"]] == [
+        "owned",
         "owned",
         "owned",
         "owned",
@@ -362,7 +384,7 @@ def test_adopt_existing_previews_then_marks_roots_without_rebuilding(
 
 def test_adopt_existing_rejects_foreign_marker(tmp_path: Path) -> None:
     config_path = tmp_path / "app/config.yaml"
-    roots = (tmp_path / "app/data", tmp_path / "app/state", tmp_path / "cache")
+    roots = (tmp_path / "app/data", tmp_path / "app/state", tmp_path / "cache", tmp_path / "app/raw")
     write_config(
         config_path,
         {
@@ -370,6 +392,7 @@ def test_adopt_existing_rejects_foreign_marker(tmp_path: Path) -> None:
             "data_root": str(roots[0]),
             "state_root": str(roots[1]),
             "cache_root": str(roots[2]),
+            "raw_root": str(roots[3]),
         },
     )
     for root in roots:
@@ -396,6 +419,7 @@ def test_adopt_existing_rejects_foreign_marker(tmp_path: Path) -> None:
 
     assert not (roots[1] / ROOT_OWNERSHIP_MARKER).exists()
     assert not (roots[2] / ROOT_OWNERSHIP_MARKER).exists()
+    assert not (roots[3] / ROOT_OWNERSHIP_MARKER).exists()
 
 
 def test_force_rejects_unsafe_reset_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -409,6 +433,7 @@ def test_force_rejects_unsafe_reset_target(tmp_path: Path, monkeypatch: pytest.M
             "data_root": str(home),
             "state_root": str(home / "app/state"),
             "cache_root": str(home / "cache"),
+            "raw_root": str(home / "app/raw"),
         },
     )
 

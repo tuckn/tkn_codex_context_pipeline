@@ -32,7 +32,7 @@ def write_yaml(path: Path, value: dict[str, object]) -> None:
 def test_packaged_example_config_uses_portable_home_paths() -> None:
     value = yaml.safe_load(config_example_text())
 
-    for key in ("codex_home", "data_root", "state_root", "cache_root"):
+    for key in ("codex_home", "raw_root", "data_root", "state_root", "cache_root"):
         assert "\\" not in value[key]
         assert value[key].startswith("~/")
     assert value["installed_at"] is None
@@ -191,7 +191,7 @@ def test_config_file_requires_schema_version(tmp_path: Path) -> None:
         ('"2.0"', "expected a quoted MAJOR.MINOR.PATCH"),
         ('"2.0.0-rc1"', "expected a quoted MAJOR.MINOR.PATCH"),
         ('"1.9.0"', "schema v1 is no longer supported"),
-        ('"2.1.0"', "unsupported newer configuration schema_version"),
+        ('"2.2.0"', "unsupported newer configuration schema_version"),
         ('"3.0.0"', "unsupported newer configuration schema_version"),
     ],
 )
@@ -209,15 +209,38 @@ def test_unsupported_schema_versions_are_rejected(
 
 def test_same_major_minor_newer_patch_is_accepted(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
-    write_yaml(path, {"schema_version": "2.0.7", "idle_minutes": 10})
+    write_yaml(path, {"schema_version": "2.1.7", "idle_minutes": 10})
 
     resolution = resolve_app_config(explicit_path=path, cwd=tmp_path)
 
     assert resolution.config.schema_version == CONFIG_SCHEMA_VERSION
     explicit = resolution.layers[-1]
-    assert explicit["schemaVersion"] == "2.0.7"
+    assert explicit["schemaVersion"] == "2.1.7"
     assert explicit["effectiveSchemaVersion"] == CONFIG_SCHEMA_VERSION
     assert explicit["migration"] is None
+
+
+def test_previous_minor_is_normalized_in_memory_and_gets_default_raw_root(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    write_yaml(path, {"schema_version": "2.0.0", "idle_minutes": 10})
+
+    resolution = resolve_app_config(explicit_path=path, cwd=tmp_path)
+
+    assert resolution.config.raw_root == Path.home() / ".tkn" / "codex_context_pipeline" / "raw"
+    assert resolution.layers[-1]["migration"] == {
+        "kind": "compatible-version-normalization",
+        "fromVersion": "2.0.0",
+        "toVersion": CONFIG_SCHEMA_VERSION,
+        "persistentConfigUpdated": False,
+    }
+
+
+def test_source_id_must_be_safe_for_storage(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    write_yaml(path, {"source_id": "../outside"})
+
+    with pytest.raises(PipelineError, match="source_id must use only"):
+        load_app_config(explicit_path=path, cwd=tmp_path)
 
 
 def test_legacy_integer_schema_v2_is_migrated_in_memory(tmp_path: Path) -> None:

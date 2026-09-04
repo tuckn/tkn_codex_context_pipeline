@@ -1,8 +1,9 @@
 # Tkn Codex Context Pipeline
 
 An independent, local-first pipeline that reads Codex app Project state and
-`~/.codex/sessions`, generates durable Thread Note v3 Markdown files, and
-distills concise Decision Record v4 files and Working Context v3 dashboards.
+`~/.codex/sessions`, captures their exact bytes in an immutable Bronze landing
+zone, generates durable Thread Note v4 Markdown files, and distills concise
+Decision Record v5 files and Working Context v4 dashboards.
 It never writes markers, configuration, or context into a Project folder.
 
 Japanese documentation: [README_ja.md](README_ja.md)
@@ -133,7 +134,8 @@ because it is not the standalone CLI required for automation; install the
 standalone Codex CLI and configure that executable instead.
 
 ```yaml
-schema_version: "2.0.0"
+schema_version: "2.1.0"
+raw_root: ~/.tkn/codex_context_pipeline/raw
 generation:
   active_provider: codex
   providers:
@@ -182,7 +184,7 @@ generation:
 ```
 
 Every application-managed config file requires a quoted three-part SemVer
-`schema_version`; the current effective version is `"2.0.0"`. The version is
+`schema_version`; the current effective version is `"2.1.0"`. The version is
 metadata for that individual source and does not participate in normal
 configuration precedence. Readers accept older compatible versions in the
 same major, and a newer patch in the supported major/minor. A newer minor or
@@ -191,15 +193,15 @@ invalid version format stops with an actionable error. `config show` reports
 the source and effective versions and whether an in-memory migration occurred.
 
 The integer `schema_version: 2` emitted by v0.3.0 is recognized as a legacy
-representation and normalized to `"2.0.0"` in memory without rewriting the
-file. Replace that first line with `schema_version: "2.0.0"` to persist the
+representation and normalized to `"2.1.0"` in memory without rewriting the
+file. Replace that first line with `schema_version: "2.1.0"` to persist the
 current format.
 
 Configuration schema major v2 replaces the former flat `provider`, `model`,
 `reasoning_effort`, `*_executable`, and `ollama_base_url` keys. Schema v1 is
 rejected with a migration message so that a partially migrated configuration
 cannot silently select the wrong backend. Move those values into the matching
-provider block and set `schema_version: "2.0.0"`.
+provider block and set `schema_version: "2.1.0"`.
 
 The same values can be overridden as global CLI options placed before the
 command:
@@ -228,7 +230,7 @@ artifacts eligible for regeneration.
 `init` reads the existing configuration, creates the Project registry, and
 creates empty `thread-notes/` and `decisions/` directories for each Project in
 the Codex app sidebar. It also writes a `.tkn-codex-context-root.json`
-ownership marker to each configured data, state, and cache root. It does not
+ownership marker to each configured data, state, cache, and raw root. It does not
 generate Thread Notes, Decision Records, or Working Contexts. The command
 records the current time as `installed_at`. A normal pull automatically
 processes only chats created or updated at or after that time. Older chats
@@ -282,6 +284,11 @@ The application separates its own files by purpose:
 ```text
 ~/.tkn/codex_context_pipeline/
 ├── config.yaml
+├── raw/
+│   ├── .tkn-codex-context-root.json
+│   └── <sourceId>/
+│       ├── manifest.jsonl
+│       └── sha256/<prefix>/<sha256>.jsonl
 ├── data/
 │   ├── .tkn-codex-context-root.json
 │   ├── project-registry.jsonl
@@ -304,7 +311,9 @@ The application separates its own files by purpose:
 └── resumable work cache
 ```
 
-`data/` holds durable Project registry, Thread Note, Decision Record, and Working Context data. `state/` holds
+`raw/` holds immutable, content-addressed copies of source JSONL and an
+append-only manifest. `data/` holds durable Project registry, Thread Note,
+Decision Record, and Working Context data. `state/` holds
 refresh checkpoints and reproducible history such as run
 reports. Cache is kept separately under `~/.cache` by default;
 `XDG_CACHE_HOME` is honored when it is set. Model input and output needed only
@@ -328,6 +337,57 @@ Legacy `summary_prompt: null` is ignored; remove any non-null
 `summary_prompt` entry before running the current CLI.
 
 ## Normal operation
+
+### Capture raw chats in the Bronze landing zone
+
+Every `thread-notes pull` and `thread-notes rebuild` run first performs the
+same Bronze ingest. In a write run, each newly observed byte sequence is copied
+to `raw_root/<sourceId>/sha256/<prefix>/<sha256>.jsonl`; the source under
+`codex_home/sessions` is never moved, rewritten, or deleted. Thread processing
+then reads the owned capture. The append-only manifest records `sourceRef`,
+capture hash, byte count, capture time, thread ID, and last event time.
+
+Capture and processing are separate states. A successful capture means the raw
+bytes are available; it does not mean a Thread Note was generated. Per-Project
+refresh state and run reports record `sourceCaptureRef` and
+`sourceCaptureSha256`, which identify the exact capture processed. There is no
+global watermark: the latest capture is selected independently for each
+`sourceRef`, and a source removed later remains available as `bronze-only`.
+
+Run Bronze ingest without generating notes when needed:
+
+```powershell
+tkn-codex-context raw ingest --dry-run
+tkn-codex-context raw ingest
+```
+
+The dry-run validates and reports planned copies without creating raw blobs,
+manifests, ownership markers, or reports. A non-empty unowned `raw_root`, an
+invalid ownership marker, overlapping source/raw roots, or a corrupt registered
+capture fails closed.
+
+### Assign stable artifact IDs
+
+New Thread Notes, Decision Records, and Working Context artifacts receive a
+canonical lowercase UUIDv4 in Frontmatter as `id`. Regeneration preserves that
+value even when a filename changes. Existing artifacts can be migrated
+explicitly:
+
+```powershell
+tkn-codex-context artifacts migrate-ids --all --dry-run
+tkn-codex-context artifacts migrate-ids --all
+tkn-codex-context artifacts migrate-ids --project-id <projectIdOrNameOrRoot> --dry-run
+```
+
+This is a metadata-only migration: it adds or validates `id`, preserves the
+Markdown body, BOM, newline style, existing dates and IDs, and leaves every
+legacy `schemaVersion` unchanged. A write run validates the result and restores
+all original bytes if any artifact fails; duplicate or non-UUIDv4 IDs are
+rejected. The dry-run does not mint IDs or write a run report.
+
+This repository owns the Markdown identity only. It does not create an RDF
+projection or emit `https://id.tuckn.net/{noteId}` IRIs; a downstream RDF
+component maps the Markdown `id` value to that IRI.
 
 ### Fetch Project metadata
 
@@ -424,6 +484,7 @@ The main compact output fields mean:
 | `reportSummary.deferredCount` | Number of threads postponed by the runtime limit |
 | `reportSummary.warningCount` | Number of run warnings |
 | `reportSummary.excludedCount` | Number of identifiable chats listed in the detailed `excluded` array |
+| `reportSummary.rawIngest.*` | Bronze discovery, capture/planned, unchanged, available, and Bronze-only counts |
 | `reportSummary.scan.*` | Numeric scan counters such as files, eligible, unchanged, and ignored files |
 
 The default output intentionally omits large `projects`, `selected`, `excluded`,
@@ -565,7 +626,7 @@ tkn-codex-context validate <thread-note.md>
 
 ### Generate Decision Records
 
-`decisions build` uses the stored Thread Note v3 files for one Project as its
+`decisions build` uses the stored supported Thread Note v3-v4 files for one Project as its
 primary input. The normal path does not reread the original Codex chat. Only
 Thread Notes with an `Explicit Decision` section are candidates. Multiple
 notes are sent in bounded synthesis batches, and the output unit is a central
@@ -612,7 +673,7 @@ compatibility, but emits a deprecation warning and should be removed.
 
 New records are stored under
 `data/projects/<projectId>/decisions/DR-NNNN-<slug>.md`. A newly generated
-Decision Record v4 always contains `Decision` and renders every other section
+Decision Record v5 always contains `Decision` and renders every other section
 only when it has source-backed content. Empty sections and `None.` placeholders
 are omitted. A decision is `Accepted` only when the source establishes explicit
 user acceptance or an operational practice that is already in effect;
@@ -655,9 +716,10 @@ record generation provenance. Targets for working context, repository
 documentation, global context, and Skills are also kept in `*Targets`
 frontmatter fields instead of the body.
 
-Existing Decision Record v1-v3 files remain readable and are not automatically
-rewritten. A Codex-generated v2-v3 record with `reviewStatus: unreviewed` can
-be resynthesized as v4 while preserving its ID and original date during normal
+Existing Decision Record v1-v4 files remain readable and are not automatically
+rewritten. A Codex-generated v2-v4 record with `reviewStatus: unreviewed` can
+be resynthesized as v5 while preserving its decision ID, artifact `id` when
+already present, and original date during normal
 `decisions build` execution. A `--dry-run` does not change it.
 
 Decision generation does not modify its input Thread Notes. The Decision
@@ -680,7 +742,7 @@ central judgment rewritten automatically; only new `sourceThreadNoteRefs` and
 tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --force
 ```
 
-Validate a generated Decision Record v4 or an existing v2-v3 record without
+Validate a generated Decision Record v5 or an existing v2-v4 record without
 changing it:
 
 ```powershell
@@ -690,7 +752,7 @@ tkn-codex-context decisions validate <decision-record.md>
 ### Build Working Context
 
 `working-context build` combines the current Project's validated Thread Note
-v3 files, Decision Records, selected root documentation, and a read-only Git
+v3-v4 files, Decision Records, selected root documentation, and a read-only Git
 snapshot into one concise `working-context.md`. It records current truth rather
 than chronology: stale statements are replaced, accepted decisions guide the
 dashboard, and proposed decisions are not promoted into current truth.
@@ -715,7 +777,7 @@ execution. The former `--write` option remains temporarily accepted for script
 compatibility, but emits a deprecation warning and should be removed.
 
 The generated artifact is stored at
-`data/projects/<projectId>/working-context.md`. Working Context v3 always
+`data/projects/<projectId>/working-context.md`. Working Context v4 always
 contains `Project Overview` and `Current Truth`; other sections are rendered
 only when source-backed content exists. `Semantic Context` may contain a small
 Project-specific `Semantic Glossary`, `Taxonomy`, and explicit relationships.
@@ -735,7 +797,7 @@ tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot> --d
 tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot> --allow-edited
 ```
 
-Validate a generated Working Context v3 without changing it:
+Validate a generated Working Context v4 without changing it:
 
 ```powershell
 tkn-codex-context working-context validate <working-context.md>
@@ -745,7 +807,8 @@ tkn-codex-context working-context validate <working-context.md>
 
 Every pipeline command that normally changes application-owned data, state,
 cache, or reports provides `--dry-run`. Without that option, `init`, `projects fetch`, `thread-notes
-pull/rebuild`, `decisions build`, and `working-context build` perform the
+pull/rebuild`, `raw ingest`, `artifacts migrate-ids`, `decisions build`, and
+`working-context build` perform the
 operation named by the command. `config init` is the explicit, idempotent
 configuration-creation boundary: it reports `unchanged` for identical content
 and protects differing content unless `--force` creates a backup first.

@@ -1,7 +1,8 @@
 # Tkn Codex Context Pipeline
 
 Codex appのProject状態と`~/.codex/sessions`を読み、chatを再利用可能な
-Thread Note v3へ変換し、そこから簡潔なDecision Record v4とWorking Context v3を生成する、
+正確なbyte列を不変のBronze landing zoneへ取り込み、Thread Note v4へ変換し、
+そこから簡潔なDecision Record v5とWorking Context v4を生成する、
 独立したローカルデータパイプラインです。
 Project folderにはmarker・設定・contextを一切書きません。
 
@@ -125,7 +126,8 @@ standalone CLIではないため拒否します。standalone Codex CLIをinstall
 指定してください。
 
 ```yaml
-schema_version: "2.0.0"
+schema_version: "2.1.0"
+raw_root: ~/.tkn/codex_context_pipeline/raw
 generation:
   active_provider: codex
   providers:
@@ -174,7 +176,7 @@ generation:
 ```
 
 applicationが管理する各config fileには、引用符付き3要素SemVer形式の
-`schema_version`が必要です。現在のeffective versionは`"2.0.0"`です。このversionは
+`schema_version`が必要です。現在のeffective versionは`"2.1.0"`です。このversionは
 各設定sourceのmetadataであり、通常の設定優先順位による上書き対象にはしません。
 同じMajorの互換性がある古いversionと、対応中のMajor/Minorに属する新しいPatchは
 読み込めます。新しいMinor/Major、migration経路のない古いMajor、version欠落、不正な
@@ -182,13 +184,13 @@ applicationが管理する各config fileには、引用符付き3要素SemVer形
 in-memory migrationの有無を確認できます。
 
 v0.3.0が出力した整数の`schema_version: 2`はlegacy表現として認識し、fileを書き換えず
-memory上で`"2.0.0"`へ変換します。現在の形式を永続化するには、先頭行を
-`schema_version: "2.0.0"`へ置き換えてください。
+memory上で`"2.1.0"`へ変換します。現在の形式を永続化するには、先頭行を
+`schema_version: "2.1.0"`へ置き換えてください。
 
 設定schema Major v2では、以前のflatな`provider`、`model`、`reasoning_effort`、
 `*_executable`、`ollama_base_url`を廃止しました。移行途中の設定で誤ったbackendが
 暗黙に選ばれないよう、schema v1は移行方法を示して拒否します。各値を対応する
-provider blockへ移し、`schema_version: "2.0.0"`を指定してください。
+provider blockへ移し、`schema_version: "2.1.0"`を指定してください。
 
 同じ値は、commandより前に置くglobal CLI optionでも上書きできます。
 
@@ -210,7 +212,7 @@ model、reasoning effortは生成fingerprintに含まれるため、providerを�
 生成artifactは再生成対象になります。
 
 `init`は作成済み設定を読み、Project registryとCodex app左ペインのProjectごとに
-空の`thread-notes/`と`decisions/`を用意します。また、設定されたdata、state、cacheの
+空の`thread-notes/`と`decisions/`を用意します。また、設定されたdata、state、cache、rawの
 各rootへ`.tkn-codex-context-root.json`所有権markerを書き込みます。Thread Noteや
 Decision Record、Working Contextは生成しません。実行日時は`installed_at`として
 保存され、通常実行が自動処理するのは、この日時以後に作成または更新されたchatだけ
@@ -259,6 +261,11 @@ tkn-codex-context projects list --json
 ```text
 ~/.tkn/codex_context_pipeline/
 ├── config.yaml
+├── raw/
+│   ├── .tkn-codex-context-root.json
+│   └── <sourceId>/
+│       ├── manifest.jsonl
+│       └── sha256/<prefix>/<sha256>.jsonl
 ├── data/
 │   ├── .tkn-codex-context-root.json
 │   ├── project-registry.jsonl
@@ -281,6 +288,7 @@ tkn-codex-context projects list --json
 └── 中断した処理を再開するためのcache
 ```
 
+`raw/`はsource JSONLの不変かつcontent-addressedなcopyとappend-only manifestを保持します。
 `data/`はProject registry、Thread Note、Decision Record、Working Contextなどの永続データ、`state/`はrefresh
 checkpointやrun reportなどの再作成可能な状態・履歴に使用します。
 cacheは既定で`~/.cache`へ分離し、`XDG_CACHE_HOME`が設定されている環境では
@@ -304,6 +312,53 @@ Thread Note、Decision Record、Working Contextの生成profileはapplication-ow
 場合は、現在のCLIを実行する前にそのkeyを削除してください。
 
 ## 通常実行
+
+### Raw chatをBronze landing zoneへ取り込む
+
+`thread-notes pull`と`thread-notes rebuild`は、scanの前に同じBronze ingestを実行します。
+書き込みrunでは、新しく観測したbyte列を
+`raw_root/<sourceId>/sha256/<prefix>/<sha256>.jsonl`へcopyします。
+`codex_home/sessions`のsource fileは移動・書き換え・削除しません。その後のThread処理は
+application所有のcaptureを読みます。append-only manifestには`sourceRef`、capture hash、
+byte数、capture時刻、thread ID、最後のevent時刻を記録します。
+
+capture済みと処理済みは別の状態です。captureの成功はraw byteが利用可能という意味で、
+Thread Note生成済みという意味ではありません。Projectごとのrefresh stateとrun reportに
+`sourceCaptureRef`と`sourceCaptureSha256`を保存し、どのcaptureを処理したかを識別します。
+global watermarkは使わず、各`sourceRef`の最新captureを独立に選びます。後からsource側で
+削除されたfileも`bronze-only`として利用できます。
+
+Thread Noteを生成せず、Bronze ingestだけを実行できます。
+
+```powershell
+tkn-codex-context raw ingest --dry-run
+tkn-codex-context raw ingest
+```
+
+dry-runはcopy予定を検証・表示しますが、raw blob、manifest、所有権marker、run reportを
+作りません。非emptyかつ未所有の`raw_root`、不正な所有権marker、source/raw rootの重複、
+登録済みcaptureの破損はfail closedで停止します。
+
+### Artifactへ安定IDを付与する
+
+新しいThread Note、Decision Record、Working Contextは、Frontmatterの`id`にcanonicalな
+小文字UUIDv4を持ちます。再生成時はfilenameが変わっても同じ値を維持します。既存artifactは
+次の明示commandで移行できます。
+
+```powershell
+tkn-codex-context artifacts migrate-ids --all --dry-run
+tkn-codex-context artifacts migrate-ids --all
+tkn-codex-context artifacts migrate-ids --project-id <projectIdOrNameOrRoot> --dry-run
+```
+
+これはmetadata-only migrationです。`id`だけを追加または検証し、Markdown本文、BOM、
+改行形式、既存date・IDを維持し、legacyの`schemaVersion`も変更しません。書き込みrunは
+結果を検証し、1件でも失敗すれば全original byteを復元します。重複IDとUUIDv4でないIDは
+拒否します。dry-runではIDを生成せず、run reportも書きません。
+
+このrepositoryの責務はMarkdown identityまでです。RDF projectionや
+`https://id.tuckn.net/{noteId}` IRIの生成は行いません。Markdownの`id`値からそのIRIへの
+mappingは、downstreamのRDF componentに委ねます。
 
 ### Project metadataを取得する
 
@@ -393,6 +448,7 @@ tkn-codex-context thread-notes pull --dry-run
 | `reportSummary.deferredCount` | runtime上限により次回へ延期したthread数 |
 | `reportSummary.warningCount` | run warningの件数 |
 | `reportSummary.excludedCount` | 詳細な`excluded`配列に記録された識別可能なchat数 |
+| `reportSummary.rawIngest.*` | Bronzeの発見、capture予定/実績、unchanged、利用可能、Bronze-only件数 |
 | `reportSummary.scan.*` | file数、候補数、変更なし、対象外などの数値counter |
 
 既定出力では、大きくなりやすい`projects`、`selected`、`excluded`、`processed`、error詳細の
@@ -523,7 +579,7 @@ tkn-codex-context validate <thread-note.md>
 
 ### Decision Recordを生成する
 
-`decisions build`は、1つのProjectに保存されたThread Note v3を一次入力として
+`decisions build`は、1つのProjectに保存された対応済みThread Note v3-v4を一次入力として
 durableなdecisionを抽出します。通常経路では元のCodex chatを読み直しません。
 `Explicit Decision`を持つ複数のThread Noteをbounded synthesis batchとしてモデルへ
 まとめて渡します。生成単位はThread Noteではなくcentral decisionです。複数のNoteが
@@ -562,7 +618,7 @@ version 0.2.0で、このcommandは既定dry-runから通常の書き込み実�
 ください。
 
 新規recordは`data/projects/<projectId>/decisions/DR-NNNN-<slug>.md`に保存します。
-新規生成するDecision Record v4は`Decision`だけを常設し、それ以外のsectionは
+新規生成するDecision Record v5は`Decision`だけを常設し、それ以外のsectionは
 source-backedな内容がある場合だけ表示します。空のsectionや`None.` placeholderは出力しません。
 明示的なuser acceptanceまたは成立済みのoperational practiceが確認できる場合だけ
 `Accepted`とし、それ以外は`Proposed`にします。statusと実装・検証状態は別fieldで
@@ -599,9 +655,10 @@ fieldは生成条件の追跡用なので、通常の初読では読み飛ばせ
 文書、global context、Skillへの反映先もFrontmatterの`*Targets` fieldで管理し、本文には
 表示しません。
 
-既存のDecision Record v1-v3はそのまま読み取り、自動上書きしません。
-Codex生成かつ`reviewStatus: unreviewed`のv2-v3は、通常の`decisions build`実行時に、
-IDと初回dateを保ってv4へ再構成できます。`--dry-run`では変更しません。
+既存のDecision Record v1-v4はそのまま読み取り、自動上書きしません。
+Codex生成かつ`reviewStatus: unreviewed`のv2-v4は、通常の`decisions build`実行時に、
+decision ID、既存のartifact `id`、初回dateを保ってv5へ再構成できます。
+`--dry-run`では変更しません。
 
 Decision生成は入力Thread Noteを変更しません。生成依存はDecision Record側の
 `sourceThreadNoteRefs`に保持し、Thread Noteごとの処理済み状態と逆引き`decisionIds`は
@@ -620,7 +677,7 @@ judgmentは自動更新せず、新しい`sourceThreadNoteRefs`と`Related Evide
 tkn-codex-context decisions build --project-id <projectIdOrNameOrRoot> --force
 ```
 
-生成したDecision Record v4と既存のv2-v3は単独でvalidateできます。
+生成したDecision Record v5と既存のv2-v4は単独でvalidateできます。
 
 ```powershell
 tkn-codex-context decisions validate <decision-record.md>
@@ -628,7 +685,7 @@ tkn-codex-context decisions validate <decision-record.md>
 
 ### Working Contextを生成する
 
-`working-context build`は、現在のProjectにある検証済みThread Note v3、Decision Record、
+`working-context build`は、現在のProjectにある検証済みThread Note v3-v4、Decision Record、
 選択したroot文書、read-onlyなGit snapshotをまとめ、短い`working-context.md`を生成します。
 時系列の履歴ではなくcurrent truthを扱い、古い記述は置換し、Accepted decisionをdashboardへ
 反映します。Proposed decisionをcurrent truthへ昇格しません。
@@ -651,7 +708,7 @@ version 0.2.0で、このcommandは既定dry-runから通常の書き込み実�
 `--write`はscript互換性のため一時的に受理しますが、deprecation warningを出すため削除して
 ください。
 
-生成結果は`data/projects/<projectId>/working-context.md`に保存します。Working Context v3は
+生成結果は`data/projects/<projectId>/working-context.md`に保存します。Working Context v4は
 `Project Overview`と`Current Truth`を常設し、それ以外はsource-backedな内容がある場合だけ
 表示します。`Semantic Context`には、Project固有の小さな`Semantic Glossary`、`Taxonomy`、
 明示的な関係を含められます。生成する事実、用語、分類、関係には、既存の`project:/`または
@@ -669,7 +726,7 @@ tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot> --d
 tkn-codex-context working-context build --project-id <projectIdOrNameOrRoot> --allow-edited
 ```
 
-生成したWorking Context v3は単独でvalidateできます。
+生成したWorking Context v4は単独でvalidateできます。
 
 ```powershell
 tkn-codex-context working-context validate <working-context.md>
@@ -677,10 +734,11 @@ tkn-codex-context working-context validate <working-context.md>
 
 ### dry-run契約
 
-application所有のdata、state、cache、reportを通常変更するすべてのpipeline commandが
+application所有のraw、data、state、cache、reportを通常変更するすべてのpipeline commandが
 `--dry-run`を提供します。このoptionを
-付けない`init`、`projects fetch`、`thread-notes pull/rebuild`、`decisions build`、
-`working-context build`は、command名が表す処理を実行します。
+付けない`init`、`projects fetch`、`raw ingest`、`artifacts migrate-ids`、
+`thread-notes pull/rebuild`、`decisions build`、`working-context build`は、
+command名が表す処理を実行します。
 `config init`は明示的でidempotentな設定作成境界です。同一内容なら`unchanged`とし、異なる
 内容は`--force`で先にbackupを作成しない限り保護します。
 

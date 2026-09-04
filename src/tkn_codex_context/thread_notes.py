@@ -33,6 +33,7 @@ from .chat_logs import (
 )
 from .common import frontmatter, slugify
 from .frontmatter import (
+    canonical_uuid4,
     frontmatter_list_value,
     parse_simple_frontmatter,
     split_frontmatter_lines,
@@ -48,6 +49,7 @@ from .prompting import (
     render_reduction_prompt,
     render_repair_prompt,
 )
+from .raw_capture import RawCaptureError, RawSourceInput, ingest_raw_sources
 from .safety import redact_secret_like_content
 from .summary_resources import (
     SummaryTemplate,
@@ -59,7 +61,7 @@ from .summary_resources import (
 CONFIG_SCHEMA_VERSION = 1
 STATE_SCHEMA_VERSION = 2
 LEGACY_STATE_SCHEMA_VERSION = 1
-THREAD_NOTE_SCHEMA_VERSION = 3
+THREAD_NOTE_SCHEMA_VERSION = 4
 CONFIG_FILENAME = "thread-note-pipeline.json"
 STATE_FILENAME = "chat-refresh-state.json"
 DEFAULT_SOURCE_ID = "windows" if os.name == "nt" else "local"
@@ -71,7 +73,7 @@ DEFAULT_MODEL_TIMEOUT_SECONDS = 1800
 DEFAULT_CHUNK_CHARACTERS = 120_000
 MAX_EVENT_TEXT_CHARACTERS = 8_000
 GENERATOR_PROMPT_VERSION = 4
-RENDERER_VERSION = 6
+RENDERER_VERSION = 7
 REBUILD_WORK_SCHEMA_VERSION = 1
 IN_FLIGHT_GRACE_MINUTES = 9
 MAX_NOTE_NARRATIVE_CHARACTERS = 9_000
@@ -128,6 +130,7 @@ class PartialPipelineError(PipelineError):
 class PipelineConfig:
     installed_at: str
     sessions_root: Path
+    raw_root: Path
     source_id: str
     codex_bin: str
     provider: str = "codex"
@@ -175,6 +178,8 @@ class Candidate:
     fingerprint: str
     events: tuple[ChatEvent, ...]
     source_last_event_at: str
+    source_capture_ref: str = ""
+    source_capture_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -271,12 +276,16 @@ def make_config(
     *,
     existing: PipelineConfig | None = None,
     sessions_root: Path | None = None,
+    raw_root: Path | None = None,
     codex_bin: str = "",
     installed_at: str | None = None,
 ) -> PipelineConfig:
     return PipelineConfig(
         installed_at=installed_at or (existing.installed_at if existing else now_iso()),
         sessions_root=(sessions_root or (existing.sessions_root if existing else default_sessions_root()))
+        .expanduser()
+        .absolute(),
+        raw_root=(raw_root or (existing.raw_root if existing else default_store_root() / "raw"))
         .expanduser()
         .absolute(),
         source_id=existing.source_id if existing else DEFAULT_SOURCE_ID,
@@ -298,6 +307,7 @@ def config_json(config: PipelineConfig) -> dict[str, Any]:
         "schemaVersion": CONFIG_SCHEMA_VERSION,
         "installedAt": config.installed_at,
         "sessionsRoot": str(config.sessions_root),
+        "rawRoot": str(config.raw_root),
         "sourceId": config.source_id,
         "provider": config.provider,
         "codexBin": config.codex_bin,
@@ -329,6 +339,7 @@ def load_config(path: Path | None = None) -> PipelineConfig:
     config = PipelineConfig(
         installed_at=str(value.get("installedAt") or ""),
         sessions_root=Path(str(value.get("sessionsRoot") or "")).expanduser().absolute(),
+        raw_root=Path(str(value.get("rawRoot") or (default_store_root() / "raw"))).expanduser().absolute(),
         source_id=str(value.get("sourceId") or DEFAULT_SOURCE_ID),
         codex_bin=str(value.get("codexBin") or ""),
         provider=str(value.get("provider") or "codex"),
@@ -478,6 +489,8 @@ def update_refresh_state(
         "rendererVersion": RENDERER_VERSION,
         "noteHash": sha256(note_path.read_bytes()).hexdigest(),
         "sourceRefs": [candidate.source_ref],
+        "sourceCaptureRef": candidate.source_capture_ref or None,
+        "sourceCaptureSha256": candidate.source_capture_sha256 or None,
         "threadNotes": [relative_note],
         "processedAt": processed_at,
     }
@@ -634,6 +647,7 @@ def scan_candidates(
     project_ids: Sequence[str] = (),
     thread_ids: Sequence[str] = (),
     ignore_fingerprints: bool = False,
+    source_inputs: Sequence[RawSourceInput] | None = None,
 ) -> tuple[list[Candidate], dict[str, int], list[dict[str, Any]]]:
     selected_projects = [project for project in projects if not project_ids or project.project_id in set(project_ids)]
     missing = set(project_ids) - {project.project_id for project in selected_projects}
@@ -671,10 +685,24 @@ def scan_candidates(
     thread_filter = set(thread_ids)
     watermark = parse_datetime(config.installed_at)
     idle_cutoff = now_local() - timedelta(minutes=config.idle_minutes)
-    for path in sorted(config.sessions_root.rglob("*.jsonl")):
+    scan_inputs = source_inputs if source_inputs is not None else tuple(
+        RawSourceInput(
+            source_path=path,
+            source_ref=source_ref(path, config.sessions_root),
+            capture_ref="",
+            capture_sha256="",
+            byte_count=path.stat().st_size,
+            thread_id="",
+            last_event_at="",
+            original_present=True,
+        )
+        for path in sorted(config.sessions_root.rglob("*.jsonl"))
+    )
+    for source_input in scan_inputs:
+        path = source_input.source_path
         counts["files"] += 1
         source = read_thread_source(path)
-        relative_ref = source_ref(path, config.sessions_root)
+        relative_ref = source_input.source_ref
         qualified_ref = f"{config.source_id}/{relative_ref}"
         last_event_at = source_event_time(source.last_event_at)
         if last_event_at is None:
@@ -795,13 +823,19 @@ def scan_candidates(
                 fingerprint=fingerprint_events(thread_log.id, events, qualified_ref),
                 events=events,
                 source_last_event_at=source.last_event_at,
+                source_capture_ref=source_input.capture_ref,
+                source_capture_sha256=source_input.capture_sha256,
             )
             if thread_filter and candidate.thread_id not in thread_filter:
                 continue
             matched_file = True
             source = states[project.project_id]["sources"][config.source_id]
             prior = source["threads"].get(candidate.thread_id, {})
-            if not ignore_fingerprints and prior.get("fingerprint") == candidate.fingerprint:
+            same_capture = (
+                not candidate.source_capture_sha256
+                or prior.get("sourceCaptureSha256") == candidate.source_capture_sha256
+            )
+            if not ignore_fingerprints and same_capture and prior.get("fingerprint") == candidate.fingerprint:
                 if (
                     prior.get("generationFingerprint") == generation_fingerprint(config, candidate)
                     and current_note_matches_generation(candidate, config)
@@ -1109,7 +1143,12 @@ def generator_fingerprint(config: PipelineConfig) -> str:
 
 
 def generation_fingerprint(config: PipelineConfig, candidate: Candidate) -> str:
-    return sha256(f"{candidate.fingerprint}:{generator_fingerprint(config)}".encode()).hexdigest()
+    return sha256(
+        (
+            f"{candidate.fingerprint}:{candidate.source_capture_sha256}:"
+            f"{generator_fingerprint(config)}"
+        ).encode()
+    ).hexdigest()
 
 
 def event_citation(event_ids: Sequence[str]) -> str:
@@ -1176,11 +1215,13 @@ def render_note(
     started = source_timestamp(candidate.started_at)
     created = existing.get("date") or started.isoformat(timespec="seconds")
     thread_note_id = existing.get("threadNoteId") or started.strftime("%Y%m%dT%H%M%S%z")
+    note_id = existing.get("id") or str(uuid.uuid4())
     last_state = data["lastKnownState"]
     rendered_at = now_iso()
     fields: list[tuple[str, str | int | list[str]]] = [
         ("type", "threadNote"),
         ("schemaVersion", THREAD_NOTE_SCHEMA_VERSION),
+        ("id", note_id),
         ("title", str(data["title"]).strip() or "Codex thread"),
         ("description", str(data["description"]).strip()),
         ("generator", data.get("_generator", "Codex")),
@@ -1210,6 +1251,10 @@ def render_note(
         ("sourceRefs", [candidate.source_ref]),
         ("sourceFingerprint", candidate.fingerprint),
     ]
+    if candidate.source_capture_ref:
+        fields.append(("sourceCaptureRef", candidate.source_capture_ref))
+    if candidate.source_capture_sha256:
+        fields.append(("sourceCaptureSha256", candidate.source_capture_sha256))
     if candidate.project.source_project_id:
         fields.append(("sourceProjectId", candidate.project.source_project_id))
     summary_lines = [
@@ -1281,6 +1326,13 @@ def render_note(
 
 
 def revalidate_candidate(candidate: Candidate, config: PipelineConfig) -> None:
+    if candidate.source_capture_sha256:
+        try:
+            current_capture_sha256 = sha256(candidate.source_path.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise PipelineError(f"raw capture disappeared: {candidate.source_capture_ref}") from exc
+        if current_capture_sha256 != candidate.source_capture_sha256:
+            raise PipelineError(f"raw capture changed after ingestion: {candidate.source_capture_ref}")
     try:
         source = read_thread_source(candidate.source_path)
     except OSError as exc:
@@ -1313,6 +1365,17 @@ def write_candidate_note(
     manifest_path = work_root / "manifest.json"
     staged_note: Path | None = None
     note_path: Path | None = None
+    existing_matches = find_note_matches(candidate.project, candidate.thread_id)
+    if len(existing_matches) > 1:
+        raise PipelineError(
+            f"multiple thread notes match thread {candidate.thread_id}: "
+            + ", ".join(str(path) for path in existing_matches)
+        )
+    existing_id = ""
+    if existing_matches:
+        existing_id = parse_simple_frontmatter(
+            existing_matches[0].read_text(encoding="utf-8-sig")
+        ).get("id", "")
     if manifest_path.is_file():
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
@@ -1322,18 +1385,22 @@ def write_candidate_note(
             filename = str(manifest.get("file") or "")
             proposed = work_root / filename
             final = candidate.project.thread_notes_path / filename
-            matches = find_note_matches(candidate.project, candidate.thread_id)
             if (
                 manifest.get("sourceFingerprint") == candidate.fingerprint
                 and manifest.get("generationFingerprint") == generation_fingerprint(config, candidate)
+                and str(manifest.get("existingArtifactId") or "") == existing_id
                 and filename
                 and Path(filename).name == filename
                 and proposed.is_file()
-                and (not matches or matches == [final])
+                and (not existing_matches or existing_matches == [final])
             ):
                 validate_thread_note(proposed)
-                staged_note = proposed
-                note_path = final
+                proposed_id = parse_simple_frontmatter(
+                    proposed.read_text(encoding="utf-8-sig")
+                ).get("id", "")
+                if not existing_id or proposed_id == existing_id:
+                    staged_note = proposed
+                    note_path = final
     if staged_note is None or note_path is None:
         if work_root.exists():
             if work_root.parent != pending_parent:
@@ -1364,6 +1431,7 @@ def write_candidate_note(
             {
                 "sourceFingerprint": candidate.fingerprint,
                 "generationFingerprint": generation_fingerprint(config, candidate),
+                "existingArtifactId": existing.get("id") or "",
                 "file": note_path.name,
                 "noteHash": sha256(staged_note.read_bytes()).hexdigest(),
                 "completedAt": now_iso(),
@@ -1442,6 +1510,8 @@ def verify_historical_root(project: Project, historical_root: Path) -> Path:
 def scan_rebuild_candidates(
     config: PipelineConfig,
     project: Project,
+    *,
+    source_inputs: Sequence[RawSourceInput] | None = None,
 ) -> tuple[list[Candidate], dict[str, int], list[dict[str, Any]]]:
     candidates: list[Candidate] = []
     excluded: list[dict[str, Any]] = []
@@ -1453,14 +1523,28 @@ def scan_rebuild_candidates(
         "excludedWithoutUserMessage": 0,
         "unmatchedProject": 0,
     }
-    for path in sorted(config.sessions_root.rglob("*.jsonl")):
+    scan_inputs = source_inputs if source_inputs is not None else tuple(
+        RawSourceInput(
+            source_path=path,
+            source_ref=source_ref(path, config.sessions_root),
+            capture_ref="",
+            capture_sha256="",
+            byte_count=path.stat().st_size,
+            thread_id="",
+            last_event_at="",
+            original_present=True,
+        )
+        for path in sorted(config.sessions_root.rglob("*.jsonl"))
+    )
+    for source_input in scan_inputs:
+        path = source_input.source_path
         counts["files"] += 1
         source = read_thread_source(path)
         thread_log = source.thread_log
         if not thread_log:
             counts["unmatchedProject"] += 1
             continue
-        relative_ref = source_ref(path, config.sessions_root)
+        relative_ref = source_input.source_ref
         qualified_ref = f"{config.source_id}/{relative_ref}"
         if thread_log.id in project.projectless_thread_ids:
             counts["unmatchedProject"] += 1
@@ -1517,6 +1601,8 @@ def scan_rebuild_candidates(
                 fingerprint=fingerprint_events(thread_log.id, project_events, qualified_ref),
                 events=project_events,
                 source_last_event_at=source.last_event_at,
+                source_capture_ref=source_input.capture_ref,
+                source_capture_sha256=source_input.capture_sha256,
             )
         )
         counts["eligible"] += 1
@@ -1571,12 +1657,20 @@ def current_note_matches_generation(
     parsed_version = parse_thread_note_schema_version(version, path)
     if parsed_version > THREAD_NOTE_SCHEMA_VERSION:
         raise PipelineError(f"unsupported Thread Note schemaVersion {version}: {path.name}")
+    try:
+        canonical_uuid4(metadata.get("id") or "")
+    except ValueError:
+        return False
     return (
         parsed_version == THREAD_NOTE_SCHEMA_VERSION
         and metadata.get("type") == "threadNote"
         and thread_ids == [candidate.thread_id]
         and source_refs == [candidate.source_ref]
         and metadata.get("sourceFingerprint") == candidate.fingerprint
+        and (
+            not candidate.source_capture_sha256
+            or metadata.get("sourceCaptureSha256") == candidate.source_capture_sha256
+        )
         and metadata.get("generator") == provider_name(config.provider)
         and metadata.get("generatorProvider", "codex") == config.provider
         and metadata.get("generatorModel") == config.model
@@ -1609,6 +1703,10 @@ def validate_staged_thread_notes(
             raise PipelineError(
                 f"staged thread note is not schemaVersion {THREAD_NOTE_SCHEMA_VERSION}: {path.name}"
             )
+        try:
+            canonical_uuid4(metadata.get("id") or "")
+        except ValueError as exc:
+            raise PipelineError(f"staged thread note has invalid id: {path.name}") from exc
         if thread_ids:
             if metadata.get("type") != "threadNote":
                 raise PipelineError(f"staged thread note has invalid type: {path.name}")
@@ -1670,6 +1768,10 @@ def validate_staged_thread_notes(
                     "automatedValidation": "passed",
                     "sourceFingerprint": candidate.fingerprint,
                 }
+                if candidate.source_capture_ref:
+                    expected_scalars["sourceCaptureRef"] = candidate.source_capture_ref
+                if candidate.source_capture_sha256:
+                    expected_scalars["sourceCaptureSha256"] = candidate.source_capture_sha256
                 for key, expected_value in expected_scalars.items():
                     if metadata.get(key) != expected_value:
                         raise PipelineError(f"generated note has invalid {key}: {path.name}")
@@ -1687,13 +1789,14 @@ def validate_staged_thread_notes(
 
 
 def validate_thread_note(path: Path) -> dict[str, Any]:
-    """Validate one standalone Thread Note v3 without touching project state."""
+    """Validate one supported standalone Thread Note without touching project state."""
 
     if not path.is_file():
         raise PipelineError(f"thread note not found: {path}")
     metadata, thread_ids, source_refs, version = thread_note_metadata(path)
-    if parse_thread_note_schema_version(version, path) != THREAD_NOTE_SCHEMA_VERSION:
-        raise PipelineError(f"thread note is not schemaVersion {THREAD_NOTE_SCHEMA_VERSION}: {path}")
+    parsed_version = parse_thread_note_schema_version(version, path)
+    if parsed_version not in {3, THREAD_NOTE_SCHEMA_VERSION}:
+        raise PipelineError(f"unsupported Thread Note schemaVersion {version}: {path}")
     required = {
         "type": "threadNote",
         "reviewStatus": "unreviewed",
@@ -1703,6 +1806,19 @@ def validate_thread_note(path: Path) -> dict[str, Any]:
     for key, expected in required.items():
         if metadata.get(key) != expected:
             raise PipelineError(f"thread note has invalid {key}: {path}")
+    if parsed_version == THREAD_NOTE_SCHEMA_VERSION:
+        try:
+            canonical_uuid4(metadata.get("id") or "")
+        except ValueError as exc:
+            raise PipelineError(f"thread note has invalid id: {path}") from exc
+        capture_ref = metadata.get("sourceCaptureRef") or ""
+        capture_sha256 = metadata.get("sourceCaptureSha256") or ""
+        if bool(capture_ref) != bool(capture_sha256):
+            raise PipelineError(f"thread note has incomplete raw capture provenance: {path}")
+        if capture_ref and (
+            not capture_ref.startswith("raw:/") or not re.fullmatch(r"[0-9a-f]{64}", capture_sha256)
+        ):
+            raise PipelineError(f"thread note has invalid raw capture provenance: {path}")
     try:
         uuid.UUID(metadata.get("promptId") or "")
     except ValueError as exc:
@@ -1741,7 +1857,8 @@ def validate_thread_note(path: Path) -> dict[str, Any]:
     return {
         "valid": True,
         "path": str(path.absolute()),
-        "schemaVersion": THREAD_NOTE_SCHEMA_VERSION,
+        "schemaVersion": parsed_version,
+        "id": metadata.get("id"),
         "threadId": thread_ids[0],
         "sourceRef": source_refs[0],
         "status": status.group(1),
@@ -1781,6 +1898,8 @@ def rebuild_state(
             "rendererVersion": RENDERER_VERSION,
             "noteHash": note_hash_by_thread[candidate.thread_id],
             "sourceRefs": [candidate.source_ref],
+            "sourceCaptureRef": candidate.source_capture_ref or None,
+            "sourceCaptureSha256": candidate.source_capture_sha256 or None,
             "threadNotes": [f"thread-notes/{note_by_thread[candidate.thread_id]}"],
             "processedAt": processed_at,
         }
@@ -1808,6 +1927,7 @@ def rebuild_work_signature(
     candidates: Sequence[Candidate],
     *,
     force: bool,
+    existing_ids: dict[str, str],
 ) -> dict[str, Any]:
     return {
         "schemaVersion": REBUILD_WORK_SCHEMA_VERSION,
@@ -1821,6 +1941,9 @@ def rebuild_work_signature(
             candidate.thread_id: {
                 "sourceFingerprint": candidate.fingerprint,
                 "sourceLastEventAt": candidate.source_last_event_at or None,
+                "sourceCaptureRef": candidate.source_capture_ref or None,
+                "sourceCaptureSha256": candidate.source_capture_sha256 or None,
+                "existingArtifactId": existing_ids.get(candidate.thread_id),
                 "generationFingerprint": generation_fingerprint(config, candidate),
             }
             for candidate in candidates
@@ -1962,6 +2085,16 @@ def execute_rebuild(
     started = now_local()
     start_deadline = started + timedelta(minutes=config.runtime_minutes)
     hard_deadline = start_deadline + timedelta(minutes=IN_FLIGHT_GRACE_MINUTES)
+    try:
+        source_inputs, raw_report = ingest_raw_sources(
+            config.sessions_root,
+            config.raw_root,
+            config.source_id,
+            dry_run=dry_run,
+            captured_at=started.isoformat(timespec="seconds"),
+        )
+    except RawCaptureError as exc:
+        raise PipelineError(str(exc)) from exc
     previous_state = load_refresh_state(project, config)
     approved = [Path(str(value)).expanduser().absolute() for value in previous_state.get("approvedHistoricalRoots", [])]
     for requested in approve_roots:
@@ -1972,7 +2105,11 @@ def execute_rebuild(
         project,
         historical_roots=tuple(dict.fromkeys((*project.historical_roots, *approved))),
     )
-    candidates, scan_counts, excluded = scan_rebuild_candidates(config, project)
+    candidates, scan_counts, excluded = scan_rebuild_candidates(
+        config,
+        project,
+        source_inputs=source_inputs,
+    )
     prompt = SUMMARY_PROMPT_RESOURCE
     candidates_by_thread = {item.thread_id: item for item in candidates}
 
@@ -1980,12 +2117,17 @@ def execute_rebuild(
     legacy: list[Path] = []
     replaced_current: list[Path] = []
     matched_current: dict[str, Path] = {}
+    existing_metadata_by_thread: dict[str, tuple[int, dict[str, str]]] = {}
     reusable_threads: set[str] = set()
     generator_versions = {"current": 0, "older": 0, "unknown": 0}
     if project.thread_notes_path.is_dir():
         for path in sorted(project.thread_notes_path.glob("*.md")):
             metadata, thread_ids, _source_refs, version = thread_note_metadata(path)
             parsed_version = parse_thread_note_schema_version(version, path)
+            if len(thread_ids) == 1 and thread_ids[0] in candidates_by_thread:
+                prior = existing_metadata_by_thread.get(thread_ids[0])
+                if prior is None or parsed_version > prior[0]:
+                    existing_metadata_by_thread[thread_ids[0]] = (parsed_version, metadata)
             if parsed_version < THREAD_NOTE_SCHEMA_VERSION:
                 legacy.append(path)
                 continue
@@ -2020,8 +2162,20 @@ def execute_rebuild(
                     generator_versions["current"] += 1
                 else:
                     generator_versions["older"] += 1
-                current_source = metadata.get("sourceFingerprint") == candidates_by_thread[thread_ids[0]].fingerprint
-                if force or not (current_generator and current_source):
+                candidate = candidates_by_thread[thread_ids[0]]
+                try:
+                    canonical_uuid4(metadata.get("id") or "")
+                    current_id = True
+                except ValueError:
+                    current_id = False
+                current_source = (
+                    metadata.get("sourceFingerprint") == candidate.fingerprint
+                    and (
+                        not candidate.source_capture_sha256
+                        or metadata.get("sourceCaptureSha256") == candidate.source_capture_sha256
+                    )
+                )
+                if force or not (current_generator and current_source and current_id):
                     replaced_current.append(path)
                     continue
                 reusable_threads.add(thread_ids[0])
@@ -2037,6 +2191,7 @@ def execute_rebuild(
         "dryRun": dry_run,
         "projectId": project.project_id,
         "force": force,
+        "rawIngest": raw_report,
         "generator": {
             "provider": config.provider,
             "name": provider_name(config.provider),
@@ -2070,7 +2225,10 @@ def execute_rebuild(
             for path in replaced_current
         ],
         "processed": [],
-        "failed": [],
+        "failed": [
+            {"stage": "raw-capture", **failure}
+            for failure in raw_report.get("failed", [])
+        ],
         "deferred": [],
         "warnings": [],
         "resumedCount": 0,
@@ -2086,7 +2244,17 @@ def execute_rebuild(
         raise PipelineError("a summarizer is required for a rebuild")
 
     project.context_path.mkdir(parents=True, exist_ok=True)
-    signature = rebuild_work_signature(project, config, candidates, force=force)
+    existing_ids = {
+        thread_id: metadata.get("id") or ""
+        for thread_id, (_version, metadata) in existing_metadata_by_thread.items()
+    }
+    signature = rebuild_work_signature(
+        project,
+        config,
+        candidates,
+        force=force,
+        existing_ids=existing_ids,
+    )
     rebuild_cache = (work_cache_root or cache_root or default_cache_root()).expanduser().absolute()
     work_root, work_manifest, reused_work = prepare_rebuild_work(
         project,
@@ -2111,6 +2279,8 @@ def execute_rebuild(
                     "threadNote": reusable.name,
                     "resumed": True,
                     "noteHash": sha256(reusable.read_bytes()).hexdigest(),
+                    "sourceCaptureRef": candidate.source_capture_ref or None,
+                    "sourceCaptureSha256": candidate.source_capture_sha256 or None,
                     "generationFingerprint": generation_fingerprint(config, candidate),
                 }
             )
@@ -2163,12 +2333,22 @@ def execute_rebuild(
             prompt = SUMMARY_PROMPT_RESOURCE
             data["_summaryPromptId"] = prompt.prompt_id
             data["_summaryPromptVersion"] = prompt.version
-            atomic_write_text(note_path, render_note(candidate, data, {}))
+            existing_metadata = existing_metadata_by_thread.get(candidate.thread_id)
+            atomic_write_text(
+                note_path,
+                render_note(
+                    candidate,
+                    data,
+                    existing_metadata[1] if existing_metadata is not None else {},
+                ),
+            )
             note_hash = sha256(note_path.read_bytes()).hexdigest()
             work_manifest["completed"][candidate.thread_id] = {
                 "file": note_path.name,
                 "noteHash": note_hash,
                 "sourceFingerprint": candidate.fingerprint,
+                "sourceCaptureRef": candidate.source_capture_ref or None,
+                "sourceCaptureSha256": candidate.source_capture_sha256 or None,
                 "generationFingerprint": generation_fingerprint(config, candidate),
                 "completedAt": now_iso(),
             }
@@ -2184,6 +2364,8 @@ def execute_rebuild(
                     "resumed": False,
                     "durationSeconds": duration,
                     "noteHash": note_hash,
+                    "sourceCaptureRef": candidate.source_capture_ref or None,
+                    "sourceCaptureSha256": candidate.source_capture_sha256 or None,
                     "generationFingerprint": generation_fingerprint(config, candidate),
                     **metrics,
                 }
@@ -2293,6 +2475,16 @@ def execute_pipeline(
     started = now_local()
     start_deadline = started + timedelta(minutes=config.runtime_minutes)
     hard_deadline = start_deadline + timedelta(minutes=IN_FLIGHT_GRACE_MINUTES)
+    try:
+        source_inputs, raw_report = ingest_raw_sources(
+            config.sessions_root,
+            config.raw_root,
+            config.source_id,
+            dry_run=dry_run,
+            captured_at=started.isoformat(timespec="seconds"),
+        )
+    except RawCaptureError as exc:
+        raise PipelineError(str(exc)) from exc
     candidates, scan_counts, excluded = scan_candidates(
         config,
         projects,
@@ -2300,6 +2492,7 @@ def execute_pipeline(
         project_ids=project_ids,
         thread_ids=thread_ids,
         ignore_fingerprints=force,
+        source_inputs=source_inputs,
     )
     if limit is not None:
         if limit <= 0:
@@ -2312,6 +2505,7 @@ def execute_pipeline(
         "mode": "backfill" if backfill else "daily",
         "dryRun": dry_run,
         "force": force,
+        "rawIngest": raw_report,
         "generator": {
             "provider": config.provider,
             "name": provider_name(config.provider),
@@ -2323,7 +2517,10 @@ def execute_pipeline(
         "excluded": excluded,
         "selectedCount": len(candidates),
         "processed": [],
-        "failed": [],
+        "failed": [
+            {"stage": "raw-capture", **failure}
+            for failure in raw_report.get("failed", [])
+        ],
         "deferred": [],
     }
     if dry_run:
@@ -2332,6 +2529,8 @@ def execute_pipeline(
                 "projectId": item.project.project_id,
                 "threadId": item.thread_id,
                 "sourceRef": item.source_ref,
+                "sourceCaptureRef": item.source_capture_ref or None,
+                "sourceCaptureSha256": item.source_capture_sha256 or None,
                 "startedAt": item.started_at,
                 "lastEventAt": item.source_last_event_at,
             }
@@ -2397,6 +2596,8 @@ def execute_pipeline(
                     "projectId": candidate.project.project_id,
                     "threadId": candidate.thread_id,
                     "threadNote": note_path.relative_to(candidate.project.context_path).as_posix(),
+                    "sourceCaptureRef": candidate.source_capture_ref or None,
+                    "sourceCaptureSha256": candidate.source_capture_sha256 or None,
                     "durationSeconds": duration,
                     **metrics,
                 }

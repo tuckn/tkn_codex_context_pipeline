@@ -16,7 +16,7 @@ from .thread_notes import PipelineError, atomic_write_json
 ROOT_OWNERSHIP_MARKER = ".tkn-codex-context-root.json"
 ROOT_OWNERSHIP_SCHEMA_VERSION = 1
 ROOT_OWNER_APPLICATION_ID = "tkn-codex-context-pipeline"
-ROOT_KINDS = ("data", "state", "cache")
+ROOT_KINDS = ("data", "state", "cache", "raw")
 SAFE_RESET_OWNERSHIP_STATUSES = frozenset({"missing", "empty", "owned"})
 
 
@@ -29,7 +29,10 @@ def _overlaps(left: Path, right: Path) -> bool:
 
 
 def validate_reset_targets(config: AppConfig, config_path: Path) -> tuple[Path, ...]:
-    targets = tuple(_resolved(path) for path in (config.data_root, config.state_root, config.cache_root))
+    targets = tuple(
+        _resolved(path)
+        for path in (config.data_root, config.state_root, config.cache_root, config.raw_root)
+    )
     home = _resolved(Path.home())
     codex_home = _resolved(config.codex_home)
     resolved_config = _resolved(config_path)

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .app_state import load_codex_app_state
+from .artifact_ids import migrate_artifact_ids
 from .config import (
     config_document,
     initialize_user_config,
@@ -32,13 +33,16 @@ from .projects import (
     resolve_project_selector,
     runtime_projects,
 )
+from .raw_capture import RawCaptureError, ingest_raw_sources
 from .summary_resources import load_summary_profile
 from .thread_notes import (
     PipelineError,
     ProviderSummarizer,
     execute_pipeline,
     execute_rebuild,
+    now_iso,
     validate_thread_note,
+    write_run_report,
 )
 from .working_context import (
     ProviderWorkingContextGenerator,
@@ -101,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
         "init",
         help="Initialize or cleanly rebuild pipeline storage (writes by default)",
         description=(
-            "Initializes or rebuilds pipeline config, data, state, and registry storage by default. "
+            "Initializes or rebuilds pipeline config, raw, data, state, and registry storage by default. "
             "--adopt-existing writes only ownership markers for existing configured roots. "
             "Use --dry-run for a read-only preview."
         ),
@@ -109,7 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument(
         "--dry-run",
         action="store_true",
-        help="Preview storage changes without writing config, data, state, cache, or reports",
+        help="Preview storage changes without writing config, raw, data, state, cache, or reports",
     )
     init_mode = init.add_mutually_exclusive_group()
     init_mode.add_argument(
@@ -121,7 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--adopt-existing",
         action="store_true",
         help=(
-            "Mark existing configured data, state, and cache directories as application-owned "
+            "Mark existing configured data, state, cache, and raw directories as application-owned "
             "without rebuilding them"
         ),
     )
@@ -162,7 +166,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="Preview registry changes without writing application-owned files",
     )
 
-    notes = commands.add_parser("thread-notes", help="Generate Thread Note v3 artifacts")
+    raw = commands.add_parser("raw", help="Manage immutable Bronze chat captures")
+    raw_commands = raw.add_subparsers(dest="raw_command", required=True)
+    raw_ingest = raw_commands.add_parser(
+        "ingest",
+        help="Copy source JSONL into content-addressed Bronze storage (writes by default)",
+        description=(
+            "Copies new source JSONL bytes into application-owned immutable Bronze storage and "
+            "updates its append-only manifest. Source files are never moved or changed."
+        ),
+    )
+    raw_ingest.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Inspect and validate captures without writing Bronze files, manifests, or reports",
+    )
+    raw_ingest.add_argument("--full-output", action="store_true", help="Emit the full ingest report JSON")
+
+    artifacts = commands.add_parser("artifacts", help="Manage application-owned Markdown artifacts")
+    artifact_commands = artifacts.add_subparsers(dest="artifacts_command", required=True)
+    migrate_ids = artifact_commands.add_parser(
+        "migrate-ids",
+        help="Assign stable UUIDv4 id metadata (writes by default)",
+        description=(
+            "Adds or validates UUIDv4 id metadata without changing artifact bodies. The write run is "
+            "transactional and restores original bytes if validation fails."
+        ),
+    )
+    migrate_selector = migrate_ids.add_mutually_exclusive_group(required=True)
+    migrate_selector.add_argument(
+        "--project-id",
+        metavar="PROJECT_ID_NAME_OR_ROOT",
+        help="Select one active Project by ID, exact current Name, or CURRENT ROOT",
+    )
+    migrate_selector.add_argument("--all", action="store_true", help="Migrate every active Project")
+    migrate_ids.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate artifacts and report changes without assigning IDs or writing files",
+    )
+    migrate_ids.add_argument("--full-output", action="store_true", help="Emit the full migration report JSON")
+
+    notes = commands.add_parser("thread-notes", help="Generate Thread Note v4 artifacts")
     note_commands = notes.add_subparsers(dest="notes_command", required=True)
     pull = note_commands.add_parser(
         "pull",
@@ -267,7 +312,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     decision_validate = decision_commands.add_parser(
         "validate",
-        help="Validate one Decision Record v2, v3, or v4 file",
+        help="Validate one supported Decision Record file through v5",
     )
     decision_validate.add_argument("decision_record", type=Path)
 
@@ -281,7 +326,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     working_context_build = working_context_commands.add_parser(
         "build",
-        help="Build Working Context v3 from Project evidence (generates and writes by default)",
+        help="Build Working Context v4 from Project evidence (generates and writes by default)",
         description=(
             "Calls generative AI and writes Working Context, state, and a run report by default. "
             "Use --dry-run for a read-only preview."
@@ -321,11 +366,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     working_context_validate = working_context_commands.add_parser(
         "validate",
-        help="Validate one Working Context v3 file",
+        help="Validate one supported Working Context file through v4",
     )
     working_context_validate.add_argument("working_context", type=Path)
 
-    validate = commands.add_parser("validate", help="Validate a Thread Note v3 file")
+    validate = commands.add_parser("validate", help="Validate one supported Thread Note file through v4")
     validate.add_argument("thread_note", type=Path)
     return parser
 
@@ -656,6 +701,20 @@ def _thread_note_report_summary(report: dict[str, Any]) -> dict[str, Any]:
             for key, value in scan.items()
             if type(value) is int
         }
+    raw_ingest = report.get("rawIngest")
+    if isinstance(raw_ingest, dict):
+        summary["rawIngest"] = {
+            key: raw_ingest[key]
+            for key in (
+                "discoveredCount",
+                "availableCaptureCount",
+                "capturedCount",
+                "plannedCaptureCount",
+                "unchangedCount",
+                "bronzeOnlyCount",
+            )
+            if key in raw_ingest
+        }
     return summary
 
 
@@ -711,6 +770,20 @@ def _decision_report_summary(report: dict[str, Any]) -> dict[str, Any]:
             str(key): value
             for key, value in scan.items()
             if type(value) is int
+        }
+    raw_ingest = report.get("rawIngest")
+    if isinstance(raw_ingest, dict):
+        summary["rawIngest"] = {
+            key: raw_ingest[key]
+            for key in (
+                "discoveredCount",
+                "availableCaptureCount",
+                "capturedCount",
+                "plannedCaptureCount",
+                "unchangedCount",
+                "bronzeOnlyCount",
+            )
+            if key in raw_ingest
         }
     return summary
 
@@ -942,6 +1015,98 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
             )
             return 0
+
+        if args.command == "raw":
+            config = load_app_config(explicit_path=args.config, overrides=_overrides(args))
+            captured_at = now_iso()
+            LOGGER.info("%s Bronze capture", "Planning" if args.dry_run else "Starting")
+            try:
+                _inputs, report = ingest_raw_sources(
+                    config.sessions_root,
+                    config.raw_root,
+                    config.source_id,
+                    dry_run=args.dry_run,
+                    captured_at=captured_at,
+                )
+            except RawCaptureError as exc:
+                raise PipelineError(str(exc)) from exc
+            report["startedAt"] = captured_at
+            report["finishedAt"] = now_iso()
+            report_path = None if args.dry_run else write_run_report(config.reports_root, report)
+            failed_count = _list_count(report.get("failed"))
+            if failed_count:
+                LOGGER.error("Bronze capture completed with %s failed source(s)", failed_count)
+            else:
+                log_success(
+                    LOGGER,
+                    "Bronze capture complete: %s captured, %s unchanged, %s Bronze-only",
+                    report.get("capturedCount", 0),
+                    report.get("unchangedCount", 0),
+                    report.get("bronzeOnlyCount", 0),
+                )
+            if report_path:
+                LOGGER.info("Run report: %s", report_path)
+            _emit(
+                {
+                    "command": "raw ingest",
+                    "ok": failed_count == 0,
+                    "reportPath": str(report_path) if report_path else None,
+                    **(
+                        {"report": report}
+                        if args.full_output
+                        else {
+                            "reportSummary": {
+                                "dryRun": report["dryRun"],
+                                "discoveredCount": report["discoveredCount"],
+                                "availableCaptureCount": report["availableCaptureCount"],
+                                "capturedCount": report["capturedCount"],
+                                "plannedCaptureCount": report["plannedCaptureCount"],
+                                "unchangedCount": report["unchangedCount"],
+                                "bronzeOnlyCount": report["bronzeOnlyCount"],
+                                "failedCount": failed_count,
+                            }
+                        }
+                    ),
+                }
+            )
+            return 1 if failed_count else 0
+
+        if args.command == "artifacts":
+            LOGGER.info("%s artifact ID migration", "Planning" if args.dry_run else "Starting")
+            config, _pipeline, _state, projects, fetch_report = _prepare_projects(args, dry_run=True)
+            _log_project_fetch(fetch_report)
+            selected_projects = (
+                projects
+                if args.all
+                else [resolve_project_selector(projects, args.project_id)]
+            )
+            report = migrate_artifact_ids(selected_projects, dry_run=args.dry_run)
+            report_path = None if args.dry_run else write_run_report(config.reports_root, report)
+            if args.dry_run:
+                LOGGER.info("Dry run complete: %s artifact change(s) planned", report["plannedCount"])
+            else:
+                log_success(LOGGER, "Artifact ID migration complete: %s migrated", report["plannedCount"])
+                if report_path:
+                    LOGGER.info("Run report: %s", report_path)
+            summary = {
+                "dryRun": report["dryRun"],
+                "projectCount": report["projectCount"],
+                "artifactCount": report["artifactCount"],
+                "plannedCount": report["plannedCount"],
+                "assignedCount": report["assignedCount"],
+                "schemaUpgradeCount": report["schemaUpgradeCount"],
+                "unchangedCount": report["unchangedCount"],
+            }
+            _emit(
+                {
+                    "command": "artifacts migrate-ids",
+                    "ok": not bool(fetch_report.get("pendingCount")),
+                    "reportPath": str(report_path) if report_path else None,
+                    "projectFetchSummary": _project_fetch_summary(fetch_report),
+                    **({"report": report} if args.full_output else {"reportSummary": summary}),
+                }
+            )
+            return 2 if fetch_report.get("pendingCount") else 0
 
         if args.command == "validate":
             note = args.thread_note.expanduser().absolute()

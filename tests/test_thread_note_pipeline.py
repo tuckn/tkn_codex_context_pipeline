@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import tkn_codex_context.chat_logs as chat_logs
 from tkn_codex_context.chat_logs import ChatEvent, read_thread_events, read_thread_source
+from tkn_codex_context.frontmatter import parse_simple_frontmatter
 from tkn_codex_context.thread_notes import (
     Candidate,
     CodexSummarizer,
@@ -209,6 +210,7 @@ class ThreadNotePipelineTests(unittest.TestCase):
         self.config = PipelineConfig(
             installed_at="2026-01-01T00:00:00+00:00",
             sessions_root=self.sessions,
+            raw_root=self.root / "raw",
             source_id="windows",
             codex_bin=str(Path(sys.executable)),
             idle_minutes=30,
@@ -611,7 +613,7 @@ class ThreadNotePipelineTests(unittest.TestCase):
         )
         note = next(self.project.thread_notes_path.glob("*.md"))
         note.write_text(
-            note.read_text(encoding="utf-8").replace("schemaVersion: 3", "schemaVersion: 2"),
+            note.read_text(encoding="utf-8").replace("schemaVersion: 4", "schemaVersion: 3"),
             encoding="utf-8",
         )
 
@@ -738,7 +740,7 @@ class ThreadNotePipelineTests(unittest.TestCase):
 
         self.assertEqual([], report["processed"])
         self.assertEqual(1, len(report["failed"]))
-        self.assertIn("source log changed", report["failed"][0]["error"])
+        self.assertIn("raw capture changed", report["failed"][0]["error"])
         self.assertFalse(self.project.thread_notes_path.exists())
         self.assertFalse(self.project.state_path.exists())
 
@@ -842,7 +844,7 @@ class ThreadNotePipelineTests(unittest.TestCase):
         self.assertEqual(["legacy.md"], [item["file"] for item in report["deletedLegacy"]])
         notes = sorted(self.project.thread_notes_path.glob("*.md"))
         self.assertEqual(2, len(notes))
-        self.assertTrue(all("schemaVersion: 3" in path.read_text(encoding="utf-8") for path in notes))
+        self.assertTrue(all("schemaVersion: 4" in path.read_text(encoding="utf-8") for path in notes))
         completed = [event for event in progress_events if event["type"] == "thread-complete"]
         self.assertEqual(
             [str(path.absolute()) for path in notes],
@@ -959,7 +961,7 @@ class ThreadNotePipelineTests(unittest.TestCase):
         )
         note = next(self.project.thread_notes_path.glob("*.md"))
 
-        with patch("tkn_codex_context.thread_notes.THREAD_NOTE_SCHEMA_VERSION", 4):
+        with patch("tkn_codex_context.thread_notes.THREAD_NOTE_SCHEMA_VERSION", 5):
             report, _path = execute_rebuild(
                 self.config,
                 self.project,
@@ -997,9 +999,10 @@ class ThreadNotePipelineTests(unittest.TestCase):
     def test_rebuild_preserves_current_note_without_source_thread_ids(self) -> None:
         write_chat(self.sessions / "chat.jsonl", thread_id="thread-1", cwd=self.repo)
         self.project.thread_notes_path.mkdir(parents=True)
-        manual = self.project.thread_notes_path / "manual-v3.md"
+        manual = self.project.thread_notes_path / "manual-v4.md"
         manual.write_text(
-            "---\ntype: threadNote\nschemaVersion: 3\nstatus: done\n---\n\n"
+            "---\ntype: threadNote\nschemaVersion: 4\n"
+            "id: 760b64a4-2e32-483b-8494-028d3b2c8642\nstatus: done\n---\n\n"
             "# Thread Note\n\n## Summary\n\n- Manual.\n\n"
             "## Key Developments\n\n### Action\n\n- Manual.\n\n"
             "## Last Known State\n\n- Work State: done — manual.\n"
@@ -1015,8 +1018,37 @@ class ThreadNotePipelineTests(unittest.TestCase):
         )
 
         self.assertEqual([], report["failed"])
-        self.assertTrue((self.project.thread_notes_path / "manual-v3.md").is_file())
+        self.assertTrue((self.project.thread_notes_path / "manual-v4.md").is_file())
         self.assertEqual(2, len(list(self.project.thread_notes_path.glob("*.md"))))
+
+    def test_rebuild_preserves_artifact_id_when_regenerating_legacy_note(self) -> None:
+        write_chat(self.sessions / "chat.jsonl", thread_id="thread-1", cwd=self.repo)
+        execute_rebuild(
+            self.config,
+            self.project,
+            summarizer=FakeSummarizer(),
+            cache_root=self.cache,
+        )
+        original = next(self.project.thread_notes_path.glob("*.md"))
+        original_text = original.read_text(encoding="utf-8")
+        original_id = parse_simple_frontmatter(original_text)["id"]
+        original.write_text(
+            original_text.replace("schemaVersion: 4", "schemaVersion: 3"),
+            encoding="utf-8",
+        )
+
+        report, _path = execute_rebuild(
+            self.config,
+            self.project,
+            summarizer=FakeSummarizer(),
+            cache_root=self.cache,
+        )
+
+        self.assertEqual([], report["failed"])
+        regenerated = next(self.project.thread_notes_path.glob("*.md"))
+        metadata = parse_simple_frontmatter(regenerated.read_text(encoding="utf-8"))
+        self.assertEqual("4", metadata["schemaVersion"])
+        self.assertEqual(original_id, metadata["id"])
 
     def test_multiple_work_items_render_h3_and_h4_labels(self) -> None:
         write_chat(self.sessions / "chat.jsonl", thread_id="thread-1", cwd=self.repo)
@@ -1200,7 +1232,7 @@ class ThreadNotePipelineTests(unittest.TestCase):
         self.assertIn('templateId: "4d19c51c-0d02-43a5-b6ad-6d67f9739b75"', note)
         self.assertIn('templateVersion: "2.0"', note)
         self.assertIn("generatorPromptVersion: 4", note)
-        self.assertIn("rendererVersion: 6", note)
+        self.assertIn("rendererVersion: 7", note)
         self.assertIn("generatedAt:", note)
         self.assertIn('fileSlug: "automated-thread-note"', note)
         self.assertIn('automatedValidation: "passed"', note)

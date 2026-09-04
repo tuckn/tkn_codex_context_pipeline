@@ -19,6 +19,7 @@ def pipeline_config(tmp_path: Path) -> PipelineConfig:
     return PipelineConfig(
         installed_at="2026-08-09T09:00:00+09:00",
         sessions_root=tmp_path / "sessions",
+        raw_root=tmp_path / "raw",
         source_id="windows",
         codex_bin="codex",
         model="test-model",
@@ -254,7 +255,7 @@ def test_build_is_read_only_by_default_and_write_creates_artifact(tmp_path: Path
     assert generator.calls == 1
     assert report_path is not None and report_path.is_file()
     validation = validate_working_context(context_path)
-    assert validation["schemaVersion"] == 3
+    assert validation["schemaVersion"] == 4
     text = context_path.read_text(encoding="utf-8")
     assert "## Semantic Context" in text
     assert "### Semantic Glossary" in text

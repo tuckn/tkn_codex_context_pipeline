@@ -26,8 +26,8 @@ from .thread_notes import (
     atomic_write_text,
 )
 
-CONFIG_SCHEMA_VERSION: Literal["2.0.0"] = "2.0.0"
-_CONFIG_SCHEMA_VERSION_PARTS = (2, 0, 0)
+CONFIG_SCHEMA_VERSION: Literal["2.1.0"] = "2.1.0"
+_CONFIG_SCHEMA_VERSION_PARTS = (2, 1, 0)
 _CONFIG_SCHEMA_VERSION_PATTERN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 APP_DIRECTORY_NAME = "codex_context_pipeline"
 CONFIG_EXAMPLE_RESOURCE = "resources/config.example.yaml"
@@ -141,9 +141,10 @@ class AppConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["2.0.0"] = CONFIG_SCHEMA_VERSION
+    schema_version: Literal["2.1.0"] = CONFIG_SCHEMA_VERSION
     installed_at: datetime | None = None
     codex_home: Path = Field(default_factory=lambda: Path.home() / ".codex")
+    raw_root: Path = Field(default_factory=lambda: default_app_root() / "raw")
     data_root: Path = Field(default_factory=lambda: default_app_root() / "data")
     state_root: Path = Field(default_factory=lambda: default_app_root() / "state")
     cache_root: Path = Field(default_factory=default_user_cache_root)
@@ -156,9 +157,10 @@ class AppConfig(BaseModel):
     @field_validator("source_id")
     @classmethod
     def require_source_id(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("source_id must not be empty")
-        return value.strip()
+        normalized = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", normalized):
+            raise ValueError("source_id must use only letters, digits, dot, underscore, or hyphen")
+        return normalized
 
     @property
     def sessions_root(self) -> Path:
@@ -232,6 +234,7 @@ class AppConfig(BaseModel):
         return PipelineConfig(
             installed_at=installed_at.astimezone().isoformat(timespec="seconds"),
             sessions_root=self.sessions_root,
+            raw_root=self.raw_root,
             source_id=self.source_id,
             provider=self.provider,
             codex_bin=self.codex_executable,
@@ -388,7 +391,7 @@ def _config_properties(value: dict[str, Any]) -> dict[str, Any]:
 
 def _resolve_paths(value: dict[str, Any], base: Path) -> dict[str, Any]:
     result = dict(value)
-    for key in ("codex_home", "data_root", "state_root", "cache_root"):
+    for key in ("codex_home", "raw_root", "data_root", "state_root", "cache_root"):
         raw = result.get(key)
         if raw is None:
             continue
@@ -576,6 +579,7 @@ def resolve_app_config(
     resolved = config.model_copy(
         update={
             "codex_home": config.codex_home.expanduser().absolute(),
+            "raw_root": config.raw_root.expanduser().absolute(),
             "data_root": config.data_root.expanduser().absolute(),
             "state_root": config.state_root.expanduser().absolute(),
             "cache_root": config.cache_root.expanduser().absolute(),
@@ -717,6 +721,7 @@ def initialization_config(
         config.model_copy(
             update={
                 "codex_home": config.codex_home.expanduser().absolute(),
+                "raw_root": config.raw_root.expanduser().absolute(),
                 "data_root": config.data_root.expanduser().absolute(),
                 "state_root": config.state_root.expanduser().absolute(),
                 "cache_root": config.cache_root.expanduser().absolute(),
