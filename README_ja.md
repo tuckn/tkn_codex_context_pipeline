@@ -1,9 +1,12 @@
 # Tkn Codex Context Pipeline
 
-Codex appのProject状態と`~/.codex/sessions`を読み、chatを再利用可能な
-正確なbyte列を不変のBronze landing zoneへ取り込み、Thread Note v4へ変換し、
-そこから簡潔なDecision Record v5とWorking Context v4を生成する、
-独立したローカルデータパイプラインです。
+Codexのchat logから、会話の要約・決定事項・Projectの現状をまとめたMarkdownを
+生成する、独立したローカルデータパイプラインです。
+Codex appのProject登録情報とchatの所属情報を参照し、chat logを加工せず原本として
+保存します。そのlogから会話ごとのThread Noteを作成し、そこから再利用できる判断を
+まとめたDecision Recordと、Projectの現状をまとめたWorking Contextを生成します。
+入力元は設定で変更でき、既定では`~/.codex`配下のProject情報と`sessions`配下のlogを
+読み取ります。
 Project folderにはmarker・設定・contextを一切書きません。
 
 ## 用語

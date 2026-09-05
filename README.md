@@ -1,9 +1,13 @@
 # Tkn Codex Context Pipeline
 
-An independent, local-first pipeline that reads Codex app Project state and
-`~/.codex/sessions`, captures their exact bytes in an immutable Bronze landing
-zone, generates durable Thread Note v4 Markdown files, and distills concise
-Decision Record v5 files and Working Context v4 dashboards.
+An independent, local-first pipeline that generates Markdown summaries,
+decisions, and current Project context from Codex chat logs. It reads Codex app
+Project registrations and chat assignments, preserves the chat logs unchanged
+as source captures, and creates a Thread Note for each chat. It then distills
+reusable decisions into Decision Records and summarizes the current state of
+each Project in a Working Context. The input root is configurable; by default,
+the pipeline reads Project information and logs under `~/.codex`, including the
+logs below its `sessions` directory.
 It never writes markers, configuration, or context into a Project folder.
 
 Japanese documentation: [README_ja.md](README_ja.md)
