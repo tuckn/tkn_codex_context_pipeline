@@ -35,6 +35,9 @@ flowchart LR
 取り込みや要約の前にProjectを登録したり、Projectごとにbackfillしたりする必要はありません。
 生成物は指定したアプリケーション用の保存先に置き、元のリポジトリやCodexの保存領域には書き込みません。
 
+各段階のActor、ファイルパス、AIへの入力、生成物は、
+[処理のシーケンスと来歴](#processing-flow)で確認できます。
+
 | 入力 | 対応範囲 |
 | --- | --- |
 | `codex_home/sessions/**/*.jsonl` | 取得可能なローカルのCodex会話ログ |
@@ -184,6 +187,26 @@ Rawと来歴のスナップショットには元の内容がローカルに残�
 生成プロファイル、出力検証、再試行上限はアプリケーションが管理します。
 モデル、プロバイダー、推論設定、生成プロファイルを変更すると、関連する段階が再生成対象になります。
 
+### scopeは誰が作成するか
+
+scopeは、DecisionとWorking Contextを作る際に「どの会話を一緒に扱うか」を決める範囲です。
+すべてのProjectについて、自分で作成する必要はありません。
+
+| scope | 誰が定義するか | 対象の会話 |
+| --- | --- | --- |
+| `project:<source-project-id>` | CLIが観測したローカルProject所属から自動作成 | そのローカルProjectに割り当てられた会話 |
+| `unassigned` | 必要な場合にCLIが自動作成 | ローカルProjectへの所属を確定できない会話 |
+| `work:<configuration-key>` | 利用者が `config.yaml` でまとめ方を指定し、CLIが作成 | 指定したProjectと会話の和集合 |
+
+最初は `scopes: {}` のままで始められます。この設定でも自動scopeは機能し、
+対象となる会話がないscopeは作成しません。複数Projectや特定の会話について、
+判断と次の行動をまとめて確認したくなったときに、任意の作業scopeを追加します。
+現在のCLIには、AIが内容を読んでテーマ別のscopeを自動で考える機能はありません。
+
+利用者が指定するのはscopeの名前と対象です。要約、Decision、Working Contextの本文を
+手書きする必要はありません。`data_root/catalog/scopes.json` は生成結果のカタログであり、
+設定のために編集するファイルではありません。
+
 ### Projectをまたぐ作業
 
 `scopes list` と会話カタログから元の正確なIDを確認し、関連付けを設定します。
@@ -198,11 +221,16 @@ scopes:
     repository_roots: ["C:/path/to/repository-a", "C:/path/to/repository-b"]
 ```
 
-この設定は `work:context-pipeline` を作成します。自動作成するローカルProjectスコープは
-`project:<source-project-id>` です。それ以外の会話は `unassigned` にまとめますが、
-独立した活動の集合として扱い、共通の目的があるとは仮定しません。
-スコープの重複は可能で、Thread Noteを複製せずに共有参照します。
-未知のIDは推論前にエラーにします。所属が変わるとスコープの入力を更新し、会話のノートIDは維持します。
+この設定は、自動scopeに加えて `work:context-pipeline` を作成します。
+`title` は表示名です。`project_ids` には `project:` を付けずに元のProject IDを指定し、
+`thread_ids` には元の会話IDを指定します。任意の `repository_roots` はWorking Contextで
+参照するリポジトリの根拠を追加する設定で、会話を選択する条件ではありません。
+設定キーはscopeの識別子です。キーを変えると別scopeになり、タイトルだけの変更なら同じscopeを維持します。
+
+設定の編集後に `pull` を実行すると、影響するscopeを更新します。
+scopeの重複は可能で、Thread Noteを複製せずに共有参照します。
+未知のIDは推論前にエラーにし、所属変更でも会話のノートIDは維持します。
+`unassigned` は独立した活動の集合として扱い、共通の目的があるとは仮定しません。
 
 Working Contextは、共有Thread Note、有効なDecision Record、選択したリポジトリの文書やGit状態を使います。
 Projectスコープでは観測したルート、任意の作業スコープでは `repository_roots` を参照します。
@@ -265,6 +293,168 @@ OSのロックで同時書き込みを拒否し、プロセス終了時にロッ
 定期運用では、外部スケジューラーから明示した設定ファイルと一定の作業ディレクトリで `pull` を実行し、
 終了コードとstderrを記録します。このCLIはスケジューラーや常駐プロセスを登録しません。
 取得を推論と独立して続ける場合は `raw ingest` を短い間隔で実行し、後から `pull` で生成物を更新できます。
+
+<a id="processing-flow"></a>
+
+## 処理のシーケンスと来歴
+
+CLIが入力を選び、生成AIが構造化JSONを返し、CLIが検証してMarkdownに変換・保存します。
+シーケンス図は通常の書き込み処理を示します。`pull` では、変更のない成功済みの生成段階を省略します。
+Rawの取得と決定的な正規化処理では、生成AIを使いません。
+
+| 図中の略記 | 設定項目 | 既定の保存先 |
+| --- | --- | --- |
+| `C` | `codex_home` | `~/.codex` |
+| `R` | `raw_root` | `~/.tkn/codex_context_pipeline/raw` |
+| `D` | `data_root` | `~/.tkn/codex_context_pipeline/data` |
+| `S` | `state_root` | `~/.tkn/codex_context_pipeline/state` |
+
+`T` は会話の `threadKey`、`K` はscopeの保存用キー、`H` は内容のハッシュです。
+図のパスでは、それぞれの実際の値を表すプレースホルダーとして使います。
+
+### CodexログからThread Noteまで
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as 利用者・定期実行
+    participant P as パイプラインCLI
+    participant C as Codex保存領域
+    participant F as 保存先 R・D・S
+    participant AI as 生成AI
+
+    U->>P: clone または pull
+    P->>P: config.yamlを読み込む<br/>保存先・モデル・scope設定
+    P->>F: S/ledger.jsonなどを読み込む<br/>前回の処理状態を確認
+
+    P->>C: C/sessions/**/*.jsonl<br/>C/archived_sessions/**/*.jsonl
+    C-->>P: 会話ログの元のバイト列
+    P->>F: R/{sourceId}/sha256/{prefix}/H.jsonl<br/>元の内容を変更せず保存
+    P->>F: R/{sourceId}/manifest.jsonl<br/>取得元・日時・ハッシュを記録
+
+    opt Project所属情報を取得できる場合
+        P->>C: C/.codex-global-state.json
+        C-->>P: Project情報・会話の所属
+        P->>F: R/{sourceId}/metadata/H.json<br/>所属情報のスナップショット
+    end
+
+    P->>P: Rawを解析・イベントを正規化<br/>会話ID・発言・時刻・原文の行参照
+    P->>F: D/source-aligned/T/H.json<br/>Canonical Eventsを保存
+
+    loop 新規・変更・未完了の対象会話
+        P->>P: 要約対象のイベントを準備<br/>長い会話は分割
+        P->>AI: 会話ID＋イベント内容＋イベントID<br/>生成指示＋出力スキーマ
+        AI-->>P: 要約案のJSON<br/>記述内容＋根拠のイベントID
+        opt 分割した場合
+            P->>AI: 部分要約を渡して統合
+            AI-->>P: 統合した要約JSON
+        end
+        P->>P: 構造・引用を検証<br/>ID・Frontmatter・本文を組み立てる
+        P->>F: D/threads/T/thread-notes/*.md<br/>Thread Noteを保存
+        P->>F: 来歴と処理チェックポイントを記録
+    end
+```
+
+保存するCanonical Eventsと要約処理が使うイベントは、同じ解析結果に基づきます。
+現在の実装は、保存した正規化JSONを再読込せず、メモリー上のイベントを要約処理へ渡します。
+この段階の要約単位は会話であり、作業scopeによる統合とは独立しています。
+
+### scopeとノートからDecision・Working Contextまで
+
+scopeはActorではなく、対象を選択するデータです。
+CLIがscopeを使い、どの共有ノートと既存Decisionを一緒に扱うかを決めます。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant P as パイプラインCLI
+    participant D as 成果物保存領域 D
+    participant R as 対象リポジトリ
+    participant AI as 生成AI
+
+    P->>P: Project所属＋config.scopesからscopeを計算<br/>対象会話とリポジトリを決定
+
+    loop 上流の入力が最新であるscopeごとに処理
+        P->>D: 対象のThread Noteと既存Decisionを読む
+        D-->>P: ノートのMarkdown・既存Decision
+        P->>P: 未処理・変更されたノートを選別
+
+        opt Decisionの評価が必要な場合
+            P->>AI: scope ID＋対象ノートの内容<br/>既存Decisionの索引＋生成指示＋スキーマ
+            AI-->>P: Decision案のJSON<br/>新規・更新・既存参照・該当なし
+            P->>P: 根拠・構造・編集保護を確認<br/>Markdownへ変換
+            P->>D: D/scopes/K/decisions/DR-*.md
+            P->>D: 生成履歴・入力と出力の版を記録
+        end
+
+        P->>D: 最新のThread Noteと<br/>現在の根拠で有効なDecisionを読む
+        D-->>P: Working Contextの会話由来の根拠
+        opt リポジトリの根拠が取得できる場合
+            P->>R: README・AGENTS・構成ファイルなど<br/>Gitの状態
+            R-->>P: ファイル内容・Gitスナップショット
+        end
+
+        opt Working Contextの更新が必要な場合
+            P->>P: 入力をまとめ、文字数を制限
+            P->>D: 元の入力とAI向け入力を<br/>別のスナップショットとして保存
+            P->>AI: scope ID・タイトル<br/>ノート＋有効なDecision＋リポジトリの根拠<br/>生成指示＋スキーマ
+            AI-->>P: 現在の状況・判断・次の行動などのJSON
+            P->>P: 根拠参照と入力の変更有無を検証<br/>Markdownへ変換
+            P->>D: D/scopes/K/working-context.md
+            P->>D: 生成履歴・入力と出力の版を記録
+        end
+    end
+
+    P->>D: D/catalog/threads.json・scopes.json<br/>対象・所属・成果物参照・処理状態
+    P->>D: D/provenance/index.json<br/>下流向けの成果物と来歴の索引
+```
+
+| 生成処理 | AIに渡す主な情報 | scopeの役割 |
+| --- | --- | --- |
+| Thread Note | 会話のイベント、根拠ID | 要約は会話単位で行う |
+| Decision | 選別したThread Noteの内容、既存Decisionの索引、scope ID | 入力ノートと既存Decisionの範囲を決める |
+| Working Context | ノート、有効なDecision、リポジトリの根拠、scope ID・タイトル | 現状をまとめる対象範囲を決める |
+
+scopeの設定JSON全体は、AIへそのまま渡していません。CLIが選別した根拠と識別情報を渡し、
+Working Contextではタイトルも渡します。3段階とも、同梱の生成指示と出力スキーマを使用します。
+上流の入力が未完了なら下流の合成は保留し、Decisionが新規0件でも正常に完了できます。
+
+### Decisionの来歴をPROV-Oの見方で捉える
+
+[PROV-O](https://www.w3.org/TR/prov-o/#description-starting-point)では、ファイルの特定の版などのデータを
+Entity、今回実行した処理をActivity、責任を持つ実行主体をAgentとして整理できます。
+矢印は、出力から生成処理・根拠へ辿る向きです。
+
+```mermaid
+flowchart TB
+    DR["Entity<br/>Decision Recordの特定の版<br/>id ＋ SHA-256"]
+    BUILD("Activity<br/>今回のDecision生成処理<br/>activityId・開始／終了時刻")
+    NOTES["Entity<br/>入力Thread Noteの版"]
+    SCOPE["Entity<br/>今回使用したscope定義の版"]
+    OLD["Entity<br/>既存Decisionの版"]
+    AGENT{{"Agent<br/>パイプラインCLI・推論バックエンド<br/>ソフトウェア版・provider・model"}}
+
+    DR -->|"prov:wasGeneratedBy"| BUILD
+    BUILD -->|"prov:used"| NOTES
+    BUILD -->|"prov:used"| SCOPE
+    BUILD -->|"prov:used"| OLD
+    BUILD -->|"prov:wasAssociatedWith"| AGENT
+    DR -.->|"prov:wasDerivedFrom"| NOTES
+```
+
+これは現在のJSON記録をPROV-Oの概念へ対応付けた説明図で、RDF出力は下流の責務です。
+来歴の `used` は生成段階の依存関係を表すため、入力選別に使ったscopeも含みます。
+モデルに直接渡した文章だけの記録ではなく、すべてのモデル呼び出しを保存した完全な通信ログでもありません。
+
+| 保存場所 | 分かること |
+| --- | --- |
+| `D/provenance/entities/*.json` | データの論理ID、版、ハッシュ、保存先 |
+| `D/provenance/blobs/{prefix}/H` | その版の正確な内容 |
+| `D/provenance/activities/{activityId}.json` | どの処理が、どの版を使い、何を生成したか |
+| `D/provenance/index.json` | 公開した成果物の版・状態と来歴への入口 |
+| `S/ledger.json` | どこまで処理済みで、何を再開するか |
+| `S/reports/{runId}.json` | 1回の実行の成功・失敗・保留 |
+| `S/last-run.json` | 最終実行の状態 |
 
 ## 保存構造と下流へのデータ契約
 
