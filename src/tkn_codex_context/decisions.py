@@ -289,12 +289,12 @@ def _thread_note_source(path: Path, project: Project) -> DecisionSource:
         raise PipelineError(f"Thread Note contains secret-like content ({', '.join(secrets)}): {path.name}")
     if len(text) > MAX_SOURCE_NOTE_CHARACTERS:
         raise PipelineError(f"Thread Note exceeds the decision input size limit: {path.name}")
-    relative = path.relative_to(project.context_path).as_posix()
+    relative = path.relative_to(project.data_directory or project.context_path).as_posix()
     return DecisionSource(
         project=project,
         path=path,
         relative_path=relative,
-        source_ref=f"project:/{relative}",
+        source_ref=project.artifact_ref(path),
         source_sha256=sha256(path.read_bytes()).hexdigest(),
         thread_note_id=metadata.get("threadNoteId") or path.stem,
         thread_id=thread_ids[0],
@@ -320,7 +320,7 @@ def scan_decision_sources(
         "withoutExplicitDecision": 0,
         "invalid": 0,
     }
-    for path in sorted(project.thread_notes_path.glob("*.md")):
+    for path in project.iter_note_paths():
         counts["total"] += 1
         try:
             source = _thread_note_source(path, project)
@@ -328,7 +328,7 @@ def scan_decision_sources(
             counts["invalid"] += 1
             failures.append({"threadNote": path.name, "error": str(exc)})
             continue
-        if _EXPLICIT_DECISION_HEADING.search(source.text) is None:
+        if _EXPLICIT_DECISION_HEADING.search(source.text) is None and source.relative_path not in sources_state:
             counts["withoutExplicitDecision"] += 1
             continue
         source_state = sources_state.get(source.relative_path)
@@ -432,7 +432,8 @@ def validate_decision_output(
             non_empty = [
                 key
                 for key, field_value in item.items()
-                if key not in {
+                if key
+                not in {
                     "disposition",
                     "existingDecisionId",
                     "sourceThreadNoteRefs",
@@ -597,9 +598,7 @@ class ProviderDecisionGenerator:
         )
         existing_ids = {item.decision_id for item in existing_decisions}
         updateable_ids = {item.decision_id for item in existing_decisions if item.update_allowed}
-        required_update_ids = {
-            item.decision_id for item in existing_decisions if item.quality_upgrade_required
-        }
+        required_update_ids = {item.decision_id for item in existing_decisions if item.quality_upgrade_required}
         source_refs = {source.source_ref for source in sources}
         for semantic_attempt in range(2):
             value = self._invoke(current_prompt)
@@ -696,6 +695,7 @@ def render_decision(
         ("generatorProvider", config.provider),
         ("status", str(data["status"])),
         ("scope", str(data["scope"])),
+        ("scopeId", sources[0].project.project_id),
         ("implementationStatus", str(data["implementationStatus"])),
         ("promotionStatus", promotion_status),
         ("promotedTo", []),
@@ -907,9 +907,7 @@ def validate_decision_record(path: Path) -> dict[str, Any]:
         if empty:
             raise PipelineError(f"decision record has empty sections ({', '.join(empty)}): {path}")
         if re.search(r"(?m)(?:^|:\s+)None\.$", body):
-            raise PipelineError(
-                f"decision record v3-v4 must omit empty values instead of rendering None: {path}"
-            )
+            raise PipelineError(f"decision record v3-v4 must omit empty values instead of rendering None: {path}")
     secrets = has_secret_like_content(text)
     if secrets:
         raise PipelineError(f"decision record contains secret-like content ({', '.join(secrets)}): {path}")
@@ -933,19 +931,17 @@ def _source_refs_fingerprint(project: Project, source_refs: Sequence[str]) -> st
     evidence: list[dict[str, str]] = []
     for source_ref in sorted(set(source_refs)):
         digest = "missing"
-        prefix = "project:/"
+        prefix = "data:/" if project.data_directory else "project:/"
         if source_ref.startswith(prefix):
-            candidate = (project.context_path / source_ref.removeprefix(prefix)).resolve()
-            context_root = project.context_path.resolve()
+            context_root = (project.data_directory or project.context_path).resolve()
+            candidate = (context_root / source_ref.removeprefix(prefix)).resolve()
             if candidate == context_root or context_root in candidate.parents:
                 if candidate.is_file():
                     digest = sha256(candidate.read_bytes()).hexdigest()
         evidence.append({"sourceRef": source_ref, "sha256": digest})
     if len(evidence) == 1 and evidence[0]["sha256"] != "missing":
         return evidence[0]["sha256"]
-    return sha256(
-        json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return sha256(json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def _extend_existing_decision_sources(
@@ -960,6 +956,8 @@ def _extend_existing_decision_sources(
         metadata.get("generator") or ""
     ):
         return None
+    if metadata.get("reviewStatus") != "unreviewed":
+        return None
     lines, body = split_frontmatter_lines(text)
     merged_refs = unique_ordered(
         [
@@ -967,6 +965,9 @@ def _extend_existing_decision_sources(
             *[source.source_ref for source in sources],
         ]
     )
+    if sources[0].project.note_paths is not None:
+        allowed_refs = {sources[0].project.artifact_ref(path) for path in sources[0].project.iter_note_paths()}
+        merged_refs = [ref for ref in merged_refs if ref in allowed_refs]
     updated_lines = replace_frontmatter_list(lines, "sourceThreadNoteRefs", merged_refs)
     updated_lines = replace_frontmatter_scalar(
         updated_lines,
@@ -1017,6 +1018,9 @@ def _commit_batch(
             merged_source_refs = unique_ordered(
                 [*previous.source_refs, *[source.source_ref for source in item_sources]]
             )
+            if sources[0].project.note_paths is not None:
+                allowed_refs = {sources[0].project.artifact_ref(path) for path in sources[0].project.iter_note_paths()}
+                merged_source_refs = [ref for ref in merged_source_refs if ref in allowed_refs]
             rendered = render_decision(
                 item_sources,
                 item,
@@ -1071,7 +1075,7 @@ def _commit_batch(
                 record_excerpt=rendered,
             )
             created.append(decision)
-        decision_ref = f"project:/decisions/{decision.path.name}"
+        decision_ref = sources[0].project.artifact_ref(decision.path)
         for source in item_sources:
             decision_ids_by_source[source.source_ref].append(decision_id)
             decision_refs_by_source[source.source_ref].append(decision_ref)
@@ -1151,9 +1155,12 @@ def execute_decision_build(
     limit: int | None = None,
     cache_root: Path | None = None,
     progress: Callable[[dict[str, Any]], None] | None = None,
+    deadline: datetime | None = None,
 ) -> tuple[dict[str, Any], Path | None]:
     started = now_local()
     start_deadline = started + timedelta(minutes=config.runtime_minutes)
+    if deadline is not None:
+        start_deadline = min(start_deadline, deadline)
     hard_deadline = start_deadline + timedelta(minutes=IN_FLIGHT_GRACE_MINUTES)
     candidates, scan, scan_failures = scan_decision_sources(project, config, force=force)
     if limit is not None:
@@ -1248,9 +1255,7 @@ def execute_decision_build(
                 output,
             )
         except Exception as exc:  # Per-batch isolation is intentional.
-            report["failed"].extend(
-                {"threadNote": source.relative_path, "error": str(exc)} for source in batch
-            )
+            report["failed"].extend({"threadNote": source.relative_path, "error": str(exc)} for source in batch)
             if progress:
                 progress(
                     {

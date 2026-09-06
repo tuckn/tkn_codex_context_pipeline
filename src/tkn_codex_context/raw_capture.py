@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -84,8 +85,7 @@ def _ensure_raw_root(raw_root: Path, *, dry_run: bool) -> None:
             raise RawCaptureError(f"invalid raw_root ownership marker: {marker}: {exc}") from exc
         expected = _ownership_document()
         if not isinstance(value, dict) or any(
-            value.get(key) != expected_value
-            for key, expected_value in expected.items()
+            value.get(key) != expected_value for key, expected_value in expected.items()
         ):
             raise RawCaptureError(f"raw_root ownership marker does not match this application: {marker}")
         return
@@ -94,9 +94,7 @@ def _ensure_raw_root(raw_root: Path, *, dry_run: bool) -> None:
     except OSError as exc:
         raise RawCaptureError(f"cannot inspect raw_root: {raw_root}: {exc}") from exc
     if not empty:
-        raise RawCaptureError(
-            f"refusing to write to non-empty raw_root without a valid ownership marker: {raw_root}"
-        )
+        raise RawCaptureError(f"refusing to write to non-empty raw_root without a valid ownership marker: {raw_root}")
     if not dry_run:
         _atomic_write_json(marker, _ownership_document())
 
@@ -148,21 +146,16 @@ def _read_manifest(path: Path, source_id: str) -> list[dict[str, Any]]:
 
 
 def _manifest_text(records: list[dict[str, Any]]) -> bytes:
-    return "".join(
-        json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
-        for record in records
-    ).encode("utf-8")
+    return "".join(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n" for record in records).encode(
+        "utf-8"
+    )
 
 
 def _stable_source_bytes(path: Path) -> bytes:
     before = path.stat()
     content = path.read_bytes()
     after = path.stat()
-    if (
-        before.st_size != after.st_size
-        or before.st_mtime_ns != after.st_mtime_ns
-        or len(content) != after.st_size
-    ):
+    if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns or len(content) != after.st_size:
         raise RawCaptureError(f"source changed during raw capture: {path}")
     return content
 
@@ -176,7 +169,13 @@ def _record_for_source(
     captured_at: str,
     parse_path: Path,
 ) -> dict[str, Any]:
-    parsed = read_thread_source(parse_path)
+    metadata_error: str | None = None
+    try:
+        parsed = read_thread_source(parse_path)
+    except ValueError as exc:
+        # Capture is authoritative even when the bytes cannot be decoded as chat metadata.
+        parsed = None
+        metadata_error = str(exc)
     return {
         "schemaVersion": RAW_MANIFEST_SCHEMA_VERSION,
         "sourceId": source_id,
@@ -185,8 +184,9 @@ def _record_for_source(
         "sha256": digest,
         "byteCount": byte_count,
         "capturedAt": captured_at,
-        "threadId": parsed.thread_log.id if parsed.thread_log else None,
-        "lastEventAt": parsed.last_event_at or None,
+        "threadId": parsed.thread_log.id if parsed and parsed.thread_log else None,
+        "lastEventAt": (parsed.last_event_at or None) if parsed else None,
+        **({"metadataError": metadata_error} if metadata_error else {}),
     }
 
 
@@ -197,6 +197,7 @@ def ingest_raw_sources(
     *,
     dry_run: bool,
     captured_at: str,
+    scan_roots: Sequence[tuple[str, Path]] | None = None,
 ) -> tuple[list[RawSourceInput], dict[str, Any]]:
     """Capture current logs and return the latest owned version of every sourceRef."""
 
@@ -225,8 +226,20 @@ def ingest_raw_sources(
     new_records: list[dict[str, Any]] = []
     blob_created_count = 0
 
-    for source_path in sorted(sessions.rglob("*.jsonl")):
-        relative = source_ref(source_path, sessions)
+    roots = scan_roots if scan_roots is not None else [("", sessions)]
+    paths: list[tuple[str, Path]] = []
+    for prefix, root in roots:
+        resolved_root = root.resolve(strict=False)
+        if (
+            raw_resolved == resolved_root
+            or raw_resolved.is_relative_to(resolved_root)
+            or resolved_root.is_relative_to(raw_resolved)
+        ):
+            raise RawCaptureError(f"raw_root and source root must not overlap: {root}")
+        if root.exists() and not root.is_dir():
+            raise RawCaptureError(f"source root is not a directory: {root}")
+        paths.extend((prefix + source_ref(path, root), path) for path in sorted(root.rglob("*.jsonl")))
+    for relative, source_path in paths:
         current_refs.add(relative)
         try:
             content = _stable_source_bytes(source_path)

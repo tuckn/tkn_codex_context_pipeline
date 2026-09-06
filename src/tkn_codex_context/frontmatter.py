@@ -13,7 +13,7 @@ LEGACY_ARTIFACT_SCHEMA_VERSION = "1"
 SUPPORTED_ARTIFACT_SCHEMA_VERSIONS = {
     "thread note": {"3", "4"},
     "decision record": {"1", "2", "3", "4", "5"},
-    "working context": {"1", "2", "3", "4"},
+    "working context": {"1", "2", "3", "4", "5"},
 }
 
 

@@ -26,8 +26,8 @@ from .thread_notes import (
     atomic_write_text,
 )
 
-CONFIG_SCHEMA_VERSION: Literal["2.1.0"] = "2.1.0"
-_CONFIG_SCHEMA_VERSION_PARTS = (2, 1, 0)
+CONFIG_SCHEMA_VERSION: Literal["2.2.0"] = "2.2.0"
+_CONFIG_SCHEMA_VERSION_PARTS = (2, 2, 0)
 _CONFIG_SCHEMA_VERSION_PATTERN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 APP_DIRECTORY_NAME = "codex_context_pipeline"
 CONFIG_EXAMPLE_RESOURCE = "resources/config.example.yaml"
@@ -136,12 +136,29 @@ class GenerationConfig(BaseModel):
         return self
 
 
+class ScopeConfig(BaseModel):
+    """Explicit, many-to-many grouping; never inferred by a language model."""
+
+    model_config = ConfigDict(extra="forbid")
+    title: str
+    project_ids: list[str] = Field(default_factory=list)
+    thread_ids: list[str] = Field(default_factory=list)
+    repository_roots: list[Path] = Field(default_factory=list)
+
+    @field_validator("title")
+    @classmethod
+    def nonempty_title(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("scope title must not be empty")
+        return value.strip()
+
+
 class AppConfig(BaseModel):
     """Resolved application configuration and inference backend selection."""
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["2.1.0"] = CONFIG_SCHEMA_VERSION
+    schema_version: Literal["2.2.0"] = CONFIG_SCHEMA_VERSION
     installed_at: datetime | None = None
     codex_home: Path = Field(default_factory=lambda: Path.home() / ".codex")
     raw_root: Path = Field(default_factory=lambda: default_app_root() / "raw")
@@ -153,6 +170,16 @@ class AppConfig(BaseModel):
     runtime_minutes: int = Field(default=DEFAULT_RUNTIME_MINUTES, gt=0)
     model_timeout_seconds: int = Field(default=DEFAULT_MODEL_TIMEOUT_SECONDS, gt=0)
     source_id: str = DEFAULT_SOURCE_ID
+    include_archived: bool = True
+    scopes: dict[str, ScopeConfig] = Field(default_factory=dict)
+
+    @field_validator("scopes")
+    @classmethod
+    def safe_scope_ids(cls, value: dict[str, ScopeConfig]) -> dict[str, ScopeConfig]:
+        for key in value:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", key):
+                raise ValueError("scope keys must use only letters, digits, dot, underscore, or hyphen")
+        return value
 
     @field_validator("source_id")
     @classmethod
@@ -313,9 +340,7 @@ def _default_config_document() -> dict[str, Any]:
 def _reject_legacy_generation_config(value: dict[str, Any], path: Path) -> None:
     legacy_keys = sorted(LEGACY_GENERATION_KEYS.intersection(value))
     schema_version = value.get("schema_version")
-    schema_v1 = schema_version == 1 or (
-        isinstance(schema_version, str) and schema_version.partition(".")[0] == "1"
-    )
+    schema_v1 = schema_version == 1 or (isinstance(schema_version, str) and schema_version.partition(".")[0] == "1")
     if schema_v1 or legacy_keys:
         detail = f"; retired keys: {', '.join(legacy_keys)}" if legacy_keys else ""
         raise PipelineError(
@@ -391,6 +416,20 @@ def _config_properties(value: dict[str, Any]) -> dict[str, Any]:
 
 def _resolve_paths(value: dict[str, Any], base: Path) -> dict[str, Any]:
     result = dict(value)
+    if isinstance(result.get("scopes"), dict):
+        result["scopes"] = {
+            key: (
+                {
+                    **scope,
+                    "repository_roots": [
+                        _resolve_paths({"data_root": root}, base)["data_root"] for root in scope["repository_roots"]
+                    ],
+                }
+                if isinstance(scope, dict) and isinstance(scope.get("repository_roots"), list)
+                else scope
+            )
+            for key, scope in result["scopes"].items()
+        }
     for key in ("codex_home", "raw_root", "data_root", "state_root", "cache_root"):
         raw = result.get(key)
         if raw is None:
@@ -671,6 +710,8 @@ def config_document(config: AppConfig) -> dict[str, Any]:
     value["installed_at"] = (
         config.installed_at.astimezone().isoformat(timespec="seconds") if config.installed_at else None
     )
+    if config.installed_at is None:
+        value.pop("installed_at", None)
     return value
 
 

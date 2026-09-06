@@ -1,526 +1,125 @@
-# Project Handoff: Thread Note, Decision Record, and Working Context CLI
+# Project handoff: Codex conversation pipeline
 
-Updated: 2026-09-04
+Updated: 2026-09-06 · Version: 0.5.0
 
-## Project purpose
+## Purpose and current state
 
-This repository contains an independent, local-first data pipeline that turns
-Codex app chats into immutable Bronze captures and durable Thread Note v4
-artifacts, distills durable Decision Record v5 artifacts from those notes, and
-synthesizes Working Context v4 dashboards from Project evidence.
+The CLI preserves locally available Codex JSONL evidence and builds one Thread
+Note per conversation, then Decisions and Working Context for automatic Project
+scopes, explicit cross-Project work scopes, and the unassigned collection.
 
-The larger context-engineering flow is:
+The normal workflow is `config init` → edit configuration → `clone` → periodic
+`pull`. All stages are orchestrated; per-Project backfill is no longer the entry
+point. The CLI has no compatibility aliases for retired commands. It does not
+install a scheduler, fetch cloud ChatGPT history, or write into source Projects.
+See the aligned [English README](../README.md) and [Japanese README](../README_ja.md)
+for installation, configuration, command contracts, and operation.
 
-```text
-raw Codex chat
-  -> immutable content-addressed Bronze capture
-  -> factual Thread Note v4
-  -> concise Decision Record v5
-  -> current working context
-  -> cross-project knowledge
+Source membership and semantic work are distinct. Project metadata is optional
+for ingestion. Custom scopes explicitly select source Project IDs and/or thread
+IDs; semantic grouping by a model is not implemented. Raw and canonical evidence
+are independent of those groupings.
+
+## Implementation boundaries
+
+| Module | Responsibility |
+| --- | --- |
+| `cli.py` | Current command surface, JSON stdout, readable stderr and exit codes |
+| `config.py` | Validated layered configuration 2.2.0, provider settings, scope selectors, safe config initialization |
+| `storage.py` | Non-destructive storage version 2 setup, ownership and overlap checks, OS locks |
+| `raw_capture.py` | Original-byte content-addressed captures, retained manifest and replay |
+| `catalog.py` | Sessions/archive discovery, optional app metadata, conservative duplicate merging, canonical events, membership history and eligibility |
+| `scopes.py` | Shared note references, automatic Project/collection scopes, configured work scopes |
+| `pipeline.py` | Clone/pull orchestration, per-stage fingerprints and checkpoints, edited/reviewed protection, current/partial reporting |
+| `provenance.py` | Immutable entity versions and blobs, processing activities, current index and validation |
+| `thread_notes.py` | Evidence-backed Thread Note generation, rendering, validation and pending-generation recovery |
+| `decisions.py` | Incremental synthesis batches, existing record reuse, reviewed-record protection and validation |
+| `working_context.py` | Selected note/decision/repository evidence, bounded inputs, context synthesis and source-change validation |
+| `inference.py`, profile/resource modules | Provider transports and application-owned prompts, schemas and templates |
+
+The low-level `Project` object remains a builder input adapter. In the new
+pipeline it can represent a thread or a synthesis scope using explicit note,
+repository and decision paths. Old registry/initialization helpers remain for
+internal tests but are not the public lifecycle. Do not route new commands
+through their reset or installation-watermark behavior.
+
+## Data and identity contracts
+
+Storage version: 2. Configuration: 2.2.0. Thread Note: 4. Decision Record: 5.
+Working Context: 5 (`scopeId`, `scopeStatus`). Canonical events/catalog/provenance:
+1.0.0. The source provider is always Codex; the inference provider is separately
+configurable.
+
+[Data contract](data-contract.md) is the downstream integration reference. Raw
+bytes, normalized events, note IDs, source locators, generation profile hashes,
+and versioned dependencies are retained. RDF/OWL vocabularies, global IRIs,
+PROV-O mapping, semantic entity resolution, and graph publication belong to
+another repository.
+
+Project moves and overlapping scopes do not copy or re-identify Thread Notes.
+Conflicting same-ID logs are retained and reported rather than arbitrarily
+selected. Decision records no longer supported by current scope inputs are
+preserved as stale and omitted from current Working Context inputs. An empty
+Decision result is a valid stage outcome.
+
+## Operational invariants
+
+- `clone` initializes safely and is repeatable; it never resets owned storage.
+  `pull` requires initialized storage. `raw ingest` can initialize a capture-only
+  store, which `pull` can subsequently process.
+- Old or late-arriving conversation history is selected by current source and
+  stage fingerprints, not by an installation timestamp.
+- Mutation commands write normally. `--dry-run` makes no model calls and writes
+  no folders, locks, cache, state or reports. It reports uncomputed downstream
+  stages as waiting for upstream results.
+- A failure does not discard Raw or completed notes/batches. A later `pull`
+  retries unfinished work. Active conversations, runtime limits and note limits
+  leave explicit deferred states.
+- Edited unreviewed files require `--allow-edited` for replacement. `--force`
+  does not bypass protection. Reviewed note/context regeneration is blocked;
+  reviewed Decisions may be referenced without modification.
+- Only full clone/pull runs with current inputs and complete stages claim
+  `complete`. Individual stage builds cannot advertise a complete pipeline.
+- Locks coordinate writers. Immutable provenance snapshots remain readable
+  during subsequent runs. Catalog, index and reports are separately atomic,
+  so consumers use the indexed snapshots and as-of/run metadata.
+
+## How to resume development
+
+Read the relevant contract and module above, then inspect current changes and
+applicable AGENTS instructions. Keep examples generic: committed documentation,
+tests and sample configuration must not reveal private local directory layouts.
+Do not run against personal chat history merely to test orchestration.
+
+```console
+uv sync
+uv run pytest
+uv run ruff check src tests
+uv run mypy
+uv build
 ```
 
-The Thread Note, Decision Record, and Project Working Context transformations
-are implemented. Cross-Project and global context remain out of scope.
-
-The pipeline does not write markers, configuration, or context into a Codex
-Project root. Generated artifacts remain in application-owned external storage:
-
-```text
-~/.tkn/codex_context_pipeline/data/projects/<projectId>/thread-notes/
-~/.tkn/codex_context_pipeline/data/projects/<projectId>/decisions/
-~/.tkn/codex_context_pipeline/data/projects/<projectId>/working-context.md
-~/.tkn/codex_context_pipeline/raw/<sourceId>/sha256/<prefix>/<sha256>.jsonl
-```
-
-The existing context-engineering Plugin was not changed or removed as part of
-this implementation.
-
-## Current implementation
-
-The repository uses:
-
-- Python 3.11+
-- uv
-- Hatchling with a `src` layout
-- Pydantic v2
-- PyYAML
-- pytest
-- Ruff
-- strict mypy
-
-Package and command names:
-
-```text
-package: tkn-codex-context-pipeline
-CLI:     tkn-codex-context
-```
-
-Implemented commands:
-
-```text
-init [--force | --adopt-existing] [--dry-run]
-config init [--force]
-config show
-projects fetch [--dry-run]
-raw ingest [--dry-run]
-artifacts migrate-ids (--project-id <id-name-or-root> | --all) [--dry-run]
-thread-notes pull [--force] [--dry-run]
-thread-notes pull --backfill --project-id <id-name-or-root> [--force] [--dry-run]
-thread-notes pull --backfill --all [--force] [--dry-run]
-thread-notes rebuild --project-id <id-name-or-root> [--force] [--dry-run]
-validate <thread-note>
-decisions build --project-id <id-name-or-root> [--force] [--dry-run]
-decisions validate <decision-record>
-working-context build --project-id <id-name-or-root> [--force] [--allow-edited] [--dry-run]
-working-context validate <working-context>
-```
-
-Pipeline data/state mutation commands perform their named operation by default
-and support an explicit `--dry-run` that does not call Codex or change durable
-files. `config init` is instead an explicit idempotent initializer that protects
-different content and backs it up before a forced replacement. Version
-0.2.0 changed `decisions build` and `working-context build` from default
-dry-run to default write execution. Their former `--write` option remains a
-deprecated compatibility option and emits a warning.
-
-## Important files
-
-```text
-pyproject.toml
-README.md
-README_ja.md
-src/tkn_codex_context/config.py
-src/tkn_codex_context/resources/config.example.yaml
-src/tkn_codex_context/app_state.py
-src/tkn_codex_context/projects.py
-src/tkn_codex_context/chat_logs.py
-src/tkn_codex_context/raw_capture.py
-src/tkn_codex_context/artifact_ids.py
-src/tkn_codex_context/thread_notes.py
-src/tkn_codex_context/decisions.py
-src/tkn_codex_context/decision_resources.py
-src/tkn_codex_context/working_context.py
-src/tkn_codex_context/working_context_resources.py
-src/tkn_codex_context/cli.py
-tests/
-```
-
-Responsibilities:
-
-- `config.py`: packaged example initialization, strict layered YAML
-  configuration with source provenance, and the `installed_at` normal-run boundary
-- `initialization.py`: safe first initialization and transactional force reset
-- `app_state.py`: fail-closed adapter for Codex app local Project state
-- `projects.py`: binding Codex app Projects to durable context `projectId`s
-- `chat_logs.py`: read-only JSONL parsing and canonical event generation
-- `raw_capture.py`: immutable exact-byte Bronze capture, ownership validation,
-  append-only manifest, and per-source latest-capture selection
-- `artifact_ids.py`: explicit transactional metadata-only UUIDv4 migration
-- `thread_notes.py`: selection, fingerprinting, model invocation, rendering,
-  validation, atomic commit, rollback, cache resume, and rebuild
-- `decisions.py`: Thread Note selection, existing-decision indexing, decision
-  generation, deterministic rendering, source finalization, atomic commit, and
-  rollback
-- `working_context.py`: Project evidence collection, bounded current-truth
-  synthesis, semantic validation, deterministic rendering, edited-artifact
-  protection, atomic commit, and rollback
-- `cli.py`: UTF-8 console behavior, JSON results, logging, command routing, and
-  exit codes
-
-## Configuration contract
-
-Configuration precedence is:
-
-1. built-in defaults
-2. `~/.tkn/codex_context_pipeline/config.yaml`
-3. `./.tkn/config.yaml`
-4. an explicitly supplied `--config`
-5. CLI options
-
-Main defaults:
-
-```yaml
-schema_version: "2.1.0"
-codex_home: ~/.codex
-raw_root: ~/.tkn/codex_context_pipeline/raw
-data_root: ~/.tkn/codex_context_pipeline/data
-state_root: ~/.tkn/codex_context_pipeline/state
-cache_root: ~/.cache/codex_context_pipeline
-generation:
-  active_provider: codex
-  providers:
-    codex:
-      model: gpt-5.6-sol
-      reasoning_effort: high
-      executable: codex
-idle_minutes: 30
-runtime_minutes: 230
-model_timeout_seconds: 1800
-```
-
-Each config file requires a quoted three-part SemVer `schema_version`. The
-current effective version is `"2.1.0"`; compatible versions in the same major
-are accepted according to the README contract, while unsupported versions fail
-closed. The legacy integer `2` representation is normalized in memory and is
-reported by `config show` until the file is updated.
-
-`config init` creates the global user configuration from the packaged example,
-reports `unchanged` for identical content, and protects edited content unless
-`--force` backs it up before replacement. `config show` reports the resolved
-values, per-layer source/effective schema versions and migrations, and the
-winning source for every setting.
-
-`init` requires that configuration, creates the Project registry, records the
-current time as `installed_at`, creates empty Project storage, and writes a
-`.tkn-codex-context-root.json` ownership marker to the data, state, cache, and raw
-roots. Normal pulls process only chats created or updated at or after this
-time. Older chats require explicit `pull --backfill` or rebuild. `init --force`
-preserves configuration values, refreshes `installed_at`, and transactionally
-replaces only missing, empty, or validly marked roots. Non-empty unmarked roots
-must first be inspected and explicitly marked with `init --adopt-existing`;
-adoption changes only the marker and refuses invalid or foreign markers.
-
-Normal and backfill pulls skip notes whose source fingerprint, current schema,
-model, reasoning effort, prompt version, and renderer version still match.
-`pull --force` bypasses this no-op check. Rebuild treats every numeric schema
-version below the current version as legacy, while refusing future versions.
-
-The canonical Project registry is `data/project-registry.jsonl`. Thread Notes
-are stored under `data/projects/<projectId>/thread-notes/`; Decision Records are
-stored under `data/projects/<projectId>/decisions/`; Working Context is stored
-at `data/projects/<projectId>/working-context.md`. Per-Project checkpoints
-are stored under `state/projects/<projectId>/chat-refresh-state.json` and
-`decision-build-state.json` and `working-context-build-state.json`. Run reports are stored under `state/reports/`.
-Resumable Thread Note work is stored under the cache root.
-Execution-only model files use Python's standard temporary directory (`%TMP%`
-on Windows and normally `/tmp` on Linux).
-
-Do not commit a real `.tkn/config.yaml`. The version-controlled source example
-is `src/tkn_codex_context/resources/config.example.yaml`.
-
-## Project binding
-
-The Codex app internal ID in `local-projects` is the authoritative
-`projectId`, registry key, and directory name. `--project-id` accepts that ID,
-an exact current Name, or CURRENT ROOT as a CLI convenience, but always
-resolves to the internal ID before pipeline work. Resolution order is ID,
-Name, then normalized CURRENT ROOT. Duplicate Name or root matches fail with
-the candidate IDs. Project names and roots are mutable metadata and never
-establish stored identity. Two sidebar Projects remain distinct even when they
-share a name or root.
-
-Registry updates preserve unknown fields and use atomic replacement.
-
-Codex Projects can have one primary root and multiple secondary roots. Every
-configured root is active for attribution. Secondary roots are not historical
-roots, and roots may belong to different Git repositories. When an active root
-is later removed from the app Project, it becomes a historical alias in the
-registry.
-
-## Thread attribution
-
-Attribution precedence:
-
-1. explicit Codex app thread assignment
-2. unique cwd match against every active root
-3. saved historical aliases
-
-Projectless, externally assigned, ambiguous, unmatched, and user-evidence
-exclusions are listed in the full run report under `excluded`. Each entry has
-`threadId`, a sessions-root-relative `sourceRef`, a stable `reason`, and
-`candidateProjectIds`; compact output exposes `excludedCount`. Explicit
-assignment wins even if the chat cwd is outside the currently active roots.
-
-## Thread Note v4 contract
-
-Required body sections:
-
-```text
-Summary
-Key Developments
-Last Known State
-```
-
-Optional sections:
-
-```text
-Evidence
-Source Notes
-```
-
-Multiple independent work items render as `WI` H3 sections with label H4
-sections. A single work item renders label H3 sections directly.
-
-Automatically generated notes include:
-
-- canonical lowercase UUIDv4 `id`
-- `reviewStatus: unreviewed`
-- source thread ID and source ref
-- source Project ID when available
-- source fingerprint
-- exact Bronze `sourceCaptureRef` and `sourceCaptureSha256`
-- generator model and reasoning effort
-- prompt and renderer versions
-- automated validation status
-
-Thread Notes do not store downstream processing status or references. Each
-consumer owns its processing state and provenance independently.
-
-The parser includes user and assistant messages, tool actions/results,
-validation evidence, and cwd changes. Secret-like text is redacted and large
-event text is truncated before model input.
-
-Unchanged source and generator fingerprints are a no-op and do not call the
-model. A changed generator fingerprint causes regeneration even if the source
-chat is unchanged.
-
-## Decision Record v5 contract
-
-`decisions build` scans supported Thread Note v3-v4 files with an `Explicit
-Decision` development. `--dry-run` planning is read-only and does not call the
-model. Normal execution generates strict structured output from bounded
-batches of Thread Notes plus an existing-decision index. The output unit is a
-central decision, not a Thread Note. One decision may cite multiple
-`sourceThreadNoteRefs`, and one Thread Note may support multiple decisions. Each
-new central decision becomes one `DR-NNNN-<slug>.md` file, or links to an
-existing decision ID when the model identifies the same decision.
-
-`Decision` is the only body section rendered for every record. `Why`,
-`Consequences`, `Alternatives`, `Scope`, `Verification`, `Related Evidence`,
-`Follow-up`, and `Supersession` are rendered only when they contain
-source-backed content. Empty values remain available to structured processing
-but do not become `None.` placeholders in human-readable Markdown. New records
-use `schemaVersion: 5` and keep decision status, implementation status, and
-promotion status separate. Materialization targets for working context,
-repository documentation, global context, and Skills are stored in Frontmatter
-instead of the body. Existing v1-v4 records remain readable and are not
-automatically rewritten. Codex-generated unreviewed v2-v4 records are
-quality-upgrade candidates and can be resynthesized as v5 only during a normal
-non-dry-run build while preserving their decision ID, artifact UUID when
-present, and original date.
-
-Decision generation leaves source Thread Notes unchanged. Decision Records
-own forward provenance through `sourceThreadNoteRefs`; reverse `decisionIds`,
-source fingerprints, and no-action outcomes live in
-`decision-build-state.json`.
-
-## Working Context v4 contract
-
-`working-context build` uses validated Thread Notes, Decision Records, selected
-root documentation, and a read-only Git snapshot. `--dry-run` planning is
-read-only and does not call the model. Normal execution uses bounded synthesis
-batches and a final merge when needed. Repository evidence has precedence for
-current file/Git state; reviewed Accepted decisions have precedence for durable
-judgments; newer Thread Notes provide current work state. Proposed decisions
-and unaccepted assistant suggestions are not promoted into current truth.
-
-`Project Overview` and `Current Truth` are required. `Current Outcome`, `Active
-Work`, `Risks And Constraints`, `Effective Decisions`, `Semantic Context`,
-`Key Evidence`, `Resumption`, and `Source Limitations` render only when they
-contain source-backed content. Semantic Glossary entries, Taxonomy items, and
-Taxonomy relationships must cite exact known source refs. Empty sections and
-`None.` placeholders are omitted.
-
-The source-set fingerprint and generated artifact hash live in
-`working-context-build-state.json`. An unchanged source/profile build is a
-no-op. A changed build refuses to overwrite an artifact whose current hash no
-longer matches the tracked generated hash; `--allow-edited` is the explicit
-replacement gate. Artifact and state writes are transactional. New artifacts
-have a UUIDv4 `id`, and updates preserve it.
-
-## Generation and commit safety
-
-Codex CLI generation uses:
-
-```text
-codex exec
---ephemeral
---ignore-user-config
---skip-git-repo-check
---sandbox read-only
---output-schema
---output-last-message
-```
-
-Generated notes are completed and validated in the pipeline cache before being
-committed. A note and its refresh state are treated as one transaction:
-failures restore the previous note and state byte-for-byte, including an
-existing BOM or newline style.
-
-Each source JSONL is decoded once per scan or revalidation into thread
-metadata, evidence events, and the final valid record's top-level timestamp.
-That source event time, not filesystem `mtime`, controls the `installed_at`
-window and idle check and is recorded as `sourceLastEventAt` in refresh state.
-Missing or invalid source event time is excluded and counted explicitly.
-Resolved cwd variants use a bounded cache, and root variants are precomputed
-per Project before event attribution. Invalid JSONL records are reported
-through the configured logger, so `--quiet` suppresses those warnings too.
-
-Decision Records are rendered and validated before their transaction is
-finalized. New records, resynthesized unreviewed generated records, appended
-provenance, and `decision-build-state.json` are committed together; failures
-remove new records and restore existing records and prior state. Source Thread
-Notes are not part of normal Decision generation writes. Reviewed central
-judgment content is not automatically rewritten. The inference prompt indexes
-at most the newest 200 existing Decision Records; reaching that limit produces
-a report warning and compact `warningCount`, `existingDecisionIndexLimit`, and
-`existingDecisionIndexOmittedCount` fields without turning the run into a
-failure.
-
-Working Context is rendered and validated before replacing the live artifact.
-Its sources are fingerprinted again after model generation. Source changes,
-validation failure, or state-write failure restore the previous artifact and
-state byte-for-byte. Decision rollback uses the same byte-exact preservation.
-
-Incomplete normal-run and rebuild artifacts remain resumable in the pipeline
-cache. Successful work removes its pending cache. Rebuild performs a staged,
-validated Thread Notes folder cutover and restores the prior live Thread Notes and
-state if cutover fails.
-
-Source JSONL files are always read-only.
-
-## Validation completed
-
-The current implementation passed:
-
-```text
-pytest:      203 passed
-Ruff:         passed
-strict mypy:  passed on native Windows
-uv build:     wheel and source distribution built successfully
-```
-
-Tests cover:
-
-- config precedence, relative paths, unknown-key rejection, and dry-run config
-- multi-root primary/secondary behavior
-- root/name/new/pending Project binding
-- historical aliases and unknown registry-field preservation
-- explicit assignment, cwd fallback, projectless, and ambiguous exclusion
-- immutable exact-byte Bronze capture, manifest idempotence, source retention,
-  ownership checks, Bronze-only input, and failed-current-capture isolation
-- metadata-only UUIDv4 migration, body/BOM/newline preservation, duplicate
-  rejection, and byte-exact batch rollback
-- Thread Note v4 schema, UUID identity preservation, and WI hierarchy
-- Decision Record v5 conditional structure, v2-v4 readability, deduplication
-  references, no-action state, and
-  Thread Note distillation metadata
-- Working Context v4 source precedence, conditional sections, Semantic
-  Glossary and Taxonomy evidence, unchanged no-op, edited-file protection, and
-  atomic artifact/state writes
-- source provenance, redaction, size limits, and status consistency
-- source-event-time windowing, one-pass JSONL decoding, cached path attribution,
-  and logger-controlled parse warnings
-- unchanged no-op and stale-generator regeneration
-- byte-exact note/state, Decision, and Working Context rollback
-- Decision inference-index threshold warnings and compact summary fields
-- rebuild failure recovery, resume, and atomic cutover
-- CLI JSON output, exit behavior, dry-run, and validation
-
-## Read-only live verification
-
-The implementation was exercised against the current computer's real Codex
-app state, JSONL thread logs, and context registry using dry-run only.
-
-Observed summary on 2026-09-04:
-
-```text
-Codex app Projects:               26
-Projects bindable:                26
-New context Projects proposed:     3
-Pending Project bindings:          0
-Explicit thread assignments:     134
-Registered projectless threads:    5
-
-JSONL source files discovered:    576
-Bronze captures planned:          576
-Bronze capture failures:            0
-Existing artifacts inspected:      12
-Artifact IDs planned:              12
-Schema upgrades planned:            0
-```
-
-Both commands used `--dry-run`. No Bronze blob, manifest, artifact ID, registry
-update, state, or run report was written.
-
-On 2026-09-03, a read-only normal-pull dry-run exercised the unified JSONL
-reader, event-time selection, and exclusion details against 563 real source
-logs. It found 112 eligible threads and listed 105 exclusions: 103 approval or
-internal chats, one projectless thread, and one unmatched thread. Every listed
-item had all required fields. It completed with no failed or deferred threads,
-zero invalid or missing source event times, and no report write.
-
-On 2026-08-03, a second read-only verification of `decisions build` resolved
-the current Project by internal ID with 22/22 Projects bound and no pending
-binding. The Project had no stored Thread Notes at that moment, so the correct
-result was `selectedCount: 0`, no model call, and no write.
-
-## Repository state at handoff
-
-The Bronze and artifact identity implementation changes are present only in
-the working tree. Nothing has been staged, committed, or pushed by Codex.
-
-Before committing, inspect:
-
-```powershell
-git status --short
-git diff --check
-```
-
-The build output and local virtual environment are ignored.
-
-## Recommended next steps
-
-First inspect the resolved configuration and the two new write plans:
-
-```powershell
-uv run tkn-codex-context config show
-uv run tkn-codex-context projects list
-uv run tkn-codex-context raw ingest --dry-run
-uv run tkn-codex-context artifacts migrate-ids --all --dry-run
-uv run tkn-codex-context thread-notes pull --dry-run
-uv run tkn-codex-context decisions build --project-id <projectId> --dry-run
-uv run tkn-codex-context working-context build --project-id <projectId> --dry-run
-```
-
-Use `projects list --json` when the full registered root metadata is needed.
-Review Project IDs and ambiguous historical threads before applying broad
-backfill.
-
-After approval:
-
-```powershell
-uv run tkn-codex-context projects fetch
-uv run tkn-codex-context raw ingest
-uv run tkn-codex-context artifacts migrate-ids --all
-uv run tkn-codex-context thread-notes pull
-uv run tkn-codex-context decisions build --project-id <projectId>
-uv run tkn-codex-context working-context build --project-id <projectId>
-```
-
-Historical processing should start with a small Project-scoped batch:
-
-```powershell
-uv run tkn-codex-context thread-notes pull --backfill `
-  --project-id <projectId> `
-  --limit 5 `
-  --dry-run
-```
-
-Then remove `--dry-run` only after reviewing the selected thread IDs and
-Project binding.
-
-## Known boundaries
-
-- `.codex-global-state.json` and Codex JSONL are private internal formats, not
-  public compatibility contracts. The adapter intentionally fails closed.
-- Project identity uses only the Codex app internal ID. Cwd fallback compares
-  both original and resolved roots; nested active roots can still make old,
-  unassigned threads ambiguous.
-- A missing real config is allowed only for dry-run, where the current time is
-  used as an in-memory normal-pull boundary. A write pull requires `init`.
-- Working Context generation is implemented per Project; cross-Project and
-  global context remain separate future stages.
-- Removing or changing the existing Plugin and configuring Task Scheduler are
-  separate tasks.
+Tests use synthetic JSONL and fake inference providers. The pipeline integration
+suite covers projectless/archive/cross-Project input, no-op runs, late history,
+append updates, preserved note IDs, failed-stage and batch resumption, concurrent
+lock rejection, dry-run immutability, reviewed/edited protection, leaf-stage
+freshness, and evidence/hash/relation validation. Existing builder tests cover
+structured generation and atomic output/state rollback.
+
+Use framework/OS temporary directories. Follow AGENTS.md if a dedicated fallback
+is necessary, and remove it after the run. Inspect wheel contents after changing
+packaged resources. Use `uv tool install . --reinstall` only when refreshing the
+user's installed CLI is requested; repository edits alone do not update it.
+
+## Deliberate limits
+
+Local Codex formats can change. Unsupported records are retained in Raw and
+reported; the parser does not promise a full archive of all cloud or app-visible
+conversations. Automatic retention cleanup, cloud connectors, scheduler setup,
+and semantic scope discovery are not implemented. The provenance contract is
+artifact/stage-level, not a complete transcript of every inference request.
+
+Version 0.5 does not migrate the previous Project-based output layout. Retain
+older stores and configure fresh roots for the new workflow. Private build
+state has no downstream compatibility promise; evolve published data contracts
+and profile versions deliberately when changing output meaning.

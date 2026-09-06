@@ -1,5 +1,4 @@
-schema_version: "2.1.0"
-installed_at: null
+schema_version: "2.2.0"
 codex_home: ~/.codex
 raw_root: ~/.tkn/codex_context_pipeline/raw
 data_root: ~/.tkn/codex_context_pipeline/data
@@ -16,3 +15,5 @@ idle_minutes: 30
 runtime_minutes: 230
 model_timeout_seconds: 1800
 source_id: windows
+include_archived: true
+scopes: {}

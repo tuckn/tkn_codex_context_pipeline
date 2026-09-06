@@ -1,7 +1,7 @@
 ---
 type: prompt
 id: 3eb50b1e-aac2-4e98-9b54-f284179d3d77
-version: "4.0"
+version: "4.1"
 ---
 
 # Default decision distillation instructions
@@ -18,6 +18,14 @@ proposal that was not accepted, or content better kept in a specification or
 normal knowledge note.
 
 ## Source fidelity
+
+- The selected synthesis scope can span several Codex Projects or contain
+  unassigned conversations. Membership alone does not establish a common task.
+- Changed notes without an Explicit Decision section can correct or withdraw
+  an earlier decision. Reconcile that evidence with existing records; use the
+  supported Deprecated, Rejected, or Superseded status when explicitly justified.
+- Preserve supplied `data:/` source references exactly. Do not convert them to
+  Project-local paths. Reviewed records must never be rewritten automatically.
 
 - Use only facts stated in the supplied Thread Notes or existing-decision index.
 - Do not infer a rationale, approval, scope, outcome, verification, alternative,

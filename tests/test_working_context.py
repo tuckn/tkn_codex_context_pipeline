@@ -199,8 +199,8 @@ class FakeWorkingContextGenerator:
 def test_profile_is_strict_and_application_owned() -> None:
     profile = load_working_context_profile()
 
-    assert profile.prompt.version == "1.0"
-    assert profile.template.version == "1.0"
+    assert profile.prompt.version == "1.1"
+    assert profile.template.version == "1.1"
     assert profile.schema.value["additionalProperties"] is False
     assert set(profile.schema.value["required"]) == set(profile.schema.value["properties"])
 
@@ -255,7 +255,7 @@ def test_build_is_read_only_by_default_and_write_creates_artifact(tmp_path: Path
     assert generator.calls == 1
     assert report_path is not None and report_path.is_file()
     validation = validate_working_context(context_path)
-    assert validation["schemaVersion"] == 4
+    assert validation["schemaVersion"] == 5
     text = context_path.read_text(encoding="utf-8")
     assert "## Semantic Context" in text
     assert "### Semantic Glossary" in text

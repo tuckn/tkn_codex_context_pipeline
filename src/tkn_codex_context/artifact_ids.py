@@ -33,7 +33,7 @@ class ArtifactIdentityTarget:
 
 THREAD_NOTE_IDENTITY = ArtifactIdentitySpec("thread note", "threadNote", "4")
 DECISION_IDENTITY = ArtifactIdentitySpec("decision record", "decision", "5")
-WORKING_CONTEXT_IDENTITY = ArtifactIdentitySpec("working context", "workingContext", "4")
+WORKING_CONTEXT_IDENTITY = ArtifactIdentitySpec("working context", "workingContext", "5")
 
 
 def _targets(project: Project) -> list[ArtifactIdentityTarget]:
@@ -209,7 +209,7 @@ def migrate_artifact_ids(
             written.append(target)
             metadata = parse_simple_frontmatter(target.path.read_text(encoding="utf-8-sig"))
             canonical_uuid4(metadata.get("id") or "")
-            if new == target.spec.current_schema:
+            if new == target.spec.current_schema or (target.spec is WORKING_CONTEXT_IDENTITY and new == "4"):
                 _validate_current(target)
     except Exception:
         for target in reversed(written):

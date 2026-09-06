@@ -1,13 +1,13 @@
 ---
 type: template
 id: 4f68ad13-b136-4fd4-9022-462440cab420
-version: "1.0"
+version: "1.1"
 ---
 {{frontmatter}}
 
 # Working Context
 
-## Project Overview
+## Scope Overview
 
 {{project_overview}}
 

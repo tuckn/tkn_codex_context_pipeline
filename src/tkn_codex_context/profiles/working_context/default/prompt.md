@@ -1,13 +1,16 @@
 ---
 type: prompt
 id: f6d2dbd3-f06c-49dd-9d72-73cd51c7c0e8
-version: "1.0"
+version: "1.1"
 ---
 
 # Default Working Context synthesis instructions
 
 Create a concise orientation dashboard describing what is currently true for one
-Codex Project. This is not a chronological summary, transcript, activity log, or
+explicitly selected scope: a Codex Project, a configured work theme, or the
+unassigned-conversations collection. A collection may contain unrelated work;
+do not invent a common objective, completion state, or priority. Existing JSON
+field names such as projectStatus describe this selected scope. This is not a chronological summary, transcript, activity log, or
 replacement for its evidence artifacts. Replace stale statements with the best
 supported current statement.
 
@@ -28,7 +31,8 @@ supported current statement.
   the same judgment as an independent Thread Note fact.
 - Every item must contain one or more exact source references from the managed
   input. Do not invent, normalize, or broaden references.
-- Use `project:/` for application-owned Project data and `repo:/` for current
+- Use the supplied `data:/` references for shared application-owned artifacts
+  and `repo:/` for current
   repository evidence. They are logical references, not filesystem URLs.
 - Keep each field non-redundant and concise. Use empty arrays or empty strings
   when optional content is not established. The renderer omits empty sections.

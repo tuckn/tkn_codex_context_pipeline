@@ -1,4 +1,4 @@
-"""Build a source-backed Working Context v3 dashboard for one Project."""
+"""Build a source-backed Working Context dashboard for a selected scope."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ from .working_context_resources import (
     render_working_context_template,
 )
 
-WORKING_CONTEXT_SCHEMA_VERSION = 4
+WORKING_CONTEXT_SCHEMA_VERSION = 5
 WORKING_CONTEXT_STATE_SCHEMA_VERSION = 1
 WORKING_CONTEXT_RENDERER_VERSION = 2
 WORKING_CONTEXT_FILENAME = "working-context.md"
@@ -62,6 +62,7 @@ IN_FLIGHT_GRACE_MINUTES = 9
 WORKING_CONTEXT_PROFILE = load_working_context_profile()
 WORKING_CONTEXT_OUTPUT_SCHEMA = WORKING_CONTEXT_PROFILE.schema.value
 _ALLOWED_HEADINGS = (
+    "Scope Overview",
     "Project Overview",
     "Current Truth",
     "Current Outcome",
@@ -90,6 +91,7 @@ class WorkingContextSource:
     source_ref: str
     sha256: str
     text: str
+    source_bytes: bytes | None = None
 
     def as_prompt_dict(self) -> dict[str, str]:
         return {
@@ -193,39 +195,46 @@ def _artifact_sources(
 ) -> tuple[list[WorkingContextSource], list[dict[str, str]]]:
     sources: list[WorkingContextSource] = []
     failures: list[dict[str, str]] = []
-    for path in sorted(project.thread_notes_path.glob("*.md")):
+    for path in project.iter_note_paths():
         try:
             validate_thread_note(path)
+            content = path.read_bytes()
             text = _read_bounded(path)
+            if path.read_bytes() != content:
+                raise PipelineError(f"Working Context source changed while reading: {path}")
         except (OSError, PipelineError, SystemExit) as exc:
             failures.append({"source": path.name, "error": str(exc)})
             continue
-        relative = path.relative_to(project.context_path).as_posix()
         sources.append(
             WorkingContextSource(
                 kind="threadNote",
-                source_ref=f"project:/{relative}",
-                sha256=sha256(path.read_bytes()).hexdigest(),
+                source_ref=project.artifact_ref(path),
+                sha256=sha256(content).hexdigest(),
                 text=text,
+                source_bytes=content,
             )
         )
     decisions_directory = project.context_path / "decisions"
-    for path in sorted(decisions_directory.glob("DR-*.md")):
+    decision_paths = project.decision_paths
+    for path in decision_paths if decision_paths is not None else sorted(decisions_directory.glob("DR-*.md")):
         try:
             from .decisions import validate_decision_record
 
             validate_decision_record(path)
+            content = path.read_bytes()
             text = _read_bounded(path)
+            if path.read_bytes() != content:
+                raise PipelineError(f"Working Context source changed while reading: {path}")
         except (OSError, PipelineError, SystemExit) as exc:
             failures.append({"source": path.name, "error": str(exc)})
             continue
-        relative = path.relative_to(project.context_path).as_posix()
         sources.append(
             WorkingContextSource(
                 kind="decisionRecord",
-                source_ref=f"project:/{relative}",
-                sha256=sha256(path.read_bytes()).hexdigest(),
+                source_ref=project.artifact_ref(path),
+                sha256=sha256(content).hexdigest(),
                 text=text,
+                source_bytes=content,
             )
         )
     return sources, failures
@@ -258,6 +267,14 @@ def _git_snapshot(root: Path) -> str:
 
 
 def _repository_sources(project: Project) -> list[WorkingContextSource]:
+    if project.repository_roots is not None:
+        from dataclasses import replace
+
+        gathered: list[WorkingContextSource] = []
+        for index, root in enumerate(project.repository_roots):
+            for source in _repository_sources(replace(project, current_root=root, repository_roots=None)):
+                gathered.append(replace(source, source_ref=source.source_ref.replace("repo:/", f"repo:/{index}/", 1)))
+        return gathered
     root = project.current_root
     if not root.is_dir():
         return []
@@ -267,12 +284,11 @@ def _repository_sources(project: Project) -> list[WorkingContextSource]:
         if not path.is_file():
             continue
         try:
-            text = path.read_text(encoding="utf-8-sig")
+            content = path.read_bytes()
+            text = content.decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
             secrets = has_secret_like_content(text)
             if secrets:
-                raise PipelineError(
-                    f"repository source contains secret-like content ({', '.join(secrets)}): {path}"
-                )
+                raise PipelineError(f"repository source contains secret-like content ({', '.join(secrets)}): {path}")
             if len(text) > MAX_SOURCE_CHARACTERS:
                 text = text[:MAX_SOURCE_CHARACTERS].rstrip() + "\n\n[TRUNCATED BY WORKING CONTEXT INPUT LIMIT]\n"
         except (OSError, PipelineError):
@@ -281,8 +297,9 @@ def _repository_sources(project: Project) -> list[WorkingContextSource]:
             WorkingContextSource(
                 kind="repositoryFile",
                 source_ref=f"repo:/{name}",
-                sha256=sha256(path.read_bytes()).hexdigest(),
+                sha256=sha256(content).hexdigest(),
                 text=text,
+                source_bytes=content,
             )
         )
     snapshot = _git_snapshot(root)
@@ -318,10 +335,7 @@ def working_context_source_batches(
     current: list[WorkingContextSource] = []
     characters = 0
     for source in sources:
-        if current and (
-            len(current) >= MAX_BATCH_SOURCES
-            or characters + len(source.text) > MAX_BATCH_CHARACTERS
-        ):
+        if current and (len(current) >= MAX_BATCH_SOURCES or characters + len(source.text) > MAX_BATCH_CHARACTERS):
             batches.append(current)
             current = []
             characters = 0
@@ -383,9 +397,7 @@ def validate_working_context_output(
     if unknown:
         raise PipelineError("Inference Working Context output references unknown sources: " + ", ".join(unknown))
     invalid_decisions = sorted(
-        str(item["decisionRef"])
-        for item in value["effectiveDecisions"]
-        if item["decisionRef"] not in decision_refs
+        str(item["decisionRef"]) for item in value["effectiveDecisions"] if item["decisionRef"] not in decision_refs
     )
     if invalid_decisions:
         raise PipelineError(
@@ -402,9 +414,7 @@ def validate_working_context_output(
         raise PipelineError("taxonomyItems must have unique labels")
     label_set = set(labels)
     invalid_parents = sorted(
-        str(item["parent"])
-        for item in value["taxonomyItems"]
-        if item["parent"] and item["parent"] not in label_set
+        str(item["parent"]) for item in value["taxonomyItems"] if item["parent"] and item["parent"] not in label_set
     )
     if invalid_parents:
         raise PipelineError("taxonomyItems reference unknown parents: " + ", ".join(invalid_parents))
@@ -563,10 +573,7 @@ def _source_suffix(refs: Sequence[str]) -> str:
 
 
 def _evidence_bullets(items: Sequence[dict[str, Any]]) -> str:
-    return "\n".join(
-        f"- {str(item['text']).strip()}{_source_suffix(item['sourceRefs'])}"
-        for item in items
-    )
+    return "\n".join(f"- {str(item['text']).strip()}{_source_suffix(item['sourceRefs'])}" for item in items)
 
 
 def _plain_bullets(values: Sequence[str]) -> str:
@@ -584,9 +591,7 @@ def _semantic_context(data: dict[str, Any]) -> str:
             if item["distinctions"]:
                 details.append("Distinctions: " + "; ".join(item["distinctions"]))
             suffix = (" " + " ".join(details)) if details else ""
-            lines.append(
-                f"- **{item['term']}** — {item['definition']}{suffix}{_source_suffix(item['sourceRefs'])}"
-            )
+            lines.append(f"- **{item['term']}** — {item['definition']}{suffix}{_source_suffix(item['sourceRefs'])}")
         blocks.append("\n".join(lines))
     if data["taxonomyItems"]:
         lines = ["### Taxonomy", ""]
@@ -622,22 +627,18 @@ def render_working_context(
     timestamp = generated_at or now_iso()
     thread_refs = [source.source_ref for source in sources if source.kind == "threadNote"]
     decision_refs = [source.source_ref for source in sources if source.kind == "decisionRecord"]
-    repository_refs = [
-        source.source_ref
-        for source in sources
-        if source.kind in {"repositoryFile", "gitSnapshot"}
-    ]
+    repository_refs = [source.source_ref for source in sources if source.kind in {"repositoryFile", "gitSnapshot"}]
     fields: list[tuple[str, str | int | bool | list[str]]] = [
         ("type", "workingContext"),
         ("schemaVersion", WORKING_CONTEXT_SCHEMA_VERSION),
         ("id", note_id or str(uuid.uuid4())),
         ("title", str(data["title"])),
         ("description", str(data["description"])),
-        ("projectId", project.project_id),
+        ("scopeId", project.project_id),
         ("generator", provider_name(config.provider)),
         ("generatorProvider", config.provider),
         ("status", "active"),
-        ("projectStatus", str(data["projectStatus"])),
+        ("scopeStatus", str(data["projectStatus"])),
         ("currentFocus", str(data["currentFocus"])),
         ("blocked", bool(data["blocked"])),
         ("mainBlocker", str(data["mainBlocker"])),
@@ -661,13 +662,9 @@ def render_working_context(
         ("updated", timestamp),
     ]
     effective_decisions = "\n".join(
-        f"- `{item['decisionRef']}` — {item['summary']}"
-        for item in data["effectiveDecisions"]
+        f"- `{item['decisionRef']}` — {item['summary']}" for item in data["effectiveDecisions"]
     )
-    key_evidence = "\n".join(
-        f"- `{item['ref']}` — {item['reason']}"
-        for item in data["keyEvidence"]
-    )
+    key_evidence = "\n".join(f"- `{item['ref']}` — {item['reason']}" for item in data["keyEvidence"])
     resumption = _evidence_bullets(data["resumption"])
     if data["exactNextAction"]:
         next_action = f"**Exact Next Action:** {data['exactNextAction']}"
@@ -703,7 +700,7 @@ def validate_working_context(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8-sig")
     metadata = parse_simple_frontmatter(text)
     schema_version = metadata.get("schemaVersion") or "1"
-    if schema_version not in {"3", str(WORKING_CONTEXT_SCHEMA_VERSION)}:
+    if schema_version not in {"3", "4", str(WORKING_CONTEXT_SCHEMA_VERSION)}:
         raise PipelineError(f"unsupported Working Context schemaVersion {schema_version}: {path}")
     required = {
         "type": "workingContext",
@@ -714,7 +711,7 @@ def validate_working_context(path: Path) -> dict[str, Any]:
     for key, expected in required.items():
         if metadata.get(key) != expected:
             raise PipelineError(f"Working Context has invalid {key}: {path}")
-    if schema_version == str(WORKING_CONTEXT_SCHEMA_VERSION):
+    if schema_version in {"4", str(WORKING_CONTEXT_SCHEMA_VERSION)}:
         try:
             canonical_uuid4(metadata.get("id") or "")
         except ValueError as exc:
@@ -724,7 +721,7 @@ def validate_working_context(path: Path) -> dict[str, Any]:
     required_values = (
         "title",
         "description",
-        "projectId",
+        "scopeId" if schema_version == "5" else "projectId",
         "generatorModel",
         "generatorReasoningEffort",
         "promptVersion",
@@ -747,21 +744,21 @@ def validate_working_context(path: Path) -> dict[str, Any]:
         raise PipelineError(f"Working Context has invalid rendererVersion: {path}")
     if metadata.get("reviewStatus") not in {"unreviewed", "reviewed"}:
         raise PipelineError(f"Working Context has invalid reviewStatus: {path}")
-    if metadata.get("projectStatus") not in {
-        "active", "paused", "blocked", "completed", "archived", "unknown"
-    }:
-        raise PipelineError(f"Working Context has invalid projectStatus: {path}")
+    status_key = "scopeStatus" if schema_version == "5" else "projectStatus"
+    if metadata.get(status_key) not in {"active", "paused", "blocked", "completed", "archived", "unknown"}:
+        raise PipelineError(f"Working Context has invalid {status_key}: {path}")
     if metadata.get("blocked") not in {"true", "false"}:
         raise PipelineError(f"Working Context has invalid blocked: {path}")
-    if (metadata.get("blocked") == "true") != (metadata.get("projectStatus") == "blocked"):
+    if (metadata.get("blocked") == "true") != (metadata.get(status_key) == "blocked"):
         raise PipelineError(f"Working Context blocked fields are inconsistent: {path}")
     if not re.fullmatch(r"[0-9a-f]{64}", metadata.get("sourceSetSha256") or ""):
         raise PipelineError(f"Working Context has invalid sourceSetSha256: {path}")
     if "# Working Context" not in text:
         raise PipelineError(f"Working Context has no title heading: {path}")
     headings = re.findall(r"(?m)^## ([^\r\n]+?)\s*$", text)
-    if headings[:2] != ["Project Overview", "Current Truth"]:
-        raise PipelineError(f"Working Context must start with Project Overview and Current Truth: {path}")
+    overview_heading = "Scope Overview" if schema_version == "5" else "Project Overview"
+    if headings[:2] != [overview_heading, "Current Truth"]:
+        raise PipelineError(f"Working Context must start with {overview_heading} and Current Truth: {path}")
     unknown = [heading for heading in headings if heading not in _ALLOWED_HEADINGS]
     if unknown:
         raise PipelineError(f"Working Context has unsupported headings ({', '.join(unknown)}): {path}")
@@ -782,14 +779,10 @@ def validate_working_context(path: Path) -> dict[str, Any]:
     }
     if not declared_refs:
         raise PipelineError(f"Working Context has no source references: {path}")
-    invalid_refs = sorted(
-        ref
-        for ref in declared_refs
-        if not (ref.startswith("project:/") or ref.startswith("repo:/"))
-    )
+    invalid_refs = sorted(ref for ref in declared_refs if not ref.startswith(("project:/", "repo:/", "data:/")))
     if invalid_refs:
         raise PipelineError(f"Working Context has invalid source references ({', '.join(invalid_refs)}): {path}")
-    body_refs = set(re.findall(r"`((?:project|repo):/[^`]+)`", body))
+    body_refs = set(re.findall(r"`((?:project|repo|data):/[^`]+)`", body))
     undeclared_refs = sorted(body_refs - declared_refs)
     if undeclared_refs:
         raise PipelineError(
@@ -805,8 +798,8 @@ def validate_working_context(path: Path) -> dict[str, Any]:
         "path": str(path.absolute()),
         "schemaVersion": int(schema_version),
         "id": metadata.get("id"),
-        "projectId": metadata["projectId"],
-        "projectStatus": metadata["projectStatus"],
+        "scopeId": metadata.get("scopeId") or metadata.get("projectId"),
+        "scopeStatus": metadata[status_key],
         "reviewStatus": metadata["reviewStatus"],
     }
 
@@ -835,12 +828,18 @@ def execute_working_context_build(
     allow_edited: bool = False,
     cache_root: Path | None = None,
     progress: Callable[[dict[str, Any]], None] | None = None,
+    deadline: datetime | None = None,
+    prepared_sources: Sequence[WorkingContextSource] | None = None,
 ) -> tuple[dict[str, Any], Path | None]:
     started = now_local()
     output_path = working_context_path(project)
     state_path = working_context_state_path(project)
     state = load_working_context_state(project)
     sources, source_failures = collect_working_context_sources(project)
+    if prepared_sources is not None:
+        if _source_set_sha256(sources) != _source_set_sha256(prepared_sources):
+            raise PipelineError("Working Context sources changed after evidence capture")
+        sources = list(prepared_sources)
     source_set = _source_set_sha256(sources) if sources else ""
     generation = working_context_generation_fingerprint(config)
     current_hash = sha256(output_path.read_bytes()).hexdigest() if output_path.is_file() else None
@@ -898,7 +897,10 @@ def execute_working_context_build(
         return report, None
     if generator is None:
         raise PipelineError("a Working Context generator is required for a write run")
-    deadline = started + timedelta(minutes=config.runtime_minutes + IN_FLIGHT_GRACE_MINUTES)
+    deadline = min(
+        deadline or started + timedelta(minutes=config.runtime_minutes),
+        started + timedelta(minutes=config.runtime_minutes),
+    ) + timedelta(minutes=IN_FLIGHT_GRACE_MINUTES)
     if hasattr(generator, "set_deadline"):
         generator.set_deadline(deadline)
     if progress:

@@ -20,9 +20,7 @@ def write_yaml(path: Path, value: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     document = {"schema_version": CONFIG_SCHEMA_VERSION, **value}
     schema_version = document.pop("schema_version")
-    schema_text = (
-        json.dumps(schema_version) if isinstance(schema_version, str) else str(schema_version)
-    )
+    schema_text = json.dumps(schema_version) if isinstance(schema_version, str) else str(schema_version)
     path.write_text(
         f"schema_version: {schema_text}\n{yaml.safe_dump(document, sort_keys=False)}",
         encoding="utf-8",
@@ -35,7 +33,9 @@ def test_packaged_example_config_uses_portable_home_paths() -> None:
     for key in ("codex_home", "raw_root", "data_root", "state_root", "cache_root"):
         assert "\\" not in value[key]
         assert value[key].startswith("~/")
-    assert value["installed_at"] is None
+    assert "installed_at" not in value
+    assert value["include_archived"] is True
+    assert value["scopes"] == {}
     assert value["schema_version"] == CONFIG_SCHEMA_VERSION
     assert config_example_text().splitlines()[0] == f'schema_version: "{CONFIG_SCHEMA_VERSION}"'
     assert value["generation"] == {
@@ -144,11 +144,39 @@ def test_config_resolution_reports_the_winning_source(
         "project",
         "explicit",
     ]
-    assert all(
-        layer["effectiveSchemaVersion"] == CONFIG_SCHEMA_VERSION
-        for layer in resolution.layers
-    )
+    assert all(layer["effectiveSchemaVersion"] == CONFIG_SCHEMA_VERSION for layer in resolution.layers)
     assert not resolution.has_in_memory_migrations
+
+
+def test_scope_paths_resolve_from_declaring_layer_and_survive_title_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    cwd = tmp_path / "work"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    global_path = home / ".tkn/codex_context_pipeline/config.yaml"
+    write_yaml(
+        global_path,
+        {
+            "scopes": {
+                "shared": {"title": "Original", "thread_ids": ["one"], "repository_roots": ["relative-repository"]}
+            }
+        },
+    )
+    write_yaml(cwd / ".tkn/config.yaml", {"scopes": {"shared": {"title": "Updated"}}})
+    config = load_app_config(cwd=cwd)
+    assert config.scopes["shared"].title == "Updated"
+    assert config.scopes["shared"].repository_roots == [(global_path.parent / "relative-repository").absolute()]
+    assert config.scopes["shared"].thread_ids == ["one"]
+
+
+@pytest.mark.parametrize("roots", [None, 42, "not-a-list"])
+def test_invalid_scope_roots_have_a_configuration_error(tmp_path: Path, roots: object) -> None:
+    target = tmp_path / "config.yaml"
+    write_yaml(target, {"scopes": {"shared": {"title": "Shared", "thread_ids": ["one"], "repository_roots": roots}}})
+    with pytest.raises(PipelineError, match="repository_roots"):
+        load_app_config(explicit_path=target, cwd=tmp_path)
 
 
 def test_retired_null_summary_prompt_is_ignored(
@@ -191,7 +219,7 @@ def test_config_file_requires_schema_version(tmp_path: Path) -> None:
         ('"2.0"', "expected a quoted MAJOR.MINOR.PATCH"),
         ('"2.0.0-rc1"', "expected a quoted MAJOR.MINOR.PATCH"),
         ('"1.9.0"', "schema v1 is no longer supported"),
-        ('"2.2.0"', "unsupported newer configuration schema_version"),
+        ('"2.3.0"', "unsupported newer configuration schema_version"),
         ('"3.0.0"', "unsupported newer configuration schema_version"),
     ],
 )
@@ -209,13 +237,13 @@ def test_unsupported_schema_versions_are_rejected(
 
 def test_same_major_minor_newer_patch_is_accepted(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
-    write_yaml(path, {"schema_version": "2.1.7", "idle_minutes": 10})
+    write_yaml(path, {"schema_version": "2.2.7", "idle_minutes": 10})
 
     resolution = resolve_app_config(explicit_path=path, cwd=tmp_path)
 
     assert resolution.config.schema_version == CONFIG_SCHEMA_VERSION
     explicit = resolution.layers[-1]
-    assert explicit["schemaVersion"] == "2.1.7"
+    assert explicit["schemaVersion"] == "2.2.7"
     assert explicit["effectiveSchemaVersion"] == CONFIG_SCHEMA_VERSION
     assert explicit["migration"] is None
 

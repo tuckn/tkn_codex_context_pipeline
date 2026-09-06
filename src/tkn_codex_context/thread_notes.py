@@ -157,6 +157,21 @@ class Project:
     foreign_assigned_thread_ids: frozenset[str] = frozenset()
     projectless_thread_ids: frozenset[str] = frozenset()
     state_directory: Path | None = None
+    # A synthesis scope can reference shared notes without copying them.
+    note_paths: tuple[Path, ...] | None = None
+    data_directory: Path | None = None
+    repository_roots: tuple[Path, ...] | None = None
+    decision_paths: tuple[Path, ...] | None = None
+
+    def iter_note_paths(self) -> tuple[Path, ...]:
+        if self.note_paths is not None:
+            return self.note_paths
+        return tuple(sorted(self.thread_notes_path.glob("*.md")))
+
+    def artifact_ref(self, path: Path) -> str:
+        root = self.data_directory or self.context_path
+        prefix = "data:/" if self.data_directory else "project:/"
+        return prefix + path.relative_to(root).as_posix()
 
     @property
     def thread_notes_path(self) -> Path:
@@ -180,6 +195,7 @@ class Candidate:
     source_last_event_at: str
     source_capture_ref: str = ""
     source_capture_sha256: str = ""
+    artifact_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1215,7 +1231,7 @@ def render_note(
     started = source_timestamp(candidate.started_at)
     created = existing.get("date") or started.isoformat(timespec="seconds")
     thread_note_id = existing.get("threadNoteId") or started.strftime("%Y%m%dT%H%M%S%z")
-    note_id = existing.get("id") or str(uuid.uuid4())
+    note_id = existing.get("id") or candidate.artifact_id or str(uuid.uuid4())
     last_state = data["lastKnownState"]
     rendered_at = now_iso()
     fields: list[tuple[str, str | int | list[str]]] = [
