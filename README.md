@@ -390,6 +390,15 @@ This Markdown is not RDF/PROV-O serialization: future conversion should use stru
 source events and explicit IDs rather than infer roles from display text. The timeline
 JSON schema is unchanged.
 
+Chapter headings/order, optional-section conditions, and Last Known State field labels/order
+live in `src/tkn_codex_context/profiles/summary/default/template.md`.
+`{{?evidence}}` / `{{/evidence}}` and `{{?source_notes}}` / `{{/source_notes}}` include
+their heading and body only when the corresponding body has content. Conditional markers
+occupy their own lines and cannot nest; unclosed, unknown, or duplicate blocks fail validation.
+Python formats repeated body items and indentation, derives times/actors/references, and
+validates the data. Inserted prose containing syntax such as `{{evidence}}` stays literal.
+The output JSON and existing Markdown reader contracts remain unchanged; no dependency is added.
+
 Long conversations are processed in parts. **Partial timeline entries are concatenated
 without another model reduction**; only the overview and final state are synthesized.
 There is no six-development-per-task limit or 9,000-character whole-record limit.

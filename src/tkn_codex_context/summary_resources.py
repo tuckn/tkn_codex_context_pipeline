@@ -19,17 +19,54 @@ SUMMARY_PROFILES_ROOT = "profiles/summary"
 PROMPT_FILENAME = "prompt.md"
 SCHEMA_FILENAME = "output.schema.json"
 TEMPLATE_FILENAME = "template.md"
-REQUIRED_TEMPLATE_FIELDS = frozenset(
-    {
-        "frontmatter",
-        "summary",
-        "timeline",
-        "last_known_state",
-        "evidence_section",
-        "source_notes_section",
-    }
-)
+ALWAYS_TEMPLATE_FIELDS = frozenset({
+    "frontmatter", "summary", "timeline", "work_state", "state_detail",
+    "latest_user_direction", "unresolved", "unverified", "continuation_point", "state_sources",
+})
+OPTIONAL_TEMPLATE_FIELDS = frozenset({"evidence", "source_notes"})
+REQUIRED_TEMPLATE_FIELDS = ALWAYS_TEMPLATE_FIELDS | OPTIONAL_TEMPLATE_FIELDS
 _PLACEHOLDER = re.compile(r"\{\{([a-z][a-z0-9_]*)\}\}")
+_TEMPLATE_TOKEN = re.compile(
+    r"(?m)^\{\{(?P<operation>[?/])(?P<condition>[a-z][a-z0-9_]*)\}\}(?:\n|$)"
+    r"|\{\{(?P<field>[a-z][a-z0-9_]*)\}\}"
+)
+
+
+def _template_tokens(body: str) -> list[re.Match[str]]:
+    """Validate the small, non-nesting conditional language before inserting source data."""
+    tokens = list(_TEMPLATE_TOKEN.finditer(body))
+    residue = _TEMPLATE_TOKEN.sub("", body)
+    if "{{" in residue or "}}" in residue:
+        raise ValueError("summary template contains malformed syntax; conditional markers must be on their own lines")
+    placeholders = _PLACEHOLDER.findall(body)
+    if set(placeholders) != REQUIRED_TEMPLATE_FIELDS or any(
+        placeholders.count(field) != 1 for field in REQUIRED_TEMPLATE_FIELDS
+    ):
+        expected = ", ".join(sorted(REQUIRED_TEMPLATE_FIELDS))
+        raise ValueError(f"summary template must contain each required placeholder exactly once ({expected})")
+    active: str | None = None
+    seen: set[str] = set()
+    for token in tokens:
+        field, operation, condition = token.group("field", "operation", "condition")
+        if field:
+            if field in OPTIONAL_TEMPLATE_FIELDS and active != field:
+                raise ValueError(f"optional placeholder must be inside its matching block: {field}")
+            if active is not None and field != active:
+                raise ValueError(f"optional block {active} cannot hide placeholder {field}")
+        elif operation == "?":
+            if active is not None:
+                raise ValueError("summary template optional blocks cannot be nested")
+            if condition not in OPTIONAL_TEMPLATE_FIELDS or condition in seen:
+                raise ValueError(f"unknown or duplicate summary template optional block: {condition}")
+            active = condition
+            seen.add(condition)
+        else:
+            if active != condition:
+                raise ValueError(f"mismatched summary template optional block: {condition}")
+            active = None
+    if active is not None or seen != OPTIONAL_TEMPLATE_FIELDS:
+        raise ValueError("summary template must close each required optional block")
+    return tokens
 
 
 @dataclass(frozen=True)
@@ -145,15 +182,10 @@ def load_summary_template(
             f"summary template version must be a non-empty quoted string: {source}"
         )
     body = text[end + 5 :].strip()
-    placeholders = _PLACEHOLDER.findall(body)
-    if set(placeholders) != REQUIRED_TEMPLATE_FIELDS or any(
-        placeholders.count(field) != 1 for field in REQUIRED_TEMPLATE_FIELDS
-    ):
-        expected = ", ".join(sorted(REQUIRED_TEMPLATE_FIELDS))
-        raise RuntimeError(
-            f"summary template must contain each required placeholder exactly once "
-            f"({expected}): {source}"
-        )
+    try:
+        _template_tokens(body)
+    except ValueError as exc:
+        raise RuntimeError(f"invalid summary template {source}: {exc}") from exc
     return SummaryTemplate(
         template_id=template_id,
         version=version.strip(),
@@ -203,12 +235,26 @@ def render_summary_template(
         if extra:
             details.append("extra=" + ",".join(extra))
         raise ValueError("invalid summary template values: " + "; ".join(details))
-    rendered = template.body
-    for field in REQUIRED_TEMPLATE_FIELDS:
-        rendered = rendered.replace(f"{{{{{field}}}}}", values[field])
-    if _PLACEHOLDER.search(rendered):
-        raise ValueError("summary template contains unresolved placeholders")
-    return rendered.rstrip() + "\n"
+    parts: list[str] = []
+    cursor = 0
+    include = True
+    # A single pass over the template: inserted prose is never parsed as template syntax.
+    for token in _template_tokens(template.body):
+        if include:
+            parts.append(template.body[cursor:token.start()])
+        field, operation, condition = token.group("field", "operation", "condition")
+        if field:
+            if include:
+                parts.append(values[field])
+        elif operation == "?":
+            include = bool(values[condition].strip())
+        else:
+            include = True
+        cursor = token.end()
+    if include:
+        parts.append(template.body[cursor:])
+    return "".join(parts).rstrip() + "\n"
+
 
 
 def validate_summary_output_schema(

@@ -73,7 +73,7 @@ DEFAULT_RUNTIME_MINUTES = 230
 DEFAULT_MODEL_TIMEOUT_SECONDS = 1800
 DEFAULT_CHUNK_CHARACTERS = 120_000
 GENERATOR_PROMPT_VERSION = 6
-RENDERER_VERSION = 10
+RENDERER_VERSION = 11
 REBUILD_WORK_SCHEMA_VERSION = 1
 IN_FLIGHT_GRACE_MINUTES = 9
 AVOIDABLE_ENGLISH_PHRASES = {
@@ -1184,14 +1184,17 @@ def generation_fingerprint(config: PipelineConfig, candidate: Candidate) -> str:
     ).hexdigest()
 
 
-def _prose_field(name: str, value: str, *, indent: int = 0) -> list[str]:
-    """Keep multiline source prose below metadata fields; null means unrecorded text."""
+def _prose_value(value: str, *, indent: int = 0) -> str:
+    """Format unrecorded and multiline prose without supplying a field label."""
     lines = value.strip().splitlines()
-    prefix = " " * indent
     continuation = " " * max(4, indent + 2)
-    return [f"{prefix}- {name}: {lines[0] if lines else 'null'}", *(
+    return "\n".join([lines[0] if lines else "null", *(
         f"{continuation}{line}" if line else "" for line in lines[1:]
-    )]
+    )])
+
+
+def _prose_field(name: str, value: str, *, indent: int = 0) -> list[str]:
+    return (" " * indent + f"- {name}: " + _prose_value(value, indent=indent)).splitlines()
 
 
 def _source_record(item: dict[str, Any]) -> str:
@@ -1202,10 +1205,11 @@ def _source_record(item: dict[str, Any]) -> str:
     ])
 
 
-def _state_list(name: str, values: Sequence[str]) -> list[str]:
+def _state_list(values: Sequence[str]) -> str:
+    # Append an inline empty array or a nested list after the template-owned colon.
     if not values:
-        return [f"- {name}: []"]
-    return [f"- {name}:", *(line for value in values for line in _prose_field("Text", value, indent=2))]
+        return " []"
+    return "\n" + "\n".join(line for value in values for line in _prose_field("Text", value, indent=2))
 
 
 def file_slug_from_note_path(candidate: Candidate, note_path: Path) -> str:
@@ -1312,34 +1316,23 @@ def render_note(
         fields.append(("sourceProjectId", candidate.project.source_project_id))
     summary_lines = [_source_record(item) for item in data.get("summaryItems", [])]
     timeline_text = render_timeline(data["timeline"], candidate.events)
-    last_state_lines = [
-        f"- Work State: {last_state['workState']}",
-        *_prose_field("Detail", str(last_state["detail"])),
-        *_prose_field("Latest User Direction", str(last_state["latestUserDirection"])),
-        *_state_list("Unresolved", last_state.get("unresolved", [])),
-        *_state_list("Unverified", last_state.get("unverified", [])),
-        *_prose_field("Continuation Point", str(last_state.get("continuationPoint") or "")),
-        "- Sources: " + (", ".join(dict.fromkeys(last_state.get("eventIds", []))) or "[]"),
-    ]
     evidence = [item for item in data.get("evidence", []) if str(item.get("text") or "").strip()]
-    evidence_section = ""
-    if evidence:
-        evidence_section = "\n\n## Evidence\n\n" + "\n\n".join(_source_record(item) for item in evidence)
     limitations = [str(value).strip() for value in data.get("sourceLimitations", []) if str(value).strip()]
-    source_notes_section = ""
-    if limitations:
-        source_notes_section = "\n\n## Source Notes\n\n" + "\n\n".join(
-            "\n".join(_prose_field("Text", value)) for value in limitations
-        )
     return render_summary_template(
         template,
         {
             "frontmatter": frontmatter(fields),
             "summary": "\n\n".join(summary_lines),
             "timeline": timeline_text,
-            "last_known_state": "\n".join(last_state_lines),
-            "evidence_section": evidence_section,
-            "source_notes_section": source_notes_section,
+            "work_state": str(last_state["workState"]),
+            "state_detail": _prose_value(str(last_state["detail"])),
+            "latest_user_direction": _prose_value(str(last_state["latestUserDirection"])),
+            "unresolved": _state_list(last_state.get("unresolved", [])),
+            "unverified": _state_list(last_state.get("unverified", [])),
+            "continuation_point": _prose_value(str(last_state.get("continuationPoint") or "")),
+            "state_sources": ", ".join(dict.fromkeys(last_state.get("eventIds", []))) or "[]",
+            "evidence": "\n\n".join(_source_record(item) for item in evidence),
+            "source_notes": "\n\n".join("\n".join(_prose_field("Text", value)) for value in limitations),
         },
     )
 

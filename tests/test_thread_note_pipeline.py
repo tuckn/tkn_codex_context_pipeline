@@ -1207,9 +1207,9 @@ class ThreadNotePipelineTests(unittest.TestCase):
         from tkn_codex_context.summary_resources import load_summary_schema
         self.assertIn(f'outputSchemaSha256: "{load_summary_schema().sha256}"', note)
         self.assertIn('templateId: "4d19c51c-0d02-43a5-b6ad-6d67f9739b75"', note)
-        self.assertIn('templateVersion: "3.2"', note)
+        self.assertIn('templateVersion: "4.0"', note)
         self.assertIn("generatorPromptVersion: 6", note)
-        self.assertIn("rendererVersion: 10", note)
+        self.assertIn("rendererVersion: 11", note)
         self.assertIn("generatedAt:", note)
         self.assertIn('fileSlug: "automated-thread-note"', note)
         self.assertIn('automatedValidation: "passed"', note)

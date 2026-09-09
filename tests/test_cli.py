@@ -243,7 +243,7 @@ def test_config_show_reports_application_owned_summary_profile(
     assert profile["prompt"]["source"].endswith("profiles/summary/default/prompt.md")
     assert profile["schema"]["source"].endswith("profiles/summary/default/output.schema.json")
     assert len(profile["schema"]["sha256"]) == 64
-    assert profile["template"]["version"] == "3.2"
+    assert profile["template"]["version"] == "4.0"
     assert profile["template"]["source"].endswith("profiles/summary/default/template.md")
     decision_profile = output["decisionProfile"]
     assert decision_profile["name"] == "default"
