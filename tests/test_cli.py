@@ -239,11 +239,11 @@ def test_config_show_reports_application_owned_summary_profile(
     assert profile["name"] == "default"
     assert profile["source"].endswith("profiles/summary/default")
     assert len(profile["sha256"]) == 64
-    assert profile["prompt"]["version"] == "2.0"
+    assert profile["prompt"]["version"] == "3.3"
     assert profile["prompt"]["source"].endswith("profiles/summary/default/prompt.md")
     assert profile["schema"]["source"].endswith("profiles/summary/default/output.schema.json")
     assert len(profile["schema"]["sha256"]) == 64
-    assert profile["template"]["version"] == "2.0"
+    assert profile["template"]["version"] == "3.2"
     assert profile["template"]["source"].endswith("profiles/summary/default/template.md")
     decision_profile = output["decisionProfile"]
     assert decision_profile["name"] == "default"

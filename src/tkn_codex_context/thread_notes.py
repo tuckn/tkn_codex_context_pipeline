@@ -57,11 +57,12 @@ from .summary_resources import (
     render_summary_template,
     validate_summary_output_schema,
 )
+from .thread_timeline import TIMELINE_TIMEZONE, event_time, ordered_timeline, render_timeline, validate_timeline
 
 CONFIG_SCHEMA_VERSION = 1
 STATE_SCHEMA_VERSION = 2
 LEGACY_STATE_SCHEMA_VERSION = 1
-THREAD_NOTE_SCHEMA_VERSION = 4
+THREAD_NOTE_SCHEMA_VERSION = 5
 CONFIG_FILENAME = "thread-note-pipeline.json"
 STATE_FILENAME = "chat-refresh-state.json"
 DEFAULT_SOURCE_ID = "windows" if os.name == "nt" else "local"
@@ -71,12 +72,10 @@ DEFAULT_IDLE_MINUTES = 30
 DEFAULT_RUNTIME_MINUTES = 230
 DEFAULT_MODEL_TIMEOUT_SECONDS = 1800
 DEFAULT_CHUNK_CHARACTERS = 120_000
-MAX_EVENT_TEXT_CHARACTERS = 8_000
-GENERATOR_PROMPT_VERSION = 4
-RENDERER_VERSION = 7
+GENERATOR_PROMPT_VERSION = 6
+RENDERER_VERSION = 10
 REBUILD_WORK_SCHEMA_VERSION = 1
 IN_FLIGHT_GRACE_MINUTES = 9
-MAX_NOTE_NARRATIVE_CHARACTERS = 9_000
 AVOIDABLE_ENGLISH_PHRASES = {
     "actual execution",
     "supplied events",
@@ -86,36 +85,11 @@ SUMMARY_PROMPT_RESOURCE = SUMMARY_PROFILE.prompt
 SUMMARY_SCHEMA_RESOURCE = SUMMARY_PROFILE.schema
 SUMMARY_TEMPLATE_RESOURCE = SUMMARY_PROFILE.template
 NOTE_SCHEMA = SUMMARY_SCHEMA_RESOURCE.value
-MAX_SUMMARY_ITEMS = int(NOTE_SCHEMA["properties"]["summaryItems"]["maxItems"])
-MAX_WORK_ITEMS = int(NOTE_SCHEMA["properties"]["workItems"]["maxItems"])
-MAX_DEVELOPMENTS_PER_WORK_ITEM = int(
-    NOTE_SCHEMA["properties"]["workItems"]["items"]["properties"]["developments"][
-        "maxItems"
-    ]
-)
-MAX_EVIDENCE_ITEMS = int(NOTE_SCHEMA["properties"]["evidence"]["maxItems"])
-MAX_SOURCE_LIMITATIONS = int(
-    NOTE_SCHEMA["properties"]["sourceLimitations"]["maxItems"]
-)
-MAX_SUMMARY_TEXT_CHARACTERS = int(
-    NOTE_SCHEMA["properties"]["summaryItems"]["items"]["properties"]["text"]["maxLength"]
-)
-MAX_DEVELOPMENT_TEXT_CHARACTERS = int(
-    NOTE_SCHEMA["properties"]["workItems"]["items"]["properties"]["developments"][
-        "items"
-    ]["properties"]["text"]["maxLength"]
-)
-MAX_EVIDENCE_TEXT_CHARACTERS = int(
-    NOTE_SCHEMA["properties"]["evidence"]["items"]["properties"]["text"]["maxLength"]
-)
-ALLOWED_STATUS = set(
-    NOTE_SCHEMA["properties"]["lastKnownState"]["properties"]["workState"]["enum"]
-)
-ALLOWED_LABELS = set(
-    NOTE_SCHEMA["properties"]["workItems"]["items"]["properties"]["developments"][
-        "items"
-    ]["properties"]["label"]["enum"]
-)
+OVERVIEW_SCHEMA = deepcopy(NOTE_SCHEMA)
+OVERVIEW_SCHEMA["properties"].pop("timeline")
+OVERVIEW_SCHEMA["required"].remove("timeline")
+ALLOWED_STATUS = set(NOTE_SCHEMA["properties"]["lastKnownState"]["properties"]["workState"]["enum"])
+ALLOWED_LABELS = set(NOTE_SCHEMA["properties"]["timeline"]["items"]["properties"]["label"]["enum"])
 
 
 class PipelineError(RuntimeError):
@@ -208,8 +182,14 @@ class PreparedEvent:
     timestamp: str
     turn_id: str
 
-    def as_dict(self) -> dict[str, str]:
-        return {
+    text_part: int = 1
+    text_part_count: int = 1
+    text_start: int = 0
+    text_end: int = 0
+    full_text_characters: int = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        value: dict[str, Any] = {
             "id": self.id,
             "kind": self.kind,
             "actor": self.actor,
@@ -218,6 +198,13 @@ class PreparedEvent:
             "timestamp": self.timestamp,
             "turnId": self.turn_id,
         }
+        if self.text_part_count > 1:
+            value["textPart"] = {
+                "index": self.text_part, "count": self.text_part_count,
+                "start": self.text_start, "end": self.text_end,
+                "fullTextCharacters": self.full_text_characters,
+            }
+        return value
 
 
 class Summarizer(Protocol):
@@ -868,16 +855,6 @@ def scan_candidates(
     return round_robin(groups), counts, excluded
 
 
-def truncate_text(text: str, limit: int = MAX_EVENT_TEXT_CHARACTERS) -> str:
-    if len(text) <= limit:
-        return text
-    marker = f"\n[TRUNCATED {len(text) - limit} CHARACTERS]\n"
-    remaining = limit - len(marker)
-    head = remaining // 2
-    tail = remaining - head
-    return text[:head] + marker + text[-tail:]
-
-
 def prepare_events(events: Sequence[ChatEvent]) -> list[PreparedEvent]:
     return [
         PreparedEvent(
@@ -885,7 +862,7 @@ def prepare_events(events: Sequence[ChatEvent]) -> list[PreparedEvent]:
             kind=event.kind,
             actor=event.actor,
             name=event.name,
-            text=truncate_text(redact_secret_like_content(event.text)),
+            text=redact_secret_like_content(event.text),
             timestamp=event.timestamp,
             turn_id=event.turn_id,
         )
@@ -893,107 +870,111 @@ def prepare_events(events: Sequence[ChatEvent]) -> list[PreparedEvent]:
     ]
 
 
+def _event_input_size(event: PreparedEvent) -> int:
+    return len(json.dumps(event.as_dict(), ensure_ascii=False))
+
+
+def _split_event(event: PreparedEvent, target_characters: int) -> list[PreparedEvent]:
+    """Partition redacted text without gaps or overlaps, including JSON escaping overhead."""
+    length = len(event.text)
+    # Reserve the maximum possible digit widths before the final part count is known.
+    envelope = replace(event, text="", text_part=length, text_part_count=max(2, length),
+                       text_start=length, text_end=length, full_text_characters=length)
+    budget = target_characters - 2 - _event_input_size(envelope)
+    if budget < 6 or not length:
+        raise PipelineError("event input budget is too small for event metadata and text")
+    parts: list[PreparedEvent] = []
+    start = 0
+    while start < length:
+        low, high = 1, min(length - start, budget)
+        while low < high:
+            middle = (low + high + 1) // 2
+            # JSON string quotes belong to the envelope; only measure the encoded body.
+            size = len(json.dumps(event.text[start:start + middle], ensure_ascii=False)) - 2
+            if size <= budget:
+                low = middle
+            else:
+                high = middle - 1
+        end = start + low
+        if end < length:
+            # Prefer a nearby line/sentence boundary without discarding its delimiter.
+            boundaries = list(re.finditer(r"\n|[。！？]\s*|\s+", event.text[start + low // 2:end]))
+            if boundaries:
+                end = start + low // 2 + boundaries[-1].end()
+        parts.append(replace(event, text=event.text[start:end], text_part=len(parts) + 1,
+                             text_start=start, text_end=end, full_text_characters=length))
+        start = end
+    return [replace(part, text_part_count=len(parts)) for part in parts]
+
+
 def chunk_events(
     events: Sequence[PreparedEvent],
     target_characters: int = DEFAULT_CHUNK_CHARACTERS,
 ) -> list[list[PreparedEvent]]:
+    """Bound the serialized event array; prompt/schema/repair text is additional overhead.
+
+    Keep normal events whole. Oversized events use isolated, ordered text parts with
+    the same source ID and timestamp; splitting never creates a new historical act.
+    """
+    if target_characters < 1:
+        raise PipelineError("event input budget must be positive")
     chunks: list[list[PreparedEvent]] = []
     current: list[PreparedEvent] = []
-    current_size = 0
+    current_size = 2  # JSON array brackets.
     for event in events:
-        rendered_size = len(json.dumps(event.as_dict(), ensure_ascii=False)) + 1
-        if current and current_size + rendered_size > target_characters:
+        rendered_size = _event_input_size(event)
+        if rendered_size + 2 > target_characters:
+            if current:
+                chunks.append(current)
+                current, current_size = [], 2
+            chunks.extend([part] for part in _split_event(event, target_characters))
+            continue
+        separator = 2 if current else 0
+        if current and current_size + separator + rendered_size > target_characters:
             chunks.append(current)
-            current = []
-            current_size = 0
+            current, current_size, separator = [], 2, 0
         current.append(event)
-        current_size += rendered_size
+        current_size += separator + rendered_size
     if current:
         chunks.append(current)
     return chunks
 
 
-def validate_note_data(value: Any, allowed_event_ids: set[str]) -> dict[str, Any]:
+def validate_note_data(
+    value: Any, allowed_event_ids: set[str], *, overview_only: bool = False,
+) -> dict[str, Any]:
+    schema = OVERVIEW_SCHEMA if overview_only else NOTE_SCHEMA
     try:
-        validate_summary_output_schema(value, NOTE_SCHEMA)
+        validate_summary_output_schema(value, schema)
     except ValueError as exc:
-        raise PipelineError(f"Inference output does not match the summary schema: {exc}") from exc
+        raise PipelineError(f"Inference output does not match the Thread Note schema: {exc}") from exc
     if not isinstance(value, dict):
         raise PipelineError("Inference output must be a JSON object")
-    required = set(NOTE_SCHEMA["required"])
-    if not required.issubset(value):
-        raise PipelineError(f"Inference output is missing fields: {', '.join(sorted(required - set(value)))}")
-    if not all(isinstance(value.get(key), str) for key in ("title", "fileSlug", "description")):
-        raise PipelineError("Inference output title, fileSlug, and description must be strings")
-    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", value["fileSlug"]):
-        raise PipelineError("Inference output has invalid fileSlug")
-    summary_items = value.get("summaryItems")
-    work_items = value.get("workItems")
-    last_state = value.get("lastKnownState")
-    if (
-        not isinstance(summary_items, list)
-        or not 1 <= len(summary_items) <= MAX_SUMMARY_ITEMS
-        or not isinstance(work_items, list)
-        or not isinstance(last_state, dict)
-    ):
-        raise PipelineError("Inference output has invalid summaryItems, workItems, or lastKnownState")
-    if len(work_items) > MAX_WORK_ITEMS:
-        raise PipelineError("Inference output has too many work items")
-    if last_state.get("workState") not in ALLOWED_STATUS:
-        raise PipelineError("Inference output has invalid workState")
-    if not isinstance(last_state.get("unresolved"), list) or not isinstance(last_state.get("unverified"), list):
-        raise PipelineError("Inference output has invalid unresolved or unverified items")
-    if last_state["workState"] == "done" and (
-        last_state["unresolved"] or str(last_state.get("continuationPoint") or "").strip()
-    ):
-        raise PipelineError(
-            "done work cannot contain unresolved items or a continuation point; "
-            "use unverified for checks outside the completed request"
-        )
-    cited: list[str] = list(last_state.get("eventIds") or [])
-    for item in summary_items:
-        if not isinstance(item, dict) or not str(item.get("text") or "").strip():
-            raise PipelineError("Inference output has an invalid summary item")
-        if len(str(item["text"])) > MAX_SUMMARY_TEXT_CHARACTERS:
-            raise PipelineError("Inference output summary item is too long")
-        cited.extend(item.get("eventIds") or [])
-    for work_item in work_items:
-        if not isinstance(work_item, dict) or not isinstance(work_item.get("developments"), list):
-            raise PipelineError("Inference output has an invalid work item")
-        if len(work_item["developments"]) > MAX_DEVELOPMENTS_PER_WORK_ITEM:
-            raise PipelineError("Inference output has too many developments in a work item")
-        for item in work_item["developments"]:
-            if not isinstance(item, dict) or item.get("label") not in ALLOWED_LABELS:
-                raise PipelineError("Inference output has an invalid key development")
-            if (
-                not str(item.get("text") or "").strip()
-                or len(str(item["text"])) > MAX_DEVELOPMENT_TEXT_CHARACTERS
-            ):
-                raise PipelineError("Inference output has an empty or overly long development")
-            cited.extend(item.get("eventIds") or [])
-    evidence = value.get("evidence")
-    if not isinstance(evidence, list):
-        raise PipelineError("Inference output has invalid evidence")
-    for item in evidence:
-        if not isinstance(item, dict):
-            raise PipelineError("Inference output has invalid evidence")
-        if (
-            not str(item.get("text") or "").strip()
-            or len(str(item["text"])) > MAX_EVIDENCE_TEXT_CHARACTERS
+    last_state = value["lastKnownState"]
+    if last_state["workState"] == "done" and (last_state["unresolved"] or last_state["continuationPoint"].strip()):
+        raise PipelineError("done work cannot contain unresolved items or a continuation point")
+    if not last_state["eventIds"]:
+        raise PipelineError("lastKnownState requires source eventIds")
+    cited = list(last_state["eventIds"])
+    for item in value["summaryItems"] + value.get("timeline", []) + value["evidence"]:
+        if not item["text"].strip() or not item["eventIds"]:
+            raise PipelineError("source-backed items require non-empty text and eventIds")
+        if item.get("label") == "Explicit Decision" and any(
+            phrase in item["text"] for phrase in ("方向を示した", "イメージを示した", "気がしている")
         ):
-            raise PipelineError("Inference output has an empty or overly long evidence item")
-        cited.extend(item.get("eventIds") or [])
-    if len(evidence) > MAX_EVIDENCE_ITEMS:
-        raise PipelineError("Inference output has too many evidence items")
-    source_limitations = value.get("sourceLimitations")
-    if not isinstance(source_limitations, list) or len(source_limitations) > MAX_SOURCE_LIMITATIONS:
-        raise PipelineError("Inference output has invalid sourceLimitations")
-    invalid = {str(item) for item in cited if str(item) not in allowed_event_ids}
+            raise PipelineError(
+                "Explicit Decision contains a tentative choice; split firm decisions from Proposal entries. "
+                "Preserve uncertainty and do not strengthen the source wording."
+            )
+        cited.extend(item["eventIds"])
+        if "startEventId" in item:
+            for endpoint in (item["startEventId"], item["endEventId"]):
+                if endpoint not in item["eventIds"]:
+                    raise PipelineError("timeline endpoints must be included in eventIds")
+    invalid = set(cited) - allowed_event_ids
     if invalid:
         raise PipelineError(f"Inference output cited unknown event ids: {', '.join(sorted(invalid))}")
     narrative = json.dumps(value, ensure_ascii=False)
-    if len(narrative) > MAX_NOTE_NARRATIVE_CHARACTERS:
-        raise PipelineError("Inference output exceeds the thread-note narrative size limit")
     avoidable = sorted(phrase for phrase in AVOIDABLE_ENGLISH_PHRASES if phrase in narrative.casefold())
     if avoidable:
         raise PipelineError("Inference output contains avoidable English prose: " + ", ".join(avoidable))
@@ -1024,7 +1005,7 @@ class ProviderSummarizer:
         if self.observer:
             self.observer(event)
 
-    def _invoke(self, prompt: str) -> dict[str, Any]:
+    def _invoke(self, prompt: str, *, overview_only: bool = False) -> dict[str, Any]:
         with tempfile.TemporaryDirectory(prefix="tkn-thread-note-") as directory:
             temp = Path(directory)
             last_error = ""
@@ -1049,7 +1030,7 @@ class ProviderSummarizer:
                     return invoke_structured(
                         self.config,
                         prompt,
-                        NOTE_SCHEMA,
+                        OVERVIEW_SCHEMA if overview_only else NOTE_SCHEMA,
                         cwd=temp,
                         timeout=timeout,
                     )
@@ -1064,21 +1045,42 @@ class ProviderSummarizer:
         prompt: str,
         allowed_event_ids: set[str],
         thread_id: str,
+        *,
+        events: Sequence[ChatEvent] = (),
+        overview_only: bool = False,
+        input_events: Sequence[PreparedEvent] | None = None,
     ) -> dict[str, Any]:
         current_prompt = prompt
-        for semantic_attempt in range(2):
-            value = self._invoke(current_prompt)
+        for semantic_attempt in range(3):
+            value = self._invoke(current_prompt, overview_only=overview_only)
             try:
-                return validate_note_data(value, allowed_event_ids)
-            except PipelineError as exc:
-                if semantic_attempt:
+                # Check shape first so independent semantic checks can all run safely.
+                validate_summary_output_schema(value, OVERVIEW_SCHEMA if overview_only else NOTE_SCHEMA)
+                errors: list[str] = []
+                try:
+                    validate_note_data(value, allowed_event_ids, overview_only=overview_only)
+                except PipelineError as error:
+                    errors.append(str(error))
+                if events and not overview_only:
+                    try:
+                        validate_timeline(value["timeline"], events)
+                    except ValueError as error:
+                        errors.append(str(error))
+                if errors:
+                    raise PipelineError("; ".join(errors))
+                return value
+            except (PipelineError, ValueError) as exc:
+                if semantic_attempt == 2:
                     raise
+                self._emit({"type": "validation-repair", "reason": str(exc)})
                 self.last_metrics["semanticRetries"] = self.last_metrics.get("semanticRetries", 0) + 1
                 current_prompt = render_repair_prompt(
                     self.prompt,
                     thread_id=thread_id,
                     validation_error=str(exc),
                     draft=value,
+                    events=[event.as_dict() for event in input_events] if input_events is not None else
+                    ([event.as_dict() for event in prepare_events(events)] if events else None),
                 )
         raise PipelineError("Inference semantic validation did not produce a valid note")
 
@@ -1093,8 +1095,14 @@ class ProviderSummarizer:
         allowed_ids = {event.id for event in prepared}
         chunks = chunk_events(prepared, self.chunk_characters)
         self.last_metrics["chunkCount"] = len(chunks)
+        self.last_metrics["splitEventCount"] = len({e.id for c in chunks for e in c if e.text_part_count > 1})
+        self.last_metrics["inputPartCount"] = sum(len(chunk) for chunk in chunks)
+        self.last_metrics["preparedTextCharacters"] = sum(len(e.text) for e in prepared)
+        self.last_metrics["submittedTextCharacters"] = sum(len(e.text) for c in chunks for e in c)
+        source_by_id = {event.id: event for event in candidate.events}
         partials: list[dict[str, Any]] = []
         for index, chunk in enumerate(chunks, 1):
+            chunk_ids = {event.id for event in chunk}
             self._emit(
                 {
                     "type": "chunk-start",
@@ -1111,20 +1119,29 @@ class ProviderSummarizer:
                 events=[event.as_dict() for event in chunk],
             )
             partials.append(
-                self._validated_invoke(prompt, allowed_ids, candidate.thread_id)
+                self._validated_invoke(
+                    prompt, chunk_ids, candidate.thread_id,
+                    events=tuple(replace(source_by_id[event.id], text=event.text) for event in chunk),
+                    input_events=chunk,
+                )
             )
         if len(partials) == 1:
-            return partials[0]
-        reduction_prompt = render_reduction_prompt(
-            self.prompt,
-            thread_id=candidate.thread_id,
-            partials=partials,
-        )
-        return self._validated_invoke(
-            reduction_prompt,
-            allowed_ids,
-            candidate.thread_id,
-        )
+            result = partials[0]
+        else:
+            reduction_prompt = render_reduction_prompt(self.prompt, thread_id=candidate.thread_id, partials=partials)
+            result = self._validated_invoke(
+                reduction_prompt, allowed_ids, candidate.thread_id, overview_only=True,
+            )
+            # Timeline entries never pass through lossy model reduction a second time.
+            result["timeline"] = [item for partial in partials for item in partial["timeline"]]
+        limitations = list(result["sourceLimitations"])
+        unknown_times = [event.id for event in candidate.events if event_time(event.timestamp) is None]
+        if unknown_times:
+            limitations.append("日時またはタイムゾーンが確認できないイベント：" + ", ".join(unknown_times))
+        result["sourceLimitations"] = list(dict.fromkeys(limitations))
+        result["timeline"] = ordered_timeline(result["timeline"], candidate.events)
+        validate_timeline(result["timeline"], candidate.events)
+        return validate_note_data(result, allowed_ids)
 
 
 # Backward-compatible import for callers that used the original provider-specific name.
@@ -1167,9 +1184,28 @@ def generation_fingerprint(config: PipelineConfig, candidate: Candidate) -> str:
     ).hexdigest()
 
 
-def event_citation(event_ids: Sequence[str]) -> str:
-    values = [str(value) for value in event_ids if str(value)]
-    return f" 〔{', '.join(values)}〕" if values else ""
+def _prose_field(name: str, value: str, *, indent: int = 0) -> list[str]:
+    """Keep multiline source prose below metadata fields; null means unrecorded text."""
+    lines = value.strip().splitlines()
+    prefix = " " * indent
+    continuation = " " * max(4, indent + 2)
+    return [f"{prefix}- {name}: {lines[0] if lines else 'null'}", *(
+        f"{continuation}{line}" if line else "" for line in lines[1:]
+    )]
+
+
+def _source_record(item: dict[str, Any]) -> str:
+    sources = ", ".join(dict.fromkeys(str(value) for value in item.get("eventIds", [])))
+    return "\n".join([
+        *_prose_field("Text", str(item["text"])),
+        f"  - Sources: {sources or '[]'}",
+    ])
+
+
+def _state_list(name: str, values: Sequence[str]) -> list[str]:
+    if not values:
+        return [f"- {name}: []"]
+    return [f"- {name}:", *(line for value in values for line in _prose_field("Text", value, indent=2))]
 
 
 def file_slug_from_note_path(candidate: Candidate, note_path: Path) -> str:
@@ -1254,6 +1290,7 @@ def render_note(
         ("templateVersion", template.version),
         ("generatorPromptVersion", GENERATOR_PROMPT_VERSION),
         ("rendererVersion", RENDERER_VERSION),
+        ("timelineTimezone", TIMELINE_TIMEZONE),
         ("generatedAt", rendered_at),
         ("fileSlug", str(data["fileSlug"])),
         ("status", str(last_state["workState"])),
@@ -1273,67 +1310,33 @@ def render_note(
         fields.append(("sourceCaptureSha256", candidate.source_capture_sha256))
     if candidate.project.source_project_id:
         fields.append(("sourceProjectId", candidate.project.source_project_id))
-    summary_lines = [
-        f"- {str(item['text']).strip()}{event_citation(item.get('eventIds', []))}"
-        for item in data.get("summaryItems", [])
-    ]
-    development_lines: list[str] = []
-    work_items = [item for item in data.get("workItems", []) if item.get("developments")]
-    if not work_items:
-        development_lines.append("- 確認できる記録なし。")
-    for work_index, work_item in enumerate(work_items, 1):
-        multiple = len(work_items) > 1
-        if multiple:
-            title = str(work_item.get("title") or f"Work item {work_index}").strip()
-            development_lines.extend([f"### WI-{work_index:02d}: {title}", ""])
-        grouped: dict[str, list[dict[str, Any]]] = {}
-        for development in work_item["developments"]:
-            grouped.setdefault(str(development["label"]), []).append(development)
-        for label, developments in grouped.items():
-            heading = "####" if multiple else "###"
-            development_lines.extend([f"{heading} {label}", ""])
-            for item in developments:
-                development_lines.append(
-                    f"- {str(item['text']).strip()}"
-                    f"{event_citation(item.get('eventIds', []))}"
-                )
-            development_lines.append("")
-        while development_lines and not development_lines[-1]:
-            development_lines.pop()
+    summary_lines = [_source_record(item) for item in data.get("summaryItems", [])]
+    timeline_text = render_timeline(data["timeline"], candidate.events)
     last_state_lines = [
-        f"- Work State: {last_state['workState']} — "
-        f"{str(last_state['detail']).strip()}"
-        f"{event_citation(last_state.get('eventIds', []))}",
-        "- Latest User Direction: "
-        + (str(last_state["latestUserDirection"]).strip() or "追加指示なし。"),
+        f"- Work State: {last_state['workState']}",
+        *_prose_field("Detail", str(last_state["detail"])),
+        *_prose_field("Latest User Direction", str(last_state["latestUserDirection"])),
+        *_state_list("Unresolved", last_state.get("unresolved", [])),
+        *_state_list("Unverified", last_state.get("unverified", [])),
+        *_prose_field("Continuation Point", str(last_state.get("continuationPoint") or "")),
+        "- Sources: " + (", ".join(dict.fromkeys(last_state.get("eventIds", []))) or "[]"),
     ]
-    for unresolved in last_state.get("unresolved", []):
-        last_state_lines.append(f"- Unresolved: {str(unresolved).strip()}")
-    for unverified in last_state.get("unverified", []):
-        last_state_lines.append(f"- Unverified: {str(unverified).strip()}")
-    continuation = str(last_state.get("continuationPoint") or "").strip()
-    if continuation:
-        last_state_lines.append(f"- Continuation Point: {continuation}")
     evidence = [item for item in data.get("evidence", []) if str(item.get("text") or "").strip()]
     evidence_section = ""
     if evidence:
-        evidence_lines = [
-            f"- {str(item['text']).strip()}{event_citation(item.get('eventIds', []))}"
-            for item in evidence
-        ]
-        evidence_section = "\n\n## Evidence\n\n" + "\n".join(evidence_lines)
+        evidence_section = "\n\n## Evidence\n\n" + "\n\n".join(_source_record(item) for item in evidence)
     limitations = [str(value).strip() for value in data.get("sourceLimitations", []) if str(value).strip()]
     source_notes_section = ""
     if limitations:
-        source_notes_section = "\n\n## Source Notes\n\n" + "\n".join(
-            f"- {value}" for value in limitations
+        source_notes_section = "\n\n## Source Notes\n\n" + "\n\n".join(
+            "\n".join(_prose_field("Text", value)) for value in limitations
         )
     return render_summary_template(
         template,
         {
             "frontmatter": frontmatter(fields),
-            "summary": "\n".join(summary_lines),
-            "key_developments": "\n".join(development_lines),
+            "summary": "\n\n".join(summary_lines),
+            "timeline": timeline_text,
             "last_known_state": "\n".join(last_state_lines),
             "evidence_section": evidence_section,
             "source_notes_section": source_notes_section,
@@ -1743,7 +1746,7 @@ def validate_staged_thread_notes(
         for heading in (
             "# Thread Note",
             "## Summary",
-            "## Key Developments",
+            "## Timeline",
             "## Last Known State",
         ):
             if heading not in body:
@@ -1811,7 +1814,7 @@ def validate_thread_note(path: Path) -> dict[str, Any]:
         raise PipelineError(f"thread note not found: {path}")
     metadata, thread_ids, source_refs, version = thread_note_metadata(path)
     parsed_version = parse_thread_note_schema_version(version, path)
-    if parsed_version not in {3, THREAD_NOTE_SCHEMA_VERSION}:
+    if parsed_version not in {3, 4, THREAD_NOTE_SCHEMA_VERSION}:
         raise PipelineError(f"unsupported Thread Note schemaVersion {version}: {path}")
     required = {
         "type": "threadNote",
@@ -1822,7 +1825,7 @@ def validate_thread_note(path: Path) -> dict[str, Any]:
     for key, expected in required.items():
         if metadata.get(key) != expected:
             raise PipelineError(f"thread note has invalid {key}: {path}")
-    if parsed_version == THREAD_NOTE_SCHEMA_VERSION:
+    if parsed_version >= 4:
         try:
             canonical_uuid4(metadata.get("id") or "")
         except ValueError as exc:
@@ -1857,7 +1860,7 @@ def validate_thread_note(path: Path) -> dict[str, Any]:
     for heading in (
         "# Thread Note",
         "## Summary",
-        "## Key Developments",
+        "## Timeline" if parsed_version >= 5 else "## Key Developments",
         "## Last Known State",
     ):
         if heading not in body:

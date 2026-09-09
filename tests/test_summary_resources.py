@@ -20,9 +20,7 @@ def test_packaged_schema_is_strict_and_versioned_by_hash() -> None:
     assert len(resource.sha256) == 64
     assert schema["additionalProperties"] is False
     assert set(schema["required"]) == set(schema["properties"])
-    labels = schema["properties"]["workItems"]["items"]["properties"][
-        "developments"
-    ]["items"]["properties"]["label"]["enum"]
+    labels = schema["properties"]["timeline"]["items"]["properties"]["label"]["enum"]
     assert "Explicit Decision" in labels
 
 
@@ -48,7 +46,7 @@ def test_external_schema_validator_rejects_missing_and_extra_fields() -> None:
         "fileSlug": "valid-slug",
         "description": "Description",
         "summaryItems": [{"text": "Summary", "eventIds": ["L000001"]}],
-        "workItems": [],
+        "timeline": [],
         "evidence": [],
         "lastKnownState": {
             "workState": "done",
@@ -73,7 +71,7 @@ def test_packaged_markdown_template_controls_heading_order() -> None:
         field: {
             "frontmatter": "---\ntype: threadNote\n---",
             "summary": "- Summary",
-            "key_developments": "- Development",
+            "timeline": "- Development",
             "last_known_state": "- Work State: done",
             "evidence_section": "\n\n## Evidence\n\n- Evidence",
             "source_notes_section": "",
@@ -83,10 +81,10 @@ def test_packaged_markdown_template_controls_heading_order() -> None:
 
     rendered = render_summary_template(template, values)
 
-    assert template.version == "2.0"
+    assert template.version == "3.2"
     assert rendered.index("# Thread Note") < rendered.index("## Summary")
-    assert rendered.index("## Summary") < rendered.index("## Key Developments")
-    assert rendered.index("## Key Developments") < rendered.index(
+    assert rendered.index("## Summary") < rendered.index("## Timeline")
+    assert rendered.index("## Timeline") < rendered.index(
         "## Last Known State"
     )
     assert rendered.index("## Last Known State") < rendered.index("## Evidence")

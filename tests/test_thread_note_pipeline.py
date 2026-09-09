@@ -121,18 +121,11 @@ def note_data(candidate: Candidate, *, title: str = "Automated Thread Note") -> 
                 "eventIds": ids[:1],
             }
         ],
-        "workItems": [
-            {
-                "title": "Requested work",
-                "developments": [
-                    {"label": "Request", "text": "The user requested work.", "eventIds": ids[:1]},
-                    {
-                        "label": "Reported Result",
-                        "text": "The work completed.",
-                        "eventIds": ids[-1:],
-                    },
-                ],
-            }
+        "timeline": [
+            {"label": "Request", "text": "The user requested work.", "eventIds": ids[:1],
+             "startEventId": ids[0], "endEventId": ids[0]},
+            {"label": "Reported Result", "text": "The work completed.", "eventIds": ids[-1:],
+             "startEventId": ids[-1], "endEventId": ids[-1]},
         ],
         "evidence": [],
         "lastKnownState": {
@@ -257,7 +250,8 @@ class ThreadNotePipelineTests(unittest.TestCase):
         path = self.sessions / "chat.jsonl"
         write_chat(path, thread_id="thread-1", cwd=self.repo)
         prepared = prepare_events(read_thread_events(path))
-        chunks = chunk_events(prepared, target_characters=150)
+        budget = max(len(json.dumps(item.as_dict(), ensure_ascii=False)) + 2 for item in prepared)
+        chunks = chunk_events(prepared, target_characters=budget)
 
         self.assertGreater(len(chunks), 1)
         self.assertEqual([item.id for item in prepared], [item.id for chunk in chunks for item in chunk])
@@ -536,8 +530,8 @@ class ThreadNotePipelineTests(unittest.TestCase):
         self.assertIn('reviewStatus: "unreviewed"', text)
         self.assertIn('sourceThreadIds:\n  - "thread-1"', text)
         self.assertIn("# Thread Note", text)
-        self.assertIn("### Request", text)
-        self.assertIn("### Reported Result", text)
+        self.assertIn("  - Actor: User\n  - Type: Request", text)
+        self.assertIn("  - Actor: AI\n  - Type: Reported Result", text)
         state = json.loads(self.project.state_path.read_text(encoding="utf-8"))
         thread_state = state["sources"]["windows"]["threads"]["thread-1"]
         self.assertEqual("2026-07-01T00:00:05Z", thread_state["sourceLastEventAt"])
@@ -613,7 +607,7 @@ class ThreadNotePipelineTests(unittest.TestCase):
         )
         note = next(self.project.thread_notes_path.glob("*.md"))
         note.write_text(
-            note.read_text(encoding="utf-8").replace("schemaVersion: 4", "schemaVersion: 3"),
+            note.read_text(encoding="utf-8").replace("schemaVersion: 5", "schemaVersion: 3"),
             encoding="utf-8",
         )
 
@@ -844,7 +838,7 @@ class ThreadNotePipelineTests(unittest.TestCase):
         self.assertEqual(["legacy.md"], [item["file"] for item in report["deletedLegacy"]])
         notes = sorted(self.project.thread_notes_path.glob("*.md"))
         self.assertEqual(2, len(notes))
-        self.assertTrue(all("schemaVersion: 4" in path.read_text(encoding="utf-8") for path in notes))
+        self.assertTrue(all("schemaVersion: 5" in path.read_text(encoding="utf-8") for path in notes))
         completed = [event for event in progress_events if event["type"] == "thread-complete"]
         self.assertEqual(
             [str(path.absolute()) for path in notes],
@@ -961,7 +955,7 @@ class ThreadNotePipelineTests(unittest.TestCase):
         )
         note = next(self.project.thread_notes_path.glob("*.md"))
 
-        with patch("tkn_codex_context.thread_notes.THREAD_NOTE_SCHEMA_VERSION", 5):
+        with patch("tkn_codex_context.thread_notes.THREAD_NOTE_SCHEMA_VERSION", 6):
             report, _path = execute_rebuild(
                 self.config,
                 self.project,
@@ -999,12 +993,12 @@ class ThreadNotePipelineTests(unittest.TestCase):
     def test_rebuild_preserves_current_note_without_source_thread_ids(self) -> None:
         write_chat(self.sessions / "chat.jsonl", thread_id="thread-1", cwd=self.repo)
         self.project.thread_notes_path.mkdir(parents=True)
-        manual = self.project.thread_notes_path / "manual-v4.md"
+        manual = self.project.thread_notes_path / "manual-v5.md"
         manual.write_text(
-            "---\ntype: threadNote\nschemaVersion: 4\n"
+            "---\ntype: threadNote\nschemaVersion: 5\n"
             "id: 760b64a4-2e32-483b-8494-028d3b2c8642\nstatus: done\n---\n\n"
             "# Thread Note\n\n## Summary\n\n- Manual.\n\n"
-            "## Key Developments\n\n### Action\n\n- Manual.\n\n"
+            "## Timeline\n\n### Action\n\n- Manual.\n\n"
             "## Last Known State\n\n- Work State: done — manual.\n"
             "- Latest User Direction: 追加指示なし。\n",
             encoding="utf-8",
@@ -1018,7 +1012,7 @@ class ThreadNotePipelineTests(unittest.TestCase):
         )
 
         self.assertEqual([], report["failed"])
-        self.assertTrue((self.project.thread_notes_path / "manual-v4.md").is_file())
+        self.assertTrue((self.project.thread_notes_path / "manual-v5.md").is_file())
         self.assertEqual(2, len(list(self.project.thread_notes_path.glob("*.md"))))
 
     def test_rebuild_preserves_artifact_id_when_regenerating_legacy_note(self) -> None:
@@ -1033,7 +1027,7 @@ class ThreadNotePipelineTests(unittest.TestCase):
         original_text = original.read_text(encoding="utf-8")
         original_id = parse_simple_frontmatter(original_text)["id"]
         original.write_text(
-            original_text.replace("schemaVersion: 4", "schemaVersion: 3"),
+            original_text.replace("schemaVersion: 5", "schemaVersion: 3"),
             encoding="utf-8",
         )
 
@@ -1047,32 +1041,17 @@ class ThreadNotePipelineTests(unittest.TestCase):
         self.assertEqual([], report["failed"])
         regenerated = next(self.project.thread_notes_path.glob("*.md"))
         metadata = parse_simple_frontmatter(regenerated.read_text(encoding="utf-8"))
-        self.assertEqual("4", metadata["schemaVersion"])
+        self.assertEqual("5", metadata["schemaVersion"])
         self.assertEqual(original_id, metadata["id"])
 
-    def test_multiple_work_items_render_h3_and_h4_labels(self) -> None:
+    def test_timeline_renders_source_times_and_actors(self) -> None:
         write_chat(self.sessions / "chat.jsonl", thread_id="thread-1", cwd=self.repo)
         candidate = scan_candidates(self.config, [self.project])[0][0]
         data = note_data(candidate)
-        data["workItems"].append(
-            {
-                "title": "Second task",
-                "developments": [
-                    {
-                        "label": "Validation",
-                        "text": "The second task was checked.",
-                        "eventIds": [candidate.events[-1].id],
-                    }
-                ],
-            }
-        )
-
         text = render_note(candidate, data, {})
-
-        self.assertIn("### WI-01: Requested work", text)
-        self.assertIn("#### Request", text)
-        self.assertIn("### WI-02: Second task", text)
-        self.assertIn("#### Validation", text)
+        self.assertIn("## Timeline", text)
+        self.assertIn("  - Actor: User\n  - Type: Request", text)
+        self.assertIn("  - Actor: AI\n  - Type: Reported Result", text)
         self.assertNotIn("distillationStatus", text)
         self.assertNotIn("distilledTo", text)
 
@@ -1224,15 +1203,13 @@ class ThreadNotePipelineTests(unittest.TestCase):
         self.assertIn('generatorReasoningEffort: "high"', note)
         self.assertIn('type: "threadNote"', note)
         self.assertIn('promptId: "f5dfc679-13d3-4fcc-9736-b7d4e6bb5c11"', note)
-        self.assertIn('promptVersion: "2.0"', note)
-        self.assertIn(
-            'outputSchemaSha256: "3ebffe117e29f76dfca25375a7e96ba0867de31a7ed68022dc6b65d91d651170"',
-            note,
-        )
+        self.assertIn('promptVersion: "3.3"', note)
+        from tkn_codex_context.summary_resources import load_summary_schema
+        self.assertIn(f'outputSchemaSha256: "{load_summary_schema().sha256}"', note)
         self.assertIn('templateId: "4d19c51c-0d02-43a5-b6ad-6d67f9739b75"', note)
-        self.assertIn('templateVersion: "2.0"', note)
-        self.assertIn("generatorPromptVersion: 4", note)
-        self.assertIn("rendererVersion: 7", note)
+        self.assertIn('templateVersion: "3.2"', note)
+        self.assertIn("generatorPromptVersion: 6", note)
+        self.assertIn("rendererVersion: 10", note)
         self.assertIn("generatedAt:", note)
         self.assertIn('fileSlug: "automated-thread-note"', note)
         self.assertIn('automatedValidation: "passed"', note)

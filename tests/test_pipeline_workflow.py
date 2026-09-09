@@ -59,10 +59,12 @@ class Summary(FakeSummarizer):
         if candidate.thread_id == self.fail_thread:
             raise RuntimeError("simulated failure")
         value = note_data(candidate)
-        value["workItems"][0]["developments"].append(
+        value["timeline"].append(
             {
                 "label": "Explicit Decision",
                 "text": "Keep source evidence.",
+                "startEventId": candidate.events[0].id,
+                "endEventId": candidate.events[0].id,
                 "eventIds": [candidate.events[0].id],
             }
         )

@@ -23,7 +23,7 @@ REQUIRED_TEMPLATE_FIELDS = frozenset(
     {
         "frontmatter",
         "summary",
-        "key_developments",
+        "timeline",
         "last_known_state",
         "evidence_section",
         "source_notes_section",

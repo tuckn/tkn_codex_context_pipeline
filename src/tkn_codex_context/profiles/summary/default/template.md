@@ -1,7 +1,7 @@
 ---
 type: template
 id: 4d19c51c-0d02-43a5-b6ad-6d67f9739b75
-version: "2.0"
+version: "3.2"
 ---
 
 {{frontmatter}}
@@ -12,9 +12,9 @@ version: "2.0"
 
 {{summary}}
 
-## Key Developments
+## Timeline
 
-{{key_developments}}
+{{timeline}}
 
 ## Last Known State
 

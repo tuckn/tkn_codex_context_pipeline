@@ -40,61 +40,6 @@
         ]
       }
     },
-    "workItems": {
-      "type": "array",
-      "maxItems": 5,
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "title": {
-            "type": "string"
-          },
-          "developments": {
-            "type": "array",
-            "maxItems": 6,
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "label": {
-                  "type": "string",
-                  "enum": [
-                    "Action",
-                    "Clarification / Correction",
-                    "Explicit Decision",
-                    "Proposal",
-                    "Reported Result",
-                    "Request",
-                    "Validation"
-                  ]
-                },
-                "text": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 420
-                },
-                "eventIds": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                }
-              },
-              "required": [
-                "label",
-                "text",
-                "eventIds"
-              ]
-            }
-          }
-        },
-        "required": [
-          "title",
-          "developments"
-        ]
-      }
-    },
     "evidence": {
       "type": "array",
       "maxItems": 8,
@@ -173,9 +118,56 @@
     },
     "sourceLimitations": {
       "type": "array",
-      "maxItems": 5,
       "items": {
         "type": "string"
+      }
+    },
+    "timeline": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "Action",
+              "Clarification / Correction",
+              "Explicit Decision",
+              "Proposal",
+              "Reported Result",
+              "Request",
+              "Validation"
+            ]
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 900
+          },
+          "eventIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "startEventId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "endEventId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "label",
+          "text",
+          "eventIds",
+          "startEventId",
+          "endEventId"
+        ]
       }
     }
   },
@@ -184,9 +176,9 @@
     "fileSlug",
     "description",
     "summaryItems",
-    "workItems",
     "evidence",
     "lastKnownState",
-    "sourceLimitations"
+    "sourceLimitations",
+    "timeline"
   ]
 }

@@ -94,7 +94,7 @@ def render_chunk_prompt(
     thread_id: str,
     part: int,
     part_count: int,
-    events: list[dict[str, str]],
+    events: list[dict[str, Any]],
 ) -> str:
     return _managed_input(
         prompt,
@@ -128,6 +128,7 @@ def render_repair_prompt(
     thread_id: str,
     validation_error: str,
     draft: dict[str, Any],
+    events: list[dict[str, Any]] | None = None,
 ) -> str:
     return _managed_input(
         prompt,
@@ -136,5 +137,6 @@ def render_repair_prompt(
         payload={
             "validationError": validation_error,
             "draft": draft,
+            **({"events": events} if events is not None else {}),
         },
     )

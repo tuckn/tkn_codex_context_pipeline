@@ -335,6 +335,96 @@ the normal write workflow; unchanged successful stages are skipped during
 `T` is a conversation's `threadKey`, `K` is a scope's storage key, and `H` is a
 content hash. They are placeholders in the diagrams.
 
+### What a Thread Note records
+
+The artifact is called a **Thread Note** (Japanese: **スレッド記録**).
+“Chat summary” is an informal process name, not a requirement to compress the
+whole record. The `thread-notes` command, `type: threadNote`, storage paths, and
+`profiles/summary/default` resource path remain stable.
+
+- **Summary**: a short overview of the conversation's purpose and outcome.
+- **Timeline**: dated, attributed entries with evidence IDs. Preserve questions,
+  ideas, unaccepted options, failures, retries, corrections, actions, checks, and
+  decisions. Group routine reads by purpose.
+- **Last Known State**: the final observed state, latest user direction,
+  unresolved requests, unverified checks, and continuation point.
+- **Evidence / Source Notes**: useful exact checks and input/verification limitations,
+  shown only when populated.
+
+The application derives timestamps and actors from cited start/end events. The
+renderer groups by date and displays seconds in `Asia/Tokyo`. Raw and canonical
+events retain original timestamp precision and line references. Source order wins
+for identical timestamps or clocks moving backwards; missing, invalid, or timezone-naive
+timestamps display as unknown. Logged time is not a measurement of working duration.
+
+Timeline entries use a time heading followed by fixed fields: `Actor`, `Type`, `Text`,
+`EventRange`, and `Sources`. Actors are `User`, `AI`, and `Tool`; both assistant messages
+and tool invocations use `AI`, while tool results use `Tool`. `Type` is the development
+classification. `EventRange` gives the start/end IDs that determine time and actor (the
+same ID twice for one event); `Sources` lists all supporting events. Never infer endpoints
+from citation order. Separators are ASCII: ` - ` for time ranges, ` -> ` for event ranges,
+and `: ` for fields. Missing time/day use `Unknown` / `Unknown date`.
+
+```markdown
+### 2026-05-17
+
+- **11:27:35 - 11:27:47**
+  - Actor: AI
+  - Type: Action
+  - Text: Investigated public access and listing behavior.
+  - EventRange: L000010 -> L000020
+  - Sources: L000010, L000012, L000020
+```
+
+Prose continuation lines stay indented below `Text`. Summary and Evidence use `Text`
+with a child `Sources` field. Last Known State has fixed fields in this order: `Work State`,
+`Detail`, `Latest User Direction`, `Unresolved`, `Unverified`, `Continuation Point`, `Sources`.
+Its Sources support the state record as a whole; per-field citations are not inferred.
+Unresolved/unverified items are nested `Text` records. Empty arrays display as `[]` and
+empty prose as `null` (the JSON still uses empty strings). These mean no recorded value,
+not that all checks passed or no user direction exists. Source Notes use `Text` records
+without invented types or citations. Empty Evidence/Source Notes sections remain omitted;
+omission means no recorded items, not an independent finding of no problems.
+Downstream readers continue to accept the older layouts.
+This Markdown is not RDF/PROV-O serialization: future conversion should use structured
+source events and explicit IDs rather than infer roles from display text. The timeline
+JSON schema is unchanged.
+
+Long conversations are processed in parts. **Partial timeline entries are concatenated
+without another model reduction**; only the overview and final state are synthesized.
+There is no six-development-per-task limit or 9,000-character whole-record limit.
+Each entry allows up to 900 characters. Validation checks user-message coverage,
+references, and ranges crossing actors, days, or turns. These are structural and
+reference checks, not proof of semantic correctness. Event text is no longer cut at
+8,000 characters. After credential-shaped text is redacted, all remaining text is supplied
+in order. Normal events stay whole; events larger than the default 120,000-character
+serialized event-array budget are split into consecutive pieces carrying the original ID,
+timestamp, part index/count, and text offsets. The budget excludes prompt/schema overhead
+and is not a token limit. Repair calls receive the same source pieces. All partial timeline
+entries survive merging. This preserves input coverage, not every detail in the generated
+prose. Source Notes still disclose gaps already present in the source, such as tool-output
+truncation; lossless input partitioning is not a source gap.
+
+Thread Notes contain source-backed facts. New ideas, recurring-work analysis,
+automation suggestions, and diaries are downstream uses. Observable tool operations
+and results are included; unlogged internal reasoning is not reconstructed.
+Decisions and Working Context accept old and new Thread Notes, including records up
+to 180,000 characters per note; larger inputs fail explicitly instead of being silently cut.
+
+For a real generation comparison, use the development helper below. It saves the
+baseline, a source-log snapshot, generated output, and validation report in a new
+output directory. It uses the configured generation provider without updating live
+notes or pipeline checkpoints.
+
+```console
+uv run python scripts/review_thread_note.py --source-log <rollout.jsonl> --baseline-note <thread-note.md> --output-dir <new-review-directory>
+```
+
+`--reuse-dir <previous-review-directory>` reuses cached inference responses only for
+identical prompts, profiles, and provider settings. Current validation still runs;
+repairs and uncached calls use the configured provider.
+
+
 ### From Codex logs to Thread Notes
 
 ```mermaid
@@ -367,12 +457,12 @@ sequenceDiagram
     loop New, changed, or unfinished eligible conversation
         P->>P: Prepare events and split long input
         P->>AI: Thread ID, event content and IDs<br/>Generation instructions and output schema
-        AI-->>P: Summary JSON with evidence IDs
+        AI-->>P: Partial timeline, overview, and evidence IDs
         opt Input was split
-            P->>AI: Merge partial summaries
-            AI-->>P: Combined summary JSON
+            P->>AI: Synthesize overview and final state
+            AI-->>P: Overview and final-state JSON
         end
-        P->>P: Validate structure and citations<br/>Render ID, Frontmatter, and Markdown
+        P->>P: Preserve and concatenate timelines<br/>Derive timestamps and actors, validate, render Markdown
         P->>F: D/threads/T/thread-notes/*.md<br/>Thread Note
         P->>F: Record provenance and checkpoint
     end
@@ -503,7 +593,7 @@ sent to the model, and is not a complete log of every model request.
 The data contract separates logical UUIDs from content versions (`sha256:`),
 records generating provider/model/profile hashes, and links outputs to exact
 input versions. Working Context uses `scopeId` and `scopeStatus` (schema 5).
-Thread Notes use schema 4 and Decisions use schema 5. Existing artifact IDs and
+Thread Notes use schema 5 and Decisions use schema 5. Thread Note schemas 3 and 4 remain readable. Existing artifact IDs and
 creation dates are preserved on regeneration; ambiguous duplicate notes are
 rejected.
 

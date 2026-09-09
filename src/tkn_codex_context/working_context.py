@@ -180,9 +180,9 @@ def _source_set_sha256(sources: Sequence[WorkingContextSource]) -> str:
     return sha256(payload).hexdigest()
 
 
-def _read_bounded(path: Path) -> str:
+def _read_bounded(path: Path, *, limit: int = MAX_SOURCE_CHARACTERS) -> str:
     text = path.read_text(encoding="utf-8-sig")
-    if len(text) > MAX_SOURCE_CHARACTERS:
+    if len(text) > limit:
         raise PipelineError(f"Working Context source exceeds the per-file size limit: {path}")
     secrets = has_secret_like_content(text)
     if secrets:
@@ -199,7 +199,7 @@ def _artifact_sources(
         try:
             validate_thread_note(path)
             content = path.read_bytes()
-            text = _read_bounded(path)
+            text = _read_bounded(path, limit=MAX_BATCH_CHARACTERS)
             if path.read_bytes() != content:
                 raise PipelineError(f"Working Context source changed while reading: {path}")
         except (OSError, PipelineError, SystemExit) as exc:

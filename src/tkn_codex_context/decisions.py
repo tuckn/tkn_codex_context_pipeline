@@ -58,14 +58,17 @@ DECISION_STATE_SCHEMA_VERSION = 1
 DECISION_RENDERER_VERSION = 5
 DECISION_STATE_FILENAME = "decision-build-state.json"
 MAX_EXISTING_DECISION_INDEX = 200
-MAX_SOURCE_NOTE_CHARACTERS = 20_000
+MAX_SOURCE_NOTE_CHARACTERS = 180_000
 MAX_DECISION_BATCH_SOURCES = 50
 MAX_DECISION_BATCH_CHARACTERS = 200_000
 IN_FLIGHT_GRACE_MINUTES = 9
 DECISION_PROFILE = load_decision_profile()
 DECISION_OUTPUT_SCHEMA = DECISION_PROFILE.schema.value
 _DECISION_FILENAME = re.compile(r"^DR-([0-9]{4})-([a-z0-9]+(?:-[a-z0-9]+)*)\.md$")
-_EXPLICIT_DECISION_HEADING = re.compile(r"(?m)^#{3,4} Explicit Decision\s*$")
+_EXPLICIT_DECISION_HEADING = re.compile(
+    r"(?m)^(?:#{3,4} Explicit Decision\s*$|- \*\*[^\n]*｜Explicit Decision\*\* — "
+    r"|  - Type: Explicit Decision[ \t]*\r?$)"
+)
 
 
 @dataclass(frozen=True)
@@ -270,18 +273,19 @@ def _refresh_existing_decision_index_report(report: dict[str, Any], existing_cou
 def _thread_note_source(path: Path, project: Project) -> DecisionSource:
     text = path.read_text(encoding="utf-8-sig")
     metadata, thread_ids, _source_refs, version = thread_note_metadata(path)
-    if version not in {"3", "4"}:
-        raise PipelineError(f"decision distillation requires Thread Note v3 or v4: {path.name}")
-    if version == "4":
+    if version not in {"3", "4", "5"}:
+        raise PipelineError(f"decision distillation requires Thread Note v3, v4, or v5: {path.name}")
+    if version in {"4", "5"}:
         try:
             canonical_uuid4(metadata.get("id") or "")
         except ValueError as exc:
-            raise PipelineError(f"Thread Note v4 has invalid id: {path.name}") from exc
+            raise PipelineError(f"Thread Note has invalid id: {path.name}") from exc
     if metadata.get("type") != "threadNote":
         raise PipelineError(f"invalid Thread Note type for decision distillation: {path.name}")
     if len(thread_ids) != 1:
         raise PipelineError(f"Thread Note must identify one source thread: {path.name}")
-    for heading in ("# Thread Note", "## Summary", "## Key Developments", "## Last Known State"):
+    body_heading = "## Timeline" if version == "5" else "## Key Developments"
+    for heading in ("# Thread Note", "## Summary", body_heading, "## Last Known State"):
         if heading not in text:
             raise PipelineError(f"Thread Note is missing {heading}: {path.name}")
     secrets = has_secret_like_content(text)
