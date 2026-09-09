@@ -1,14 +1,18 @@
 # Tkn Codex Context Pipeline
 
-A local data pipeline that preserves Codex conversations and turns them into
-Thread Notes, Decision Records, and current Working Context. Configure it once,
-run `clone` for the available history, then run `pull` periodically.
-
 Japanese: [README_ja.md](README_ja.md)
+
+A local data pipeline that first preserves Codex conversations as Raw data,
+then creates Markdown notes summarizing that data (called Thread Notes).
+Thread Notes feed Decision Records. Thread Notes, Decision Records, and repository
+evidence then feed Working Context, which describes the current state and next steps.
+Thread Notes retain a timeline and last known state as well as an overview.
+After configuring `config.yaml`, run `clone` for the available history,
+then run `pull` periodically.
 
 ## Purpose and current scope
 
-Version 0.5 organizes source evidence by conversation. A conversation has one
+Source evidence is organized by conversation. A conversation has one
 Thread Note even when it moves between Codex Projects or contributes to several
 pieces of work. Project membership is observed metadata. Decisions and Working
 Context are generated for scopes: a Codex Project, an explicitly configured
@@ -32,10 +36,12 @@ flowchart LR
     P --> K[Downstream knowledge repository]
 ```
 
-The normal command runs every stage. Individual builds are maintenance tools.
-No Project registration or per-Project backfill is required before capture or
-summarization. Generated files remain in the configured application storage;
-the pipeline does not write into source repositories or Codex storage.
+The `clone` command runs every stage from Raw capture to Working Context generation.
+Use `pull` for subsequent updates and individual build commands to run a selected
+generation stage. Generated files remain in application storage specified in
+`config.yaml`; the pipeline does not write into source repositories or Codex storage.
+The `--config` argument selects a configuration file. There are no CLI arguments
+for setting storage paths directly.
 
 See [Processing sequence and provenance](#processing-flow) for the actors,
 file paths, model inputs, and generated artifacts at each stage.
@@ -67,53 +73,92 @@ uv tool install .
 tkn-codex-context --help
 ```
 
-This installs a snapshot of this checkout. After updating the repository:
+This installs a snapshot of this checkout. After updating the repository, reinstall
+with the following command to apply the changes:
 
 ```console
 uv tool install . --reinstall
 ```
 
-The standalone `codex` CLI must be available and authenticated when using the
-Codex provider. The Codex desktop executable under `WindowsApps` is not a
-substitute for the standalone CLI.
+To use Codex for inference, make sure `codex` runs in your command prompt or
+terminal and `codex --version` displays `codex-cli <version>`.
+Authentication is also required. Check the version and login status with:
+
+```console
+codex --version
+codex login status
+```
+
+If you are not logged in, authenticate with `codex login`.
+The graphical Codex App does not replace the standalone CLI. Even with the App
+installed, verify that the commands above work in your terminal.
+See the [official Codex CLI command reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli).
 
 ## Configure, clone, then pull
+
+### config: create and inspect configuration
+
+Create the configuration file with the following command:
 
 ```console
 tkn-codex-context config init
 ```
 
 Edit the displayed `~/.tkn/codex_context_pipeline/config.yaml`. Choose the input
-root, storage locations, and generation provider/model. Inspect the effective
-configuration and optionally preview the first run:
+root, storage locations, and generation provider/model. After editing, check
+the settings that will actually apply:
 
 ```console
 tkn-codex-context config show
-tkn-codex-context clone --dry-run
-tkn-codex-context clone
 ```
+
+### clone: process historical conversations
 
 `clone` initializes missing storage without resetting existing data, captures
 all available history, generates eligible Thread Notes, then builds Decisions
-and Working Context for every affected scope. Repeating `clone` is resumable.
-The initial run can make many model calls. `--dry-run` performs no inference,
-creates no directories or reports, and does not predict model output; downstream
-stages awaiting new notes are reported as `awaiting-upstream`.
+and Working Context for every affected scope. A large conversation history can
+consume many AI tokens and take substantial time. Start with a dry-run to inspect
+the selected conversations and planned work:
 
-For routine updates:
+```console
+tkn-codex-context clone --dry-run
+```
+
+`--dry-run` makes no AI calls and creates no directories or reports. It does not
+estimate actual token usage or cost, or predict model output. Stages awaiting new
+Thread Notes are reported as `awaiting-upstream`. Once you have checked the
+configuration and selected work, capture and generate the artifacts with:
+
+```console
+tkn-codex-context clone
+```
+
+After an interruption or deferral, repeating the command resumes from saved data
+and processing records.
+
+### pull: incorporate new and changed conversations
+
+After the initial `clone`, run the following command periodically:
 
 ```console
 tkn-codex-context pull
-tkn-codex-context status
-tkn-codex-context scopes list
 ```
 
-`pull` requires initialized storage. It scans for new or changed captures and
-retries unfinished stages, including old conversations added later. There is no
-installation-date cutoff. Unchanged successful stages make no model calls.
+`pull` checks previously saved logs and processing records, then captures new
+or updated conversations. It updates the affected Thread Notes, Decisions, and
+Working Context and resumes unfinished work. Conversations held before this CLI
+was installed are also included if their supported logs are added to the input
+source later. Unchanged successful stages make no model calls.
 The default 30-minute idle interval delays summarizing active conversations;
 Raw capture still happens first. Use `--limit` to bound the number of notes
 attempted in a run; remaining work resumes on the next `pull`.
+
+Inspect the last result and the scopes selected for generation with:
+
+```console
+tkn-codex-context status
+tkn-codex-context scopes list
+```
 
 `status` shows the last run's recorded state and timestamp, not a live source
 scan. A run is complete only when all eligible conversations and active scopes
@@ -171,8 +216,10 @@ captured evidence remains available.
 
 ### Inference providers
 
-The source provider remains Codex. `generation.active_provider` changes only
-the inference backend. Set the selected provider's model and transport; model
+The currently supported chat source is locally stored Codex conversation logs.
+You can change the generative AI model used for inference through
+`generation.active_provider` and the selected provider's `model` setting.
+Set the selected provider's model and transport; model
 availability and authentication belong to the chosen service.
 
 | Provider ID | Required transport setting | Execution |
@@ -321,21 +368,223 @@ of inference; follow it with `pull` to update the derived artifacts.
 ## Processing sequence and provenance
 
 The CLI selects inputs, the inference backend returns structured JSON, and the
-CLI validates and renders that JSON into Markdown. The sequence diagrams show
-the normal write workflow; unchanged successful stages are skipped during
-`pull`. Source capture and deterministic normalization do not use a model.
+CLI validates and renders that JSON into Markdown. `clone` and `pull` run the
+following three generation stages in order. Individual build commands first
+capture and normalize Raw, then run only their selected generation stage.
+Prepare storage initially with `clone`, or `raw ingest` for capture alone.
 
-| Diagram abbreviation | Configuration key | Default location |
+The diagrams show normal execution when generation is needed. Unchanged successful
+work is skipped. `--dry-run` makes no AI calls or file writes. Raw capture and
+normalization do not use a model.
+
+### thread-notes build: generate Thread Notes from Raw
+
+Capture and normalize conversation logs, then generate Markdown Thread Notes for
+eligible conversations. Use `--thread-id` to select one conversation. This command
+does not generate Decisions or Working Context. The model receives event content
+and IDs, generation instructions, and the output schema.
+
+The following shows `tkn-codex-context thread-notes build`. The legend applies
+to the diagram immediately below it.
+
+| Diagram notation | Configuration key | Default location |
 | --- | --- | --- |
 | `C` | `codex_home` | `~/.codex` |
 | `R` | `raw_root` | `~/.tkn/codex_context_pipeline/raw` |
 | `D` | `data_root` | `~/.tkn/codex_context_pipeline/data` |
 | `S` | `state_root` | `~/.tkn/codex_context_pipeline/state` |
 
-`T` is a conversation's `threadKey`, `K` is a scope's storage key, and `H` is a
-content hash. They are placeholders in the diagrams.
+`T` is a conversation's `threadKey` and `H` is a content hash.
+They are placeholders in the diagram.
 
-### What a Thread Note records
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User or scheduler
+    participant P as Pipeline CLI
+    participant C as Codex storage
+    participant F as Storage R, D, S
+    participant AI as Inference backend
+
+    U->>P: thread-notes build
+    P->>P: Read config.yaml<br/>Paths, model, scope settings
+    P->>F: Read S/ledger.json and stage state
+
+    P->>C: C/sessions/**/*.jsonl<br/>C/archived_sessions/**/*.jsonl
+    C-->>P: Original conversation bytes
+    P->>F: R/{sourceId}/sha256/{prefix}/H.jsonl<br/>Preserve original bytes
+    P->>F: R/{sourceId}/manifest.jsonl<br/>Record source, time, hash
+
+    opt Project metadata is available
+        P->>C: C/.codex-global-state.json
+        C-->>P: Projects and conversation membership
+        P->>F: R/{sourceId}/metadata/H.json
+    end
+
+    P->>P: Parse Raw and normalize events<br/>IDs, messages, times, source line references
+    P->>F: D/source-aligned/T/H.json<br/>Canonical Events
+
+    loop New, changed, or unfinished eligible conversation
+        P->>P: Prepare events and split long input
+        P->>AI: Thread ID, event content and IDs<br/>Generation instructions and output schema
+        AI-->>P: Partial timeline, overview, and evidence IDs
+        opt Input was split
+            P->>AI: Synthesize overview and final state
+            AI-->>P: Overview and final-state JSON
+        end
+        P->>P: Preserve and concatenate timelines<br/>Derive timestamps and actors, validate, render Markdown
+        P->>F: D/threads/T/thread-notes/*.md<br/>Thread Note
+        P->>F: Record provenance and checkpoint
+    end
+```
+
+The saved Canonical Events and the summarizer's input originate from the same
+parse. The current implementation passes in-memory events to the summarizer;
+it does not re-read the saved canonical JSON for that step. Summarization is
+per conversation, independent of work-scope grouping.
+
+### decisions build: generate Decisions from Thread Notes
+
+The CLI uses scopes to select shared Thread Notes and existing Decisions, then
+passes unprocessed or changed notes to the model. A scope is selection data.
+The model receives the scope ID and selected evidence, not the full scope
+configuration JSON. Work is deferred if the scope's Thread Notes are not current.
+This command does not generate Thread Notes or Working Context.
+
+The following shows `tkn-codex-context decisions build`. Use `--scope` to select a scope.
+
+| Diagram notation | Configuration key / meaning | Default location |
+| --- | --- | --- |
+| `D` | `data_root`: notes, Decisions, provenance | `~/.tkn/codex_context_pipeline/data` |
+| `S` | `state_root`: processing records | `~/.tkn/codex_context_pipeline/state` |
+| `T` / `K` | Conversation `threadKey` / scope storage key | Placeholders in paths |
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant P as Pipeline CLI
+    participant D as Artifact storage D
+    participant AI as Inference backend
+
+    U->>P: decisions build
+    P->>P: Read settings and S/ledger.json<br/>Run shared Raw capture and normalization
+    P->>P: Select scopes from membership and config.scopes
+    P->>D: D/threads/T/thread-notes/*.md<br/>D/scopes/K/decisions/DR-*.md
+    D-->>P: Thread Notes and existing Decisions
+    alt Selected Thread Notes are incomplete or stale
+        P-->>U: Report deferred work<br/>Update Thread Notes first
+    else Upstream is current and Decision evaluation is needed
+        P->>P: Select unprocessed or changed notes
+        P->>AI: Scope ID, note content, existing-decision index<br/>Generation instructions and output schema
+        AI-->>P: Decision JSON<br/>Create, update, reuse, or no decision
+        P->>P: Validate evidence, structure, and edit protection<br/>Render Markdown
+        P->>D: D/scopes/K/decisions/DR-*.md<br/>Save new or updated records
+        P->>D: D/provenance/ input/output versions and activity
+    end
+    P->>P: Record processing state and run report in S
+    P->>D: Update D/catalog/ and D/provenance/index.json
+```
+
+A result with no new Decisions can still succeed. Model references to existing
+Decisions are also retained in the processing records.
+
+### working-context build: generate current state and next steps
+
+Working Context combines a scope's Thread Notes, supported Decisions, and selected
+repository documents/Git state. The model receives the scope ID and title,
+selected evidence, generation instructions, and the output schema. Original
+sources and size-bounded model inputs are retained as separate snapshots.
+
+The following shows `tkn-codex-context working-context build`. Use `--scope` to select
+a scope. Thread Notes and the Decision stage must be current; this command does
+not regenerate them. Zero Decision Records are valid if the Decision stage
+completed successfully.
+
+| Diagram notation | Configuration key / meaning | Default location |
+| --- | --- | --- |
+| `D` | `data_root`: notes, Decisions, Working Context, provenance | `~/.tkn/codex_context_pipeline/data` |
+| `S` | `state_root`: processing records | `~/.tkn/codex_context_pipeline/state` |
+| `T` / `K` | Conversation `threadKey` / scope storage key | Placeholders in paths |
+| Selected repositories | Observed Project roots or scope `repository_roots` | Scope-dependent |
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant P as Pipeline CLI
+    participant D as Artifact storage D
+    participant R as Selected repositories
+    participant AI as Inference backend
+
+    U->>P: working-context build
+    P->>P: Read settings and S/ledger.json<br/>Run shared Raw capture and normalization
+    P->>P: Select scope and check Thread Note and Decision stages
+    alt Upstream work is incomplete or stale
+        P-->>U: Report deferred work<br/>Update upstream generation stages first
+    else Upstream is current
+        P->>D: D/threads/T/thread-notes/*.md<br/>D/scopes/K/decisions/DR-*.md
+        D-->>P: Thread Notes and currently supported Decisions
+        opt Repository evidence is available
+            P->>R: README, AGENTS, configuration files<br/>Git state
+            R-->>P: Documents and Git snapshot
+        end
+        opt Working Context needs an update
+            P->>P: Assemble evidence and prepare model input
+            P->>D: D/provenance/ original sources and prepared input
+            P->>AI: Scope ID and title, notes, supported Decisions<br/>Repository evidence, instructions, output schema
+            AI-->>P: Current state, decisions, next steps as JSON
+            P->>P: Validate references, source freshness, edit protection<br/>Render Markdown
+            P->>D: D/scopes/K/working-context.md
+            P->>D: D/provenance/ input/output versions and activity
+        end
+    end
+    P->>P: Record processing state and run report in S
+    P->>D: Update D/catalog/ and D/provenance/index.json
+```
+
+### A PROV-O view of a Decision's provenance
+
+In [PROV-O](https://www.w3.org/TR/prov-o/#description-starting-point), an
+Entity represents data such as a particular file version, an Activity is an
+execution, and an Agent is a responsible actor. The arrows below trace an
+output back to its generating activity and evidence.
+
+```mermaid
+flowchart TB
+    DR["Entity<br/>Decision Record version<br/>id and SHA-256"]
+    BUILD("Activity<br/>This Decision generation run<br/>activityId, start and end times")
+    NOTES["Entity<br/>Input Thread Note versions"]
+    SCOPE["Entity<br/>Scope definition version"]
+    OLD["Entity<br/>Existing Decision versions"]
+    AGENT{{"Agent<br/>Pipeline CLI and inference backend<br/>Software version, provider, model"}}
+
+    DR -->|"prov:wasGeneratedBy"| BUILD
+    BUILD -->|"prov:used"| NOTES
+    BUILD -->|"prov:used"| SCOPE
+    BUILD -->|"prov:used"| OLD
+    BUILD -->|"prov:wasAssociatedWith"| AGENT
+    DR -.->|"prov:wasDerivedFrom"| NOTES
+```
+
+This is a mapping of the current JSON records to PROV-O concepts; RDF output
+belongs downstream. The recorded `used` set describes stage-level dependencies,
+including the scope used for selection. It is not limited to text directly
+sent to the model, and is not a complete log of every model request.
+
+In the following table, `D` is `data_root`, `S` is `state_root`, and `H` is a content hash.
+
+| Record location | What it explains |
+| --- | --- |
+| `D/provenance/entities/*.json` | Logical identity, version, hash, and snapshot reference |
+| `D/provenance/blobs/{prefix}/H` | Exact bytes of the retained version |
+| `D/provenance/activities/{activityId}.json` | Which execution used which versions and produced which outputs |
+| `D/provenance/index.json` | Published artifact versions, status, and activity references |
+| `S/ledger.json` | Completed stages and resumable work |
+| `S/reports/{runId}.json` | Successes, failures, and deferred work in one invocation |
+| `S/last-run.json` | Last invocation's recorded state |
+
+## What a Thread Note records
 
 The artifact is called a **Thread Note** (Japanese: **スレッド記録**).
 “Chat summary” is an informal process name, not a requirement to compress the
@@ -432,156 +681,6 @@ uv run python scripts/review_thread_note.py --source-log <rollout.jsonl> --basel
 `--reuse-dir <previous-review-directory>` reuses cached inference responses only for
 identical prompts, profiles, and provider settings. Current validation still runs;
 repairs and uncached calls use the configured provider.
-
-
-### From Codex logs to Thread Notes
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor U as User or scheduler
-    participant P as Pipeline CLI
-    participant C as Codex storage
-    participant F as Storage R, D, S
-    participant AI as Inference backend
-
-    U->>P: clone or pull
-    P->>P: Read config.yaml<br/>Paths, model, scope settings
-    P->>F: Read S/ledger.json and stage state
-
-    P->>C: C/sessions/**/*.jsonl<br/>C/archived_sessions/**/*.jsonl
-    C-->>P: Original conversation bytes
-    P->>F: R/{sourceId}/sha256/{prefix}/H.jsonl<br/>Preserve original bytes
-    P->>F: R/{sourceId}/manifest.jsonl<br/>Record source, time, hash
-
-    opt Project metadata is available
-        P->>C: C/.codex-global-state.json
-        C-->>P: Projects and conversation membership
-        P->>F: R/{sourceId}/metadata/H.json
-    end
-
-    P->>P: Parse Raw and normalize events<br/>IDs, messages, times, source line references
-    P->>F: D/source-aligned/T/H.json<br/>Canonical Events
-
-    loop New, changed, or unfinished eligible conversation
-        P->>P: Prepare events and split long input
-        P->>AI: Thread ID, event content and IDs<br/>Generation instructions and output schema
-        AI-->>P: Partial timeline, overview, and evidence IDs
-        opt Input was split
-            P->>AI: Synthesize overview and final state
-            AI-->>P: Overview and final-state JSON
-        end
-        P->>P: Preserve and concatenate timelines<br/>Derive timestamps and actors, validate, render Markdown
-        P->>F: D/threads/T/thread-notes/*.md<br/>Thread Note
-        P->>F: Record provenance and checkpoint
-    end
-```
-
-The saved Canonical Events and the summarizer's input originate from the same
-parse. The current implementation passes in-memory events to the summarizer;
-it does not re-read the saved canonical JSON for that step. Summarization is
-per conversation, independent of work-scope grouping.
-
-### From scopes and notes to Decisions and Working Context
-
-A scope is selection data, not an actor. The CLI uses it to choose which
-shared notes and existing Decisions to consider together.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant P as Pipeline CLI
-    participant D as Artifact storage D
-    participant R as Selected repositories
-    participant AI as Inference backend
-
-    P->>P: Resolve scopes from membership and config.scopes<br/>Select conversations and repository roots
-
-    loop Each scope with current upstream inputs
-        P->>D: Read selected Thread Notes and existing Decisions
-        D-->>P: Markdown notes and Decision Records
-        P->>P: Select unprocessed or changed notes
-
-        opt Decision evaluation is needed
-            P->>AI: Scope ID, selected note content<br/>Existing-decision index, instructions, schema
-            AI-->>P: Decision JSON<br/>Create, update, reuse, or no decision
-            P->>P: Validate evidence, structure, and edit protection<br/>Render Markdown
-            P->>D: D/scopes/K/decisions/DR-*.md
-            P->>D: Record activity and input/output versions
-        end
-
-        P->>D: Read current notes and supported Decisions
-        D-->>P: Conversation-derived evidence
-        opt Repository evidence is available
-            P->>R: README, AGENTS, configuration files<br/>Git state
-            R-->>P: File contents and Git snapshot
-        end
-
-        opt Working Context needs an update
-            P->>P: Assemble and bound input
-            P->>D: Retain original sources and prepared inputs<br/>as separate evidence snapshots
-            P->>AI: Scope ID and title<br/>Notes, supported Decisions, repository evidence<br/>Generation instructions and schema
-            AI-->>P: Current state, decisions, next steps as JSON
-            P->>P: Validate references and source freshness<br/>Render Markdown
-            P->>D: D/scopes/K/working-context.md
-            P->>D: Record activity and input/output versions
-        end
-    end
-
-    P->>D: D/catalog/threads.json and scopes.json<br/>Membership, artifact references, processing status
-    P->>D: D/provenance/index.json<br/>Published artifact versions and activity index
-```
-
-| Generation stage | Main model input | Scope's role |
-| --- | --- | --- |
-| Thread Note | Conversation events and evidence IDs | Summarization remains per conversation |
-| Decision | Selected Thread Note content, existing-decision index, scope ID | Select the notes and existing Decisions |
-| Working Context | Notes, supported Decisions, repository evidence, scope ID and title | Define the work whose current state is synthesized |
-
-The full scope configuration JSON is not sent directly to the model. The CLI
-passes the selected evidence and scope identity; Working Context also receives
-the title. All three stages use packaged generation instructions and an output
-schema. Incomplete upstream inputs defer downstream synthesis. A Decision
-result with no new records can still be successful.
-
-### A PROV-O view of a Decision's provenance
-
-In [PROV-O](https://www.w3.org/TR/prov-o/#description-starting-point), an
-Entity represents data such as a particular file version, an Activity is an
-execution, and an Agent is a responsible actor. The arrows below trace an
-output back to its generating activity and evidence.
-
-```mermaid
-flowchart TB
-    DR["Entity<br/>Decision Record version<br/>id and SHA-256"]
-    BUILD("Activity<br/>This Decision generation run<br/>activityId, start and end times")
-    NOTES["Entity<br/>Input Thread Note versions"]
-    SCOPE["Entity<br/>Scope definition version"]
-    OLD["Entity<br/>Existing Decision versions"]
-    AGENT{{"Agent<br/>Pipeline CLI and inference backend<br/>Software version, provider, model"}}
-
-    DR -->|"prov:wasGeneratedBy"| BUILD
-    BUILD -->|"prov:used"| NOTES
-    BUILD -->|"prov:used"| SCOPE
-    BUILD -->|"prov:used"| OLD
-    BUILD -->|"prov:wasAssociatedWith"| AGENT
-    DR -.->|"prov:wasDerivedFrom"| NOTES
-```
-
-This is a mapping of the current JSON records to PROV-O concepts; RDF output
-belongs downstream. The recorded `used` set describes stage-level dependencies,
-including the scope used for selection. It is not limited to text directly
-sent to the model, and is not a complete log of every model request.
-
-| Record location | What it explains |
-| --- | --- |
-| `D/provenance/entities/*.json` | Logical identity, version, hash, and snapshot reference |
-| `D/provenance/blobs/{prefix}/H` | Exact bytes of the retained version |
-| `D/provenance/activities/{activityId}.json` | Which execution used which versions and produced which outputs |
-| `D/provenance/index.json` | Published artifact versions, status, and activity references |
-| `S/ledger.json` | Completed stages and resumable work |
-| `S/reports/{runId}.json` | Successes, failures, and deferred work in one invocation |
-| `S/last-run.json` | Last invocation's recorded state |
 
 ## Storage and downstream contract
 
