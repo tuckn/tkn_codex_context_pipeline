@@ -128,7 +128,11 @@ class ProvenanceStore:
         return bool(activity_id and (self.root / "activities" / f"{activity_id}.json").is_file())
 
     def publish_index(
-        self, artifacts: list[dict[str, Any]], *, run_id: str, complete: bool = False,
+        self,
+        artifacts: list[dict[str, Any]],
+        *,
+        run_id: str,
+        complete: bool = False,
         source: tuple[str, str] | None = None,
     ) -> None:
         if self.dry_run:
@@ -188,13 +192,12 @@ def _validate_provenance(data_root: Path) -> dict[str, Any]:
         raise PipelineError("unsupported provenance index schema")
     checked_snapshots: set[tuple[str, str]] = set()
 
+    from .references import resolve_store_ref
+
+    descriptor = read_json(data_root / "store.json")
+
     def resolve(ref: str) -> Path:
-        if not ref.startswith("data:/"):
-            raise PipelineError(f"unsupported snapshot reference: {ref}")
-        path = (data_root / ref.removeprefix("data:/")).resolve()
-        if not path.is_relative_to(data_root.resolve()):
-            raise PipelineError(f"snapshot reference escapes data root: {ref}")
-        return path
+        return resolve_store_ref(data_root, ref, descriptor)
 
     def entity_check(entity: dict[str, Any]) -> None:
         if entity.get("schemaVersion") != PROVENANCE_SCHEMA_VERSION:

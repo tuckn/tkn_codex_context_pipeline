@@ -42,10 +42,21 @@ def write_app_state(codex_home: Path) -> None:
 def write_config(path: Path, value: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     document = {"schema_version": CONFIG_SCHEMA_VERSION, **value}
+    group = document.setdefault("chat", {}).setdefault("providers", {}).setdefault("codex", {})
+    codex = group.setdefault("sources", {}).setdefault(document.pop("source_id", "windows"), {})
+    for old, new in (
+        ("raw_root", "raw_root"),
+        ("data_root", "data_root"),
+        ("state_root", "state_root"),
+        ("codex_home", "source_root"),
+        ("include_archived", "include_archived"),
+    ):
+        if old in document:
+            codex[new] = document.pop(old)
+    if "cache_root" in document:
+        document["cache_root"] = str(Path(document["cache_root"]).parents[1])
     schema_version = document.pop("schema_version")
-    schema_text = (
-        json.dumps(schema_version) if isinstance(schema_version, str) else str(schema_version)
-    )
+    schema_text = json.dumps(schema_version) if isinstance(schema_version, str) else str(schema_version)
     path.write_text(
         f"schema_version: {schema_text}\n{yaml.safe_dump(document, sort_keys=False)}",
         encoding="utf-8",
@@ -79,13 +90,13 @@ def test_force_dry_run_and_apply_preserve_settings_and_remove_old_storage(tmp_pa
     codex_home = tmp_path / "codex"
     data_root = tmp_path / "app/data"
     state_root = tmp_path / "app/state"
-    cache_root = tmp_path / "cache"
+    cache_root = tmp_path / "cache/codex/windows"
     raw_root = tmp_path / "app/raw"
     write_app_state(codex_home)
     write_config(
         config_path,
         {
-            "schema_version": 2,
+            "schema_version": CONFIG_SCHEMA_VERSION,
             "installed_at": "2026-01-01T00:00:00+00:00",
             "codex_home": str(codex_home),
             "context_store_root": str(tmp_path / "legacy"),
@@ -129,23 +140,18 @@ def test_force_dry_run_and_apply_preserve_settings_and_remove_old_storage(tmp_pa
     initialize_application(config_path, overrides=None, force=True, dry_run=False)
 
     saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    assert config_path.read_text(encoding="utf-8").splitlines()[0] == (
-        f'schema_version: "{CONFIG_SCHEMA_VERSION}"'
-    )
+    assert config_path.read_text(encoding="utf-8").splitlines()[0] == (f'schema_version: "{CONFIG_SCHEMA_VERSION}"')
     assert saved["schema_version"] == CONFIG_SCHEMA_VERSION
     assert saved["generation"]["providers"]["codex"]["model"] == "custom-model"
     assert saved["installed_at"] != "2026-01-01T00:00:00+00:00"
     assert "context_store_root" not in saved
     assert "summary_prompt" not in saved
     assert not any((root / "old.txt").exists() for root in (data_root, state_root, cache_root, raw_root))
-    assert (data_root / "codex/windows/projects/local-project/session-notes").is_dir()
-    assert not any((data_root / "codex/windows/projects/local-project/session-notes").iterdir())
-    assert (state_root / "codex/windows/projects/local-project").is_dir()
-    assert not (state_root / "codex/windows/projects/local-project/chat-refresh-state.json").exists()
-    assert all(
-        (root / ROOT_OWNERSHIP_MARKER).is_file()
-        for root in (data_root, state_root, cache_root, raw_root)
-    )
+    assert (data_root / "projects/local-project/session-notes").is_dir()
+    assert not any((data_root / "projects/local-project/session-notes").iterdir())
+    assert (state_root / "projects/local-project").is_dir()
+    assert not (state_root / "projects/local-project/chat-refresh-state.json").exists()
+    assert all((root / ROOT_OWNERSHIP_MARKER).is_file() for root in (data_root, state_root, cache_root, raw_root))
 
 
 def test_init_refuses_existing_storage_without_force(tmp_path: Path) -> None:
@@ -153,13 +159,13 @@ def test_init_refuses_existing_storage_without_force(tmp_path: Path) -> None:
     codex_home = tmp_path / "codex"
     data_root = tmp_path / "app/data"
     state_root = tmp_path / "app/state"
-    cache_root = tmp_path / "cache"
+    cache_root = tmp_path / "cache/codex/windows"
     raw_root = tmp_path / "app/raw"
     write_app_state(codex_home)
     write_config(
         config_path,
         {
-            "chat": {"providers": {"codex": {"home": str(codex_home)}}},
+            "chat": {"providers": {"codex": {"sources": {"windows": {"source_root": str(codex_home)}}}}},
             "data_root": str(data_root),
             "state_root": str(state_root),
             "cache_root": str(cache_root),
@@ -190,14 +196,14 @@ def test_force_rolls_back_storage_and_config_on_failure(
     codex_home = tmp_path / "codex"
     data_root = tmp_path / "app/data"
     state_root = tmp_path / "app/state"
-    cache_root = tmp_path / "cache"
+    cache_root = tmp_path / "cache/codex/windows"
     raw_root = tmp_path / "app/raw"
     write_app_state(codex_home)
     write_config(
         config_path,
         {
             "installed_at": "2026-01-01T00:00:00+00:00",
-            "chat": {"providers": {"codex": {"home": str(codex_home)}}},
+            "chat": {"providers": {"codex": {"sources": {"windows": {"source_root": str(codex_home)}}}}},
             "data_root": str(data_root),
             "state_root": str(state_root),
             "cache_root": str(cache_root),
@@ -236,14 +242,14 @@ def test_force_does_not_delete_storage_when_staging_fails(
     codex_home = tmp_path / "codex"
     data_root = tmp_path / "app/data"
     state_root = tmp_path / "app/state"
-    cache_root = tmp_path / "cache"
+    cache_root = tmp_path / "cache/codex/windows"
     raw_root = tmp_path / "app/raw"
     write_app_state(codex_home)
     write_config(
         config_path,
         {
             "installed_at": "2026-01-01T00:00:00+00:00",
-            "chat": {"providers": {"codex": {"home": str(codex_home)}}},
+            "chat": {"providers": {"codex": {"sources": {"windows": {"source_root": str(codex_home)}}}}},
             "data_root": str(data_root),
             "state_root": str(state_root),
             "cache_root": str(cache_root),
@@ -279,12 +285,12 @@ def test_force_rejects_unowned_nonempty_storage(
 ) -> None:
     config_path = tmp_path / "app/config.yaml"
     codex_home = tmp_path / "codex"
-    roots = (tmp_path / "app/data", tmp_path / "app/state", tmp_path / "cache", tmp_path / "app/raw")
+    roots = (tmp_path / "app/data", tmp_path / "app/state", tmp_path / "cache/codex/windows", tmp_path / "app/raw")
     write_config(
         config_path,
         {
             "installed_at": "2026-01-01T00:00:00+00:00",
-            "chat": {"providers": {"codex": {"home": str(codex_home)}}},
+            "chat": {"providers": {"codex": {"sources": {"windows": {"source_root": str(codex_home)}}}}},
             "data_root": str(roots[0]),
             "state_root": str(roots[1]),
             "cache_root": str(roots[2]),
@@ -310,12 +316,12 @@ def test_adopt_existing_previews_then_marks_roots_without_rebuilding(
 ) -> None:
     config_path = tmp_path / "app/config.yaml"
     codex_home = tmp_path / "codex"
-    roots = (tmp_path / "app/data", tmp_path / "app/state", tmp_path / "cache", tmp_path / "app/raw")
+    roots = (tmp_path / "app/data", tmp_path / "app/state", tmp_path / "cache/codex/windows", tmp_path / "app/raw")
     write_config(
         config_path,
         {
             "installed_at": "2026-01-01T00:00:00+00:00",
-            "chat": {"providers": {"codex": {"home": str(codex_home)}}},
+            "chat": {"providers": {"codex": {"sources": {"windows": {"source_root": str(codex_home)}}}}},
             "data_root": str(roots[0]),
             "state_root": str(roots[1]),
             "cache_root": str(roots[2]),
@@ -384,11 +390,11 @@ def test_adopt_existing_previews_then_marks_roots_without_rebuilding(
 
 def test_adopt_existing_rejects_foreign_marker(tmp_path: Path) -> None:
     config_path = tmp_path / "app/config.yaml"
-    roots = (tmp_path / "app/data", tmp_path / "app/state", tmp_path / "cache", tmp_path / "app/raw")
+    roots = (tmp_path / "app/data", tmp_path / "app/state", tmp_path / "cache/codex/windows", tmp_path / "app/raw")
     write_config(
         config_path,
         {
-            "chat": {"providers": {"codex": {"home": str(tmp_path / "codex")}}},
+            "chat": {"providers": {"codex": {"sources": {"windows": {"source_root": str(tmp_path / "codex")}}}}},
             "data_root": str(roots[0]),
             "state_root": str(roots[1]),
             "cache_root": str(roots[2]),
@@ -429,10 +435,10 @@ def test_force_rejects_unsafe_reset_target(tmp_path: Path, monkeypatch: pytest.M
     write_config(
         config_path,
         {
-            "chat": {"providers": {"codex": {"home": str(home / ".codex")}}},
+            "chat": {"providers": {"codex": {"sources": {"windows": {"source_root": str(home / ".codex")}}}}},
             "data_root": str(home),
             "state_root": str(home / "app/state"),
-            "cache_root": str(home / "cache"),
+            "cache_root": str(home / "cache/codex/windows"),
             "raw_root": str(home / "app/raw"),
         },
     )

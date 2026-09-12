@@ -42,9 +42,11 @@ def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
         choices=("codex", "claude-code", "github-copilot", "ollama"),
         help="Generation provider (generation.active_provider); chat sources use chat.providers",
     )
+    parser.add_argument("--source", help="Select one enabled source_id from chat.providers.<provider>.sources")
     parser.add_argument("--model")
     parser.add_argument(
-        "--session-note-profile", choices=("default-jp", "default-en"),
+        "--session-note-profile",
+        choices=("default-jp", "default-en"),
         help="Session Note language (generation.session_note_profile)",
     )
     parser.add_argument(
@@ -78,7 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="tkn-genai-chat-note",
         description="Preserve local AI chat evidence and generate reusable Session Notes.",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 0.12.0")
+    parser.add_argument("--version", action="version", version="%(prog)s 0.14.0")
     _add_runtime_options(parser)
     commands = parser.add_subparsers(dest="command", required=True)
     config = commands.add_parser("config", help="Create or inspect configuration")
@@ -97,7 +99,13 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--limit", type=int, help="Maximum Session Note generations; remaining work is deferred")
     storage = commands.add_parser("storage", help="Inspect or migrate storage layout")
     migrate = storage.add_subparsers(dest="storage_command", required=True).add_parser(
-        "migrate", help="Copy legacy data into provider/source folders; retain original evidence"
+        "migrate", help="Copy one source store into fresh provider-local roots; retain original evidence"
+    )
+    migrate.add_argument(
+        "--from-config",
+        type=Path,
+        required=True,
+        help="Standalone source config (schema 2-6); --config selects the fresh destination",
     )
     migrate.add_argument("--dry-run", action="store_true", help="Show exact migration files without writing")
     commands.add_parser("status", help="Show last-run coverage and pending work without a live source scan")
@@ -225,7 +233,9 @@ def _progress(value: dict[str, Any]) -> None:
         json.dumps(value, ensure_ascii=False, separators=(",", ":")),
     )
     event_type = value.get("type")
-    if event_type == "thread-start":
+    if event_type == "source-start":
+        LOGGER.info("Source: %s/%s", value["sourceProvider"], value["sourceId"])
+    elif event_type == "thread-start":
         LOGGER.info(
             "Starting thread %s/%s: %s",
             value.get("index", "?"),
@@ -273,6 +283,14 @@ def _progress(value: dict[str, Any]) -> None:
         )
 
 
+def _compact_report(report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: [_compact_report(item) for item in value] if key == "sourceResults" else value
+        for key, value in report.items()
+        if key not in {"threads", "rawIngest"}
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     _utf8_console()
     args = build_parser().parse_args(argv)
@@ -315,15 +333,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "command": "config show",
                     "config": config_document(resolved),
                     "storage": {
-                        "layoutVersion": 3,
+                        "layoutVersion": 5,
                         "sourceRoots": {
                             provider: {
-                                kind: str(path) for kind, path in resolved.source_storage_paths(provider).items()
+                                source_id: {
+                                    **{
+                                        kind: str(path)
+                                        for kind, path in resolved.source_storage_paths(provider, source_id).items()
+                                    },
+                                    "catalog": str(
+                                        resolved.source_storage_paths(provider, source_id)["data"] / "catalog"
+                                    ),
+                                    "provenance": str(
+                                        resolved.source_storage_paths(provider, source_id)["data"] / "provenance"
+                                    ),
+                                }
+                                for source_id in group.sources
                             }
-                            for provider in resolved.chat.providers.entries()
+                            for provider, group in resolved.chat.providers.entries().items()
                         },
-                        "sharedCatalog": str(resolved.data_root / "catalog"),
-                        "sharedProvenance": str(resolved.data_root / "provenance"),
                     },
                     "configSchema": {
                         "effectiveVersion": resolution.effective_schema_version,
@@ -359,15 +387,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .pipeline import pipeline_status, run_pipeline
 
         config = load_app_config(explicit_path=args.config, overrides=_overrides(args))
+        if args.source is not None:
+            selected = config.enabled_source_configs(args.source)
+            config = selected[0]
         if args.command == "provenance":
             from .provenance import validate_provenance
 
-            _emit(validate_provenance(config.data_root))
+            results = [
+                {
+                    **validate_provenance(source.data_root),
+                    "sourceProvider": source.source_provider,
+                    "sourceId": source.source_id,
+                }
+                for source in config.enabled_source_configs()
+            ]
+            _emit(
+                results[0]
+                if len(results) == 1
+                else {"ok": all(result["ok"] for result in results), "sourceResults": results}
+            )
             return 0
         if args.command == "storage":
             from .storage_migration import migrate_storage
 
-            _emit(migrate_storage(config, dry_run=args.dry_run, config_path=args.config))
+            _emit(migrate_storage(config, from_config=args.from_config, dry_run=args.dry_run, config_path=args.config))
             return 0
         if args.command == "status":
             _emit(pipeline_status(config))
@@ -391,16 +434,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             config_path=args.config,
             progress=_progress,
         )
+        for report_path in report.get("reportPaths", []):
+            LOGGER.info("Run report: %s", report_path)
         if report.get("reportPath"):
             LOGGER.info("Run report: %s", report["reportPath"])
         LOGGER.info("Thread states: %s", report["threadCounts"])
         for warning in report.get("warnings", []):
             LOGGER.warning("%s", warning)
-        _emit(
-            report
-            if args.full_output
-            else {key: value for key, value in report.items() if key not in {"threads", "rawIngest"}}
-        )
+        _emit(report if args.full_output else _compact_report(report))
         failed = bool(report["failed"] or report["threadCounts"].get("failed"))
         if failed:
             LOGGER.error("Pipeline has failures; inspect the report and retry after resolving them")

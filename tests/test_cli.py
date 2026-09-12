@@ -341,11 +341,14 @@ def test_future_chat_provider_can_be_inspected_but_not_processed(
 
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "user"))
     target = tmp_path / "config.yaml"
-    write_yaml(target, {"chat": {"providers": {provider: {"enabled": True}}}})
+    write_yaml(
+        target,
+        {"chat": {"providers": {provider: {"sources": {"windows": {"enabled": True, "source_root": "~/source"}}}}}},
+    )
     assert main(["--config", str(target), "config", "show"]) == 0
     output = json.loads(capsys.readouterr().out)
-    assert output["config"]["chat"]["providers"][provider]["enabled"] is True
-    assert output["sources"][f"chat.providers.{provider}.enabled"].startswith("explicit:")
+    assert output["config"]["chat"]["providers"][provider]["sources"]["windows"]["enabled"] is True
+    assert output["sources"][f"chat.providers.{provider}.sources.windows.enabled"].startswith("explicit:")
     assert main(["--config", str(target), "raw", "ingest", "--dry-run"]) == 1
     assert "chat acquisition is not implemented" in json.loads(capsys.readouterr().out)["error"]
     assert not (tmp_path / "user").exists()

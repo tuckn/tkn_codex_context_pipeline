@@ -20,10 +20,22 @@ from tkn_genai_chat_note.storage import pipeline_storage
 
 def config_for(tmp_path: Path) -> AppConfig:
     return AppConfig(
-        chat=ChatConfig.model_validate({"providers": {"codex": {"home": tmp_path / "codex"}}}),
-        raw_root=tmp_path / "raw",
-        data_root=tmp_path / "data",
-        state_root=tmp_path / "state",
+        chat=ChatConfig.model_validate(
+            {
+                "providers": {
+                    "codex": {
+                        "sources": {
+                            "windows": {
+                                "source_root": tmp_path / "codex",
+                                "raw_root": tmp_path / "raw",
+                                "data_root": tmp_path / "data",
+                                "state_root": tmp_path / "state",
+                            }
+                        }
+                    }
+                }
+            }
+        ),
         cache_root=tmp_path / "cache",
         idle_minutes=0,
     )
@@ -261,7 +273,7 @@ def test_append_and_missing_note_preserve_id_and_evidence(tmp_path: Path) -> Non
     write_chat(original, thread_id="one", cwd=tmp_path)
     first = execute(config)
     identity = first["threads"][0]["noteId"]
-    capture = config.raw_root / first["threads"][0]["sourceCaptureRef"].removeprefix("raw:/")
+    capture = config.raw_root / first["threads"][0]["sourceCaptureRef"].removeprefix(f"raw:/codex/{config.source_id}/")
     original_bytes = capture.read_bytes()
     append_turn(original)
     second = execute(config, "pull")
@@ -334,7 +346,7 @@ def test_corrupted_raw_is_repaired_from_available_original(tmp_path: Path) -> No
     config = config_for(tmp_path)
     write_chat(config.sessions_root / "one.jsonl", thread_id="one", cwd=tmp_path)
     first = execute(config)
-    capture = config.raw_root / first["threads"][0]["sourceCaptureRef"].removeprefix("raw:/")
+    capture = config.raw_root / first["threads"][0]["sourceCaptureRef"].removeprefix(f"raw:/codex/{config.source_id}/")
     capture.write_bytes(b"corrupted")
     second = execute(config, "pull")
     assert second["complete"] and second["ok"]
@@ -455,7 +467,7 @@ def test_unavailable_chat_source_stops_before_any_writes(
     tmp_path: Path, provider: str, mode: str, dry_run: bool
 ) -> None:
     config = config_for(tmp_path)
-    config.chat.providers.entries()[provider].enabled = provider != "codex"
+    next(iter(config.chat.providers.entries()[provider].sources.values())).enabled = provider != "codex"
     message = "no supported chat source" if provider == "codex" else "chat acquisition is not implemented"
     before = {str(path): path.read_bytes() if path.is_file() else None for path in tmp_path.rglob("*")}
     with pytest.raises(PipelineError, match=message):

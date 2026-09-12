@@ -66,14 +66,14 @@ def observe_app_state(
     try:
         content = _stable_source_bytes(config.app_state_path)
         digest = sha256(content).hexdigest()
-        relative = f"{config.source_provider}/{config.source_id}/metadata/{digest}.json"
+        relative = f"metadata/{digest}.json"
         capture = config.raw_root / relative
         if not provenance.dry_run:
             immutable_bytes(capture, content)
         entity = provenance.entity(
             content,
             identity=f"codex-app-state:{config.source_id}:{digest}",
-            ref="raw:/" + relative,
+            ref=f"raw:/{config.source_provider}/{config.source_id}/" + relative,
             kind="sourceMetadata",
         )
         try:

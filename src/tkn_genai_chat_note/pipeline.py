@@ -15,6 +15,7 @@ from .catalog import CATALOG_SCHEMA_VERSION, Discovery, capture_sources, discove
 from .config import AppConfig
 from .frontmatter import parse_simple_frontmatter
 from .provenance import ProvenanceStore, json_bytes
+from .raw_capture import RawCaptureError
 from .session_notes import (
     Candidate,
     PipelineConfig,
@@ -68,7 +69,7 @@ def _agent(config: PipelineConfig, stage: str) -> dict[str, Any]:
     profile = config.summary_profile
     return {
         "software": "tkn-genai-chat-note-pipeline",
-        "version": "0.12.0",
+        "version": "0.14.0",
         "provider": config.provider,
         "model": config.model,
         "reasoningEffort": config.reasoning_effort,
@@ -104,7 +105,7 @@ def _notes(
     limit: int | None,
     summarizer: Summarizer | None,
     progress: Progress | None,
-) -> None:
+) -> int:
     attempted = 0
     if thread_id and thread_id not in {entry["threadId"] for entry in discovery.entries}:
         raise PipelineError(f"unknown thread ID: {thread_id}")
@@ -248,9 +249,10 @@ def _notes(
                 )
         finally:
             _save_ledger(config, ledger, provenance.dry_run)
+    return attempted
 
 
-def run_pipeline(
+def _run_source_pipeline(
     config: AppConfig,
     *,
     mode: str,
@@ -262,16 +264,19 @@ def run_pipeline(
     config_path: Path | None = None,
     summarizer: Summarizer | None = None,
     progress: Progress | None = None,
+    deadline: datetime | None = None,
 ) -> dict[str, Any]:
     if mode not in {"clone", "pull", "raw", "session-notes"}:
         raise PipelineError(f"unknown pipeline mode: {mode}")
-    if limit is not None and limit <= 0:
+    if limit is not None and limit < 0:
         raise PipelineError("limit must be positive")
     run_id = str(uuid4())
     started = now_local()
-    deadline = started + timedelta(minutes=config.runtime_minutes)
+    deadline = deadline or started + timedelta(minutes=config.runtime_minutes)
     report: dict[str, Any] = {
         "schemaVersion": 2,
+        "sourceProvider": config.source_provider,
+        "sourceId": config.source_id,
         "runId": run_id,
         "mode": mode,
         "dryRun": dry_run,
@@ -299,6 +304,7 @@ def run_pipeline(
                 threadCounts={},
                 threads=[],
                 generatedSessionNoteCount=0,
+                attemptedSessionNoteCount=0,
                 finishedAt=now_iso(),
             )
             if not dry_run:
@@ -312,7 +318,7 @@ def run_pipeline(
         report.update(rawIngest=discovery.raw_report, warnings=discovery.warnings)
         report["failed"].extend(discovery.failures)
         pipeline_config = config.session_note_pipeline_config(allow_missing_watermark=True)
-        _notes(
+        report["attemptedSessionNoteCount"] = _notes(
             config,
             pipeline_config,
             discovery,
@@ -369,12 +375,17 @@ def run_pipeline(
                     if path.is_file():
                         artifacts.append(
                             {
-                                **provenance.artifact(path), "status": entry["status"], "threadKey": entry["threadKey"],
-                                "sourceProvider": config.source_provider, "sourceId": config.source_id,
+                                **provenance.artifact(path),
+                                "status": entry["status"],
+                                "threadKey": entry["threadKey"],
+                                "sourceProvider": config.source_provider,
+                                "sourceId": config.source_id,
                             }
                         )
             provenance.publish_index(
-                artifacts, run_id=run_id, complete=report["complete"],
+                artifacts,
+                run_id=run_id,
+                complete=report["complete"],
                 source=(config.source_provider, config.source_id),
             )
             report_path = config.reports_root / f"{run_id}.json"
@@ -384,7 +395,7 @@ def run_pipeline(
     return report
 
 
-def pipeline_status(config: AppConfig) -> dict[str, Any]:
+def _source_status(config: AppConfig) -> dict[str, Any]:
     last = read_json(config.source_state_root / "last-run.json")
     return {
         "initialized": (config.source_state_root / "pipeline.json").is_file(),
@@ -398,4 +409,138 @@ def pipeline_status(config: AppConfig) -> dict[str, Any]:
         "threadCounts": last.get("threadCounts", {}),
         "reportPath": last.get("reportPath"),
         "liveSourceScan": False,
+    }
+
+
+def run_pipeline(
+    config: AppConfig,
+    *,
+    mode: str,
+    dry_run: bool = False,
+    force: bool = False,
+    allow_edited: bool = False,
+    thread_id: str | None = None,
+    limit: int | None = None,
+    config_path: Path | None = None,
+    summarizer: Summarizer | None = None,
+    progress: Progress | None = None,
+    source_id: str | None = None,
+) -> dict[str, Any]:
+    """Run enabled sources in map order with one invocation-wide generation budget."""
+    if mode not in {"clone", "pull", "raw", "session-notes"}:
+        raise PipelineError(f"unknown pipeline mode: {mode}")
+    if limit is not None and limit <= 0:
+        raise PipelineError("limit must be positive")
+    sources = config.enabled_source_configs(source_id)
+    if thread_id is not None and len(sources) != 1:
+        raise PipelineError("--thread-id with multiple sources requires --source <source_id>")
+    # Validate every destination before the first one creates files or calls AI.
+    for source in sources:
+        with pipeline_storage(source, initialize=mode in {"clone", "raw"}, dry_run=True, config_path=config_path):
+            pass
+    started = now_local()
+    deadline = started + timedelta(minutes=config.runtime_minutes)
+    remaining = limit
+    reports: list[dict[str, Any]] = []
+    for source in sources:
+        identity = {"sourceProvider": source.source_provider, "sourceId": source.source_id}
+        started_attempts = 0
+
+        def source_progress(event: dict[str, Any], identity: dict[str, str] = identity) -> None:
+            nonlocal started_attempts
+            if event.get("type") == "thread-start":
+                started_attempts += 1
+            if progress is not None:
+                progress({**event, **identity})
+
+        source_progress({"type": "source-start"})
+        try:
+            report = _run_source_pipeline(
+                source,
+                mode=mode,
+                dry_run=dry_run,
+                force=force,
+                allow_edited=allow_edited,
+                thread_id=thread_id,
+                limit=remaining,
+                config_path=config_path,
+                summarizer=summarizer,
+                progress=source_progress,
+                deadline=deadline,
+            )
+        except (PipelineError, RawCaptureError, OSError, ValueError) as exc:
+            if len(sources) == 1:
+                raise
+            report = {
+                "schemaVersion": 2,
+                "runId": str(uuid4()),
+                "mode": mode,
+                "dryRun": dry_run,
+                "startedAt": started.isoformat(),
+                "finishedAt": now_iso(),
+                **identity,
+                "ok": False,
+                "complete": False,
+                "error": str(exc),
+                "failed": [{**identity, "error": str(exc)}],
+                "threadCounts": {},
+                "threads": [],
+                "generatedSessionNoteCount": 0,
+                "attemptedSessionNoteCount": started_attempts,
+                "reportPath": None,
+            }
+            if not dry_run and (source.state_root / "pipeline.json").is_file():
+                try:
+                    with pipeline_storage(source, initialize=False, dry_run=False, config_path=config_path):
+                        report_path = source.reports_root / f"{report['runId']}.json"
+                        report["reportPath"] = str(report_path)
+                        atomic_write_json(report_path, report)
+                        atomic_write_json(source.state_root / "last-run.json", report)
+                except (PipelineError, OSError, ValueError) as save_error:
+                    report["reportPath"] = None
+                    report["warnings"] = [f"Could not persist source failure report: {save_error}"]
+        reports.append(report)
+        if remaining is not None:
+            remaining = max(0, remaining - report["attemptedSessionNoteCount"])
+    if len(reports) == 1:
+        return reports[0]
+    counts: Counter[str] = Counter()
+    for report in reports:
+        counts.update(report["threadCounts"])
+    return {
+        "schemaVersion": 3,
+        "mode": mode,
+        "dryRun": dry_run,
+        "startedAt": started.isoformat(),
+        "finishedAt": now_iso(),
+        "ok": all(report["ok"] for report in reports),
+        "complete": all(report["complete"] for report in reports),
+        "sourceResults": reports,
+        "threadCounts": dict(counts),
+        "generatedSessionNoteCount": sum(report["generatedSessionNoteCount"] for report in reports),
+        "attemptedSessionNoteCount": sum(report["attemptedSessionNoteCount"] for report in reports),
+        "failed": [
+            {**failure, "sourceProvider": report["sourceProvider"], "sourceId": report["sourceId"]}
+            for report in reports
+            for failure in report["failed"]
+        ],
+        "warnings": [
+            f"{report['sourceProvider']}/{report['sourceId']}: {warning}"
+            for report in reports
+            for warning in report.get("warnings", [])
+        ],
+        "reportPaths": [report["reportPath"] for report in reports if report.get("reportPath")],
+    }
+
+
+def pipeline_status(config: AppConfig, *, source_id: str | None = None) -> dict[str, Any]:
+    results = [_source_status(source) for source in config.enabled_source_configs(source_id)]
+    if len(results) == 1:
+        return results[0]
+    return {
+        "sourceResults": results,
+        "liveSourceScan": False,
+        "initialized": all(result["initialized"] for result in results),
+        "migrationRequired": any(result["migrationRequired"] for result in results),
+        "complete": all(result["complete"] for result in results),
     }

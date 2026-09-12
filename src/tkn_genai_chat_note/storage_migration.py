@@ -1,22 +1,24 @@
-"""Explicit, copy-based migration from storage v2/v3 to Session Note storage v4.
+"""Explicit, copy-based migration into independent source stores (storage 5).
 
 Original Raw, notes, canonical files, and immutable provenance stay readable.
 Only mutable catalogs/state locators are rewritten; old notes keep their bytes.
 """
+
 from __future__ import annotations
 
 import json
 import re
 from contextlib import ExitStack
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from .config import AppConfig
+from .config import AppConfig, _read_layer, _resolve_paths, default_app_root
 from .initialization import ROOT_KINDS, ROOT_OWNERSHIP_MARKER, _ownership_marker_document
-from .raw_capture import _mirror_relative
-from .session_notes import PipelineError, atomic_write_bytes, now_iso
+from .provenance import validate_provenance
+from .raw_capture import SOURCE_ID_PATTERN, _mirror_relative
+from .session_notes import PipelineError, atomic_write_bytes
 from .storage import STORAGE_VERSION, _root_lock, read_json, validate_storage
 
 
@@ -64,340 +66,478 @@ def _files(path: Path, root: Path) -> list[Path]:
     return result
 
 
-def _rewrite(value: Any, config: AppConfig) -> Any:
-    if isinstance(value, list):
-        return [_rewrite(item, config) for item in value]
+@dataclass(frozen=True)
+class SourceStore:
+    provider: str
+    source_id: str
+    raw: Path
+    data: Path
+    state: Path
+    public: Path
+    version: int
+    metadata: dict[str, Any]
+    config_path: Path
+    protected_roots: tuple[Path, ...] = ()
+
+
+def _source_store(path: Path, source_id: str | None = None) -> SourceStore:
+    try:
+        return _read_source_store(path, source_id)
+    except (TypeError, ValueError, AttributeError, KeyError) as exc:
+        raise PipelineError(f"invalid migration source configuration: {exc}") from exc
+
+
+def _read_source_store(path: Path, selected_id: str | None = None) -> SourceStore:
+    path = path.expanduser().resolve()
+    document = _read_layer(path)
+    version = str(document.pop("schema_version", ""))
+    for field in ("raw_root", "data_root", "state_root", "cache_root", "codex_home"):
+        if field in document and (not isinstance(document[field], str) or not document[field].strip()):
+            raise ValueError(f"{field} must be a non-empty path string")
+    if "source_id" in document and not isinstance(document["source_id"], str):
+        raise ValueError("source_id must be a string")
+    if not re.fullmatch(r"(?:2|[2-6]\.[0-9]+\.[0-9]+)", version):
+        raise PipelineError("migration source requires a standalone schema-2/3/4/5/6 configuration")
+    major, minor = (2, 0) if version == "2" else tuple(int(part) for part in version.split(".")[:2])
+    if minor > {2: 2, 3: 0, 4: 1, 5: 0, 6: 0}[major]:
+        raise PipelineError("unsupported migration source config version")
+    if major in {5, 6}:
+        if version.split(".")[1] != "0":
+            raise PipelineError("unsupported migration source config version")
+        if major == 5:
+            for provider, settings in document.get("chat", {}).get("providers", {}).items():
+                identity = settings.pop("source_id", "windows" if provider == "codex" else "windows-" + provider)
+                if "home" in settings:
+                    settings["source_root"] = settings.pop("home")
+                document["chat"]["providers"][provider] = {"sources": {identity: settings}}
+        config = AppConfig.model_validate(_resolve_paths(document, path.parent))
+        if selected_id is not None:
+            config = config.for_source("codex", selected_id)
+        metadata = read_json(config.state_root / "pipeline.json")
+        if metadata.get("storageVersion") != STORAGE_VERSION:
+            raise PipelineError("source config 5/6 requires a completed storage-5 store")
+        receipt = read_json(config.state_root / "migration.json")
+        if receipt and receipt.get("status") != "complete":
+            raise PipelineError("source store migration is incomplete")
+        validate_storage(config, path)
+        return SourceStore(
+            "codex",
+            config.source_id,
+            config.raw_root,
+            config.data_root,
+            config.state_root,
+            config.data_root,
+            STORAGE_VERSION,
+            metadata,
+            path,
+        )
+    # This reader is intentionally standalone: destination/global layers cannot redirect the source.
+    resolved = _resolve_paths(document, path.parent)
+    chat = resolved.get("chat", {}).get("providers", {}).get("codex", {})
+    source_id = str(chat.get("source_id") or resolved.get("source_id") or "windows")
+    if not SOURCE_ID_PATTERN.fullmatch(source_id):
+        raise PipelineError("unsafe source_id in migration source")
+    roots = {kind: Path(resolved.get(kind + "_root") or default_app_root() / kind) for kind in ("raw", "data", "state")}
+    scoped_state = roots["state"] / "codex" / source_id
+    metadata = read_json(scoped_state / "pipeline.json")
+    if metadata:
+        storage = metadata.get("storageVersion")
+        if storage not in {3, 4}:
+            raise PipelineError("legacy source namespace requires storage 3 or 4")
+        raw = roots["raw"] / "codex" / source_id
+        data = roots["data"] / "codex" / source_id
+        state = scoped_state
+    else:
+        metadata = read_json(roots["state"] / "pipeline.json")
+        storage = metadata.get("storageVersion", 2)
+        if storage != 2:
+            raise PipelineError("select the source_id of the legacy store before migration")
+        raw, data, state = roots["raw"] / source_id, roots["data"], roots["state"]
+    if metadata and (metadata.get("sourceId") != source_id or metadata.get("sourceProvider", "codex") != "codex"):
+        raise PipelineError("source configuration and storage identity differ")
+    if not metadata and not (raw / "manifest.jsonl").is_file():
+        raise PipelineError("no source pipeline metadata or Raw manifest was found")
+    return SourceStore(
+        "codex", source_id, raw, data, state, roots["data"], int(storage), metadata, path, tuple(roots.values())
+    )
+
+
+def _local_ref(value: str, source: SourceStore) -> str:
+    if source.version >= 3:
+        prefix = f"data:/{source.provider}/{source.source_id}/"
+        if value.startswith(prefix):
+            value = "data:/" + value[len(prefix) :]
+    if value.startswith("data:/thread-notes/"):
+        value = "data:/session-notes/" + value[len("data:/thread-notes/") :]
+    return value
+
+
+def _state_value(value: Any, source: SourceStore, config: AppConfig) -> Any:
     if isinstance(value, dict):
-        return {key: _rewrite(item, config) for key, item in value.items()}
+        return {
+            key.replace("threadNote", "sessionNote").replace("ThreadNote", "SessionNote"): (
+                str(config.sessions_root) if key == "sourceRoot" else _state_value(item, source, config)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_state_value(item, source, config) for item in value]
     if not isinstance(value, str):
         return value
-    prefix = f"{config.source_provider}/{config.source_id}/"
-    pairs = [(f"raw:/{config.source_id}/", f"raw:/{prefix}")]
-    for kind in ("thread-notes", "source-aligned", "threads", "projects"):
-        pairs.append((f"data:/{kind}/", f"data:/{prefix}{kind}/"))
-    for old, new in (
-        (config.data_root / "thread-notes", config.source_data_root / "thread-notes"),
-        (config.data_root / "source-aligned", config.source_data_root / "source-aligned"),
-        (config.data_root / "projects", config.source_data_root / "projects"),
-        (config.state_root / "threads", config.source_state_root / "threads"),
-        (config.state_root / "reports", config.source_state_root / "reports"),
-        (config.state_root / "projects", config.source_state_root / "projects"),
-    ):
-        for old_text, new_text in ((str(old), str(new)), (old.as_posix(), new.as_posix())):
-            if value == old_text:
-                return new_text
-            separator = "\\" if "\\" in old_text else "/"
-            pairs.append((old_text + separator, new_text + separator))
-    for old_text, new_text in pairs:
-        if value.startswith(old_text):
-            return new_text + value[len(old_text):]
+    value = _local_ref(value, source)
+    if source.version == 2 and value.startswith(f"raw:/{source.source_id}/"):
+        value = f"raw:/{source.provider}/{source.source_id}/" + value[len(f"raw:/{source.source_id}/") :]
+    for old, new in ((source.raw, config.raw_root), (source.data, config.data_root), (source.state, config.state_root)):
+        for before, after in ((str(old), str(new)), (old.as_posix(), new.as_posix())):
+            if value == before or value.startswith((before + "/", before + "\\")):
+                value = after + value[len(before) :]
+                return value.replace("thread-notes", "session-notes")
     return value
 
 
-def _manifest(content: bytes, config: AppConfig) -> bytes:
-    records = []
-    for line in content.decode("utf-8-sig").splitlines():
-        if not line.strip():
-            continue
-        record = json.loads(line)
-        if not isinstance(record, dict):
-            raise PipelineError("legacy Raw manifest records must be objects")
-        version = record.get("schemaVersion")
-        if version not in {1, 2} or record.get("sourceId") != config.source_id:
-            raise PipelineError("migration requires a schema-1/2 Raw manifest for the configured source_id")
-        digest = str(record.get("sha256") or "")
-        from .raw_capture import SOURCE_ID_PATTERN
+def _plan_source(source: SourceStore, config: AppConfig) -> list[MigrationFile]:
+    try:
+        return _build_source_plan(source, config)
+    except (TypeError, ValueError, AttributeError, KeyError) as exc:
+        raise PipelineError(f"invalid migration source data: {exc}") from exc
 
-        if len(digest) != 64 or not all(character in "0123456789abcdef" for character in digest):
-            raise PipelineError("invalid legacy Raw digest")
-        if not SOURCE_ID_PATTERN.fullmatch(config.source_id):
-            raise PipelineError("unsafe source_id")
-        relative = (
-            f"sha256/{digest[:2]}/{digest}.jsonl" if version == 1
-            else _mirror_relative(str(record.get("sourceRef") or ""))
+
+def _build_source_plan(source: SourceStore, config: AppConfig) -> list[MigrationFile]:
+    if (source.provider, source.source_id) != (config.source_provider, config.source_id):
+        raise PipelineError("migration source and destination must retain provider and source_id")
+    operations: dict[Path, MigrationFile] = {}
+
+    def add(path: Path, root: Path, destination: Path, output: bytes | None = None) -> None:
+        _safe_path(path, root)
+        content = path.read_bytes()
+        operation = MigrationFile(destination, path, sha256(content).hexdigest(), output)
+        prior = operations.get(destination)
+        if prior is not None and prior.content() != operation.content():
+            raise PipelineError(f"migration destinations conflict: {destination}")
+        operations[destination] = operation
+
+    # Copy all source-local payloads. Legacy shared data is limited to the source-owned kinds.
+    for path in _files(source.raw, source.raw):
+        if path.name not in {ROOT_OWNERSHIP_MARKER, ".pipeline.lock"}:
+            add(path, source.raw, config.raw_root / path.relative_to(source.raw))
+    groups = ("session-notes", "thread-notes", "source-aligned", "threads", "projects", "project-registry.jsonl")
+    for name in groups:
+        for path in _files(source.data / name, source.data):
+            relative = path.relative_to(source.data)
+            relative = Path(*(part.replace("thread-notes", "session-notes") for part in relative.parts))
+            add(path, source.data, config.data_root / relative)
+    for path in _files(source.state, source.state):
+        if path.name in {ROOT_OWNERSHIP_MARKER, ".pipeline.lock", "pipeline.json", "migration.json"}:
+            continue
+        # Historical migration backups are evidence, not mutable checkpoints.
+        output = None
+        if path.suffix == ".json" and "migrations" not in path.relative_to(source.state).parts:
+            output = _json(_state_value(read_json(path), source, config))
+        add(path, source.state, config.state_root / path.relative_to(source.state), output)
+
+    manifest = source.raw / "manifest.jsonl"
+    if manifest.is_file():
+        records = []
+        for line in manifest.read_text(encoding="utf-8-sig").splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            digest = str(record.get("sha256") or "")
+            if record.get("sourceId") != source.source_id or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise PipelineError("invalid Raw manifest identity/hash")
+            schema = record.get("schemaVersion")
+            if schema not in {1, 2, 3} or record.get("sourceProvider", "codex") != source.provider:
+                raise PipelineError("unsupported Raw manifest schema/provider")
+            raw_relative = (
+                f"sha256/{digest[:2]}/{digest}.jsonl"
+                if schema == 1
+                else _mirror_relative(str(record.get("sourceRef") or ""))
+            )
+            expected_refs = {f"raw:/{source.provider}/{source.source_id}/{raw_relative}"}
+            if schema in {1, 2}:
+                expected_refs.add(f"raw:/{source.source_id}/{raw_relative}")
+            if record.get("captureRef") not in expected_refs:
+                raise PipelineError("Raw manifest capture reference differs from its source identity/path")
+            raw = source.raw / raw_relative
+            _safe_path(raw, source.raw)
+            content = raw.read_bytes()
+            if sha256(content).hexdigest() != digest or len(content) != record.get("byteCount"):
+                raise PipelineError(f"Raw capture hash/size mismatch: {raw}")
+            records.append(
+                {
+                    **record,
+                    "schemaVersion": 1 if schema == 1 else 3,
+                    "sourceProvider": source.provider,
+                    "captureRef": f"raw:/{source.provider}/{source.source_id}/{raw_relative}",
+                }
+            )
+        manifest_text = "".join(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n" for row in records)
+        operations.pop(config.raw_root / "manifest.jsonl", None)
+        add(manifest, source.raw, config.raw_root / "manifest.jsonl", manifest_text.encode())
+
+    def belongs(item: dict[str, Any]) -> bool:
+        return (item.get("sourceProvider", source.provider), item.get("sourceId", source.source_id)) == (
+            source.provider,
+            source.source_id,
         )
-        old_ref = f"raw:/{config.source_id}/{relative}"
-        if record.get("captureRef") != old_ref:
-            raise PipelineError("legacy Raw capture reference does not match its manifest")
-        captured = config.raw_root / config.source_id / relative
-        _safe_path(captured, config.raw_root)
-        if not captured.is_file():
-            raise PipelineError(f"legacy Raw capture is missing: {captured}")
-        raw = captured.read_bytes()
-        if sha256(raw).hexdigest() != digest or len(raw) != record.get("byteCount"):
-            raise PipelineError(f"legacy Raw capture hash/size mismatch: {captured}")
-        records.append({
-            **record, "schemaVersion": 1 if version == 1 else 3,
-            "sourceProvider": config.source_provider,
-            "captureRef": f"raw:/{config.source_provider}/{config.source_id}/{relative}",
-        })
-    return "".join(
-        json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n" for record in records
-    ).encode("utf-8")
 
+    catalog_path = source.public / "catalog/threads.json"
+    catalog = read_json(catalog_path)
+    rows: list[dict[str, Any]] = []
+    if catalog:
+        rows = [
+            {**_state_value(row, source, config), "sourceProvider": source.provider, "sourceId": source.source_id}
+            for row in catalog.get("threads", [])
+            if belongs(row)
+        ]
+        add(catalog_path, source.public, config.data_root / "catalog/threads.json", _json({**catalog, "threads": rows}))
+    index_path = source.public / "provenance/index.json"
+    index = read_json(index_path)
+    if index:
+        artifacts = [item for item in index.get("artifacts", []) if belongs(item)]
+        identities = {item["id"] for item in artifacts}
+        entities: dict[str, dict[str, Any]] = {}
+        activity_refs: list[str] = []
 
-def _plan_v2(config: AppConfig) -> tuple[list[MigrationFile], bool]:
-    legacy_path = config.state_root / "pipeline.json"
-    _safe_path(legacy_path, config.state_root)
-    legacy = read_json(legacy_path)
-    current = read_json(config.source_state_root / "pipeline.json")
-    if current:
-        if current.get("storageVersion") != STORAGE_VERSION or current.get("sourceId") != config.source_id:
-            raise PipelineError("destination namespace has incompatible storage metadata")
-        if current.get("sourceProvider") != config.source_provider:
-            raise PipelineError("destination namespace has a different provider")
-        if not legacy or legacy.get("layout") == "provider-source":
-            return [], True
-    if legacy and legacy.get("layout") == "provider-source":
-        return [], False
-    if legacy and (legacy.get("storageVersion") != 2 or legacy.get("sourceId") != config.source_id):
-        raise PipelineError("select the source_id of the legacy schema-2 store before migration")
-    raw_manifest = config.raw_root / config.source_id / "manifest.jsonl"
-    if not legacy and not raw_manifest.exists():
-        if any((config.data_root / name).exists() for name in ("thread-notes", "project-registry.jsonl")):
-            raise PipelineError("cannot infer legacy data ownership without schema-2 pipeline metadata")
-        return [], False
-    if not legacy and any((config.data_root / name).exists() for name in ("thread-notes", "source-aligned")):
-        raise PipelineError("cannot migrate legacy data without its pipeline metadata")
-    operations = []
+        def source_ref(ref: str) -> bool:
+            prefixes = (f"raw:/{source.provider}/{source.source_id}/", f"data:/{source.provider}/{source.source_id}/")
+            return source.version == 2 or source.version == 5 or ref.startswith(prefixes)
 
-    def add(source: Path, destination: Path, output: bytes | None = None, *, replace: bool = False) -> None:
-        content = source.read_bytes()
-        operations.append(MigrationFile(destination, source, sha256(content).hexdigest(), output, replace))
+        def retain_entity(entity: dict[str, Any]) -> None:
+            key = sha256(f"{entity['id']}\0{entity['sha256']}".encode()).hexdigest()
+            entities[key] = entity
 
-    groups = [
-        (config.raw_root / config.source_id, config.source_raw_root, config.raw_root, "raw"),
-        *[(config.data_root / name, config.source_data_root / name, config.data_root, "data")
-          for name in ("thread-notes", "source-aligned", "threads", "projects", "project-registry.jsonl")],
-        *[(config.state_root / name, config.source_state_root / name, config.state_root, "state")
-          for name in ("threads", "normalization", "reports", "ledger.json", "last-run.json", "projects")],
-        *[(config.cache_root / name, config.source_cache_root / name, config.cache_root, "cache")
-          for name in ("pending", "rebuild", "runs")],
-    ]
-    for old, new, root, kind in groups:
-        for source in _files(old, root):
-            destination = new / source.relative_to(old) if old.is_dir() else new
-            output = None
-            if source == raw_manifest:
-                output = _manifest(source.read_bytes(), config)
-            elif kind in {"state", "cache"} and source.suffix == ".json":
-                output = _json(_rewrite(read_json(source), config))
-            add(source, destination, output)
-    backup = config.source_state_root / "migrations" / "storage-v2-backup"
-    for relative in ("catalog/threads.json", "provenance/index.json"):
-        source = config.data_root / relative
-        if not source.is_file():
-            continue
-        _safe_path(source, config.data_root)
-        saved = backup / relative
-        _safe_path(saved, config.state_root)
-        original = saved.read_bytes() if saved.is_file() else source.read_bytes()
-        value = json.loads(original.decode("utf-8-sig"))
-        items_key = "threads" if relative.startswith("catalog/") else "artifacts"
-        for item in value.get(items_key, []):
-            if item.get("sourceProvider", config.source_provider) != config.source_provider:
-                raise PipelineError("legacy catalog contains another provider")
-            if item.get("sourceId", config.source_id) != config.source_id:
-                raise PipelineError("legacy catalog contains another source")
-            item.update(sourceProvider=config.source_provider, sourceId=config.source_id)
-        if items_key == "artifacts":
-            value["sourceRuns"] = {
-                f"{config.source_provider}/{config.source_id}": bool(value.get("pipelineComplete", False))
+        for item in artifacts:
+            retain_entity(item)
+        for path in _files(source.public / "provenance/activities", source.public):
+            value = read_json(path)
+            used_generated = [*value.get("used", []), *value.get("generated", [])]
+            if not any(
+                source_ref(str(entity.get("ref", ""))) or entity.get("id") in identities for entity in used_generated
+            ):
+                continue
+            add(path, source.public, config.data_root / path.relative_to(source.public))
+            activity_refs.append("data:/" + path.relative_to(source.public).as_posix())
+            for entity in used_generated:
+                retain_entity(entity)
+        for path in _files(source.public / "provenance/entities", source.public):
+            entity = read_json(path)
+            if source_ref(str(entity.get("ref", ""))) or entity.get("id") in identities:
+                retain_entity(entity)
+        for key, entity in entities.items():
+            path = source.public / "provenance/entities" / (key + ".json")
+            if not path.is_file():
+                raise PipelineError(f"missing evidence entity record: {path}")
+            add(path, source.public, config.data_root / path.relative_to(source.public))
+            ref = str(entity.get("snapshotRef", ""))
+            if not ref.startswith("data:/provenance/blobs/"):
+                raise PipelineError("unsupported evidence snapshot reference")
+            blob = source.public / ref.removeprefix("data:/")
+            _safe_path(blob, source.public)
+            content = blob.read_bytes()
+            if sha256(content).hexdigest() != entity["sha256"] or len(content) != entity.get("byteCount"):
+                raise PipelineError(f"corrupt evidence snapshot: {blob}")
+            add(blob, source.public, config.data_root / blob.relative_to(source.public))
+        current = []
+        for item in artifacts:
+            item = {
+                **item,
+                "ref": _local_ref(item["ref"], source),
+                "sourceProvider": source.provider,
+                "sourceId": source.source_id,
             }
-        output = _json(_session_names(_rewrite(value, config)))
-        if saved.exists():
-            if source.read_bytes() not in (original, output):
-                raise PipelineError(f"shared catalog changed after migration began: {source}")
-        else:
-            add(source, saved)
-        add(source, source, output, replace=True)
-    if legacy:
-        add(legacy_path, backup / "pipeline.json")
-    created = legacy.get("createdAt") or now_iso()
-    operations.append(MigrationFile(config.source_state_root / "pipeline.json", output=_json({
-        "storageVersion": STORAGE_VERSION, "sourceProvider": config.source_provider,
-        "sourceId": config.source_id, "createdAt": created, "migratedFromStorageVersion": 2,
-    }), replace_existing=bool(current)))
-    # Retire the old entry point so v0.9 cannot resume writing the old layout.
-    retired = _json({
-        "storageVersion": STORAGE_VERSION, "layout": "provider-source",
-        "migratedSourceProvider": config.source_provider, "migratedSourceId": config.source_id,
-    })
-    if legacy:
-        add(legacy_path, legacy_path, retired, replace=True)
-    else:
-        operations.append(MigrationFile(legacy_path, output=retired))
-    return operations, False
+            operation = operations.get(config.data_root / item["ref"].removeprefix("data:/"))
+            if item.get("status") == "current" and (
+                operation is None or sha256(operation.content()).hexdigest() != item["sha256"]
+            ):
+                item["status"] = "protected"
+                for row in rows:
+                    if row.get("noteId") == item["id"]:
+                        row.update(status="protected", reason="edited-or-missing-during-migration")
+            current.append(item)
+        if catalog:
+            operations.pop(config.data_root / "catalog/threads.json", None)
+            add(
+                catalog_path,
+                source.public,
+                config.data_root / "catalog/threads.json",
+                _json({**catalog, "threads": rows}),
+            )
+        complete = index.get("sourceRuns", {}).get(
+            f"{source.provider}/{source.source_id}", index.get("pipelineComplete", False)
+        )
+        add(
+            index_path,
+            source.public,
+            config.data_root / "provenance/index.json",
+            _json(
+                {
+                    **index,
+                    "artifacts": current,
+                    "activityRefs": activity_refs,
+                    "pipelineComplete": complete,
+                    "sourceRuns": {f"{source.provider}/{source.source_id}": complete},
+                }
+            ),
+        )
+    aliases = read_json(source.data / "store.json").get("dataRefAliases", {}) if source.version == 5 else {}
+    if source.version in {3, 4}:
+        aliases = {
+            f"{source.provider}/{source.source_id}/thread-notes/": "session-notes/",
+            f"{source.provider}/{source.source_id}/": "",
+        }
+    elif source.version == 2:
+        aliases = {"thread-notes/": "session-notes/"}
+    descriptor = {
+        "schemaVersion": "1.0.0",
+        "storageVersion": STORAGE_VERSION,
+        "sourceProvider": source.provider,
+        "sourceId": source.source_id,
+        "rawRefPrefix": f"raw:/{source.provider}/{source.source_id}/",
+        "dataRefAliases": aliases,
+        "rawRefAliases": (
+            read_json(source.data / "store.json").get("rawRefAliases", [])
+            if source.version == 5
+            else [f"raw:/{source.source_id}/"]
+            if source.version == 2
+            else []
+        ),
+    }
+    operations[config.data_root / "store.json"] = MigrationFile(
+        config.data_root / "store.json", output=_json(descriptor)
+    )
+    metadata = {
+        **source.metadata,
+        "storageVersion": STORAGE_VERSION,
+        "sourceProvider": source.provider,
+        "sourceId": source.source_id,
+        "migratedFromStorageVersion": source.version,
+    }
+    operations[config.state_root / "pipeline.json"] = MigrationFile(
+        config.state_root / "pipeline.json", output=_json(metadata)
+    )
+    return list(operations.values())
 
 
-def _session_names(value: Any, config: AppConfig | None = None) -> Any:
-    """Rewrite mutable artifact locators; immutable evidence keeps its bytes."""
-    if isinstance(value, list):
-        return [_session_names(item, config) for item in value]
-    if isinstance(value, dict):
-        return {key.replace("threadNote", "sessionNote").replace("ThreadNote", "SessionNote"):
-                _session_names(item, config) for key, item in value.items()}
-    if isinstance(value, str):
-        if config is not None and value.startswith("data:/") and not value.startswith(
-            f"data:/{config.source_provider}/{config.source_id}/"
-        ):
-            return value
-        if config is not None and not value.startswith("data:/") and (
-            ":\\" in value or ":/" in value or value.startswith("/")
-        ):
-            roots = (config.source_data_root, config.source_state_root)
-            prefixes = [text for root in roots for text in (str(root), root.as_posix())]
-            if not any(value == text or value.startswith((text + "/", text + "\\")) for text in prefixes):
-                return value
-        return re.sub(r"(^|[/\\])thread-notes(?=[/\\]|$)", r"\1session-notes", value)
-    return value
-
-
-def _session_destination(path: Path, config: AppConfig) -> Path:
-    if not path.is_relative_to(config.source_data_root):
-        return path
-    relative = path.relative_to(config.source_data_root)
-    return config.source_data_root.joinpath(*(
-        "session-notes" if part == "thread-notes" else part for part in relative.parts
-    ))
-
-
-def _plan_v3(config: AppConfig, current: dict[str, Any]) -> tuple[list[MigrationFile], bool]:
-    if current.get("sourceId") != config.source_id or current.get("sourceProvider") != config.source_provider:
-        raise PipelineError("destination namespace has incompatible source identity")
-    operations: list[MigrationFile] = []
-    backup = config.source_state_root / "migrations" / "session-note-v4-backup"
-    # Copy notes, including project-assigned notes. Originals and note IDs survive.
-    for directory in (config.source_data_root / "thread-notes", config.projects_data_root):
-        for source in _files(directory, config.data_root):
-            destination = _session_destination(source, config)
-            if destination != source:
-                operations.append(MigrationFile(destination, source, sha256(source.read_bytes()).hexdigest()))
-    mutable = [config.data_root / "catalog/threads.json", config.data_root / "provenance/index.json",
-               config.source_data_root / "project-registry.jsonl",
-               config.source_state_root / "ledger.json", config.source_state_root / "last-run.json"]
-    for directory in (config.source_state_root / "threads", config.source_state_root / "projects"):
-        mutable.extend(path for path in _files(directory, config.state_root) if path.suffix == ".json")
-    # The pipeline version is the final write, so interrupted copies can be resumed.
-    mutable.append(config.source_state_root / "pipeline.json")
-    for source in mutable:
-        if not source.exists():
-            continue
-        root = config.data_root if source.is_relative_to(config.data_root) else config.state_root
-        _safe_path(source, root)
-        saved = backup / ("data" if root == config.data_root else "state") / source.relative_to(root)
-        _safe_path(saved, config.state_root)
-        original = saved.read_bytes() if saved.exists() else source.read_bytes()
-        if source.suffix == ".jsonl":
-            records = [_session_names(json.loads(line), config) for line in original.decode("utf-8-sig").splitlines()
-                       if line.strip()]
-            output = "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in records).encode("utf-8")
-        else:
-            value = _session_names(json.loads(original.decode("utf-8-sig")), config)
-            if source == config.source_state_root / "pipeline.json":
-                value.update(storageVersion=STORAGE_VERSION, migratedFromStorageVersion=3)
-            output = _json(value)
-        if saved.exists() and source.read_bytes() not in (original, output):
-            raise PipelineError(f"mutable state changed after migration began: {source}")
-        if not saved.exists():
-            operations.append(MigrationFile(saved, source, sha256(source.read_bytes()).hexdigest()))
-        operations.append(MigrationFile(source, source, sha256(source.read_bytes()).hexdigest(), output, True))
-    return operations, False
-
-
-def _plan(config: AppConfig) -> tuple[list[MigrationFile], bool]:
-    current = read_json(config.source_state_root / "pipeline.json")
-    if current.get("storageVersion") == 3:
-        return _plan_v3(config, current)
-    operations, migrated = _plan_v2(config)
-    updated = []
-    for operation in operations:
-        destination = _session_destination(operation.destination, config)
-        output = operation.output
-        # v2 backups and immutable provenance are historical evidence.
-        if "migrations" not in destination.parts:
-            if output is not None and destination.suffix == ".json":
-                output = _json(_session_names(json.loads(output)))
-            elif destination.name == "project-registry.jsonl":
-                records = [_session_names(json.loads(line)) for line in operation.content().decode(
-                    "utf-8-sig").splitlines() if line.strip()]
-                output = "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in records).encode("utf-8")
-        updated.append(replace(operation, destination=destination, output=output))
-    return updated, migrated
-
-
-def migrate_storage(config: AppConfig, *, dry_run: bool, config_path: Path | None = None) -> dict[str, Any]:
+def migrate_storage(
+    config: AppConfig, *, from_config: Path, dry_run: bool, config_path: Path | None = None
+) -> dict[str, Any]:
+    source = _source_store(from_config, config.source_id)
+    source_config_hash = sha256(source.config_path.read_bytes()).hexdigest()
     roots = validate_storage(config, config_path, allow_legacy=True)
+    for root in roots:
+        for old in (source.raw, source.data, source.state, source.public, source.config_path, *source.protected_roots):
+            left, right = root.resolve(), old.resolve()
+            if left == right or left.is_relative_to(right) or right.is_relative_to(left):
+                raise PipelineError("migration requires fresh destination roots outside all source roots")
+    receipt_path = config.state_root / "migration.json"
+    if not receipt_path.exists():
+        for root in (config.raw_root, config.data_root, config.state_root):
+            if root.is_dir() and any(
+                item.name not in {ROOT_OWNERSHIP_MARKER, ".pipeline.lock"} for item in root.iterdir()
+            ):
+                raise PipelineError("migration requires fresh destination roots or its own pending receipt")
 
-    def inspect() -> tuple[list[MigrationFile], dict[str, Any]]:
-        operations, migrated = _plan(config)
+    def inspect() -> tuple[list[MigrationFile], dict[str, Any], str]:
+        if sha256(source.config_path.read_bytes()).hexdigest() != source_config_hash:
+            raise PipelineError("migration source configuration changed")
+        if _source_store(from_config, config.source_id) != source:
+            raise PipelineError("migration source metadata changed")
+        operations = _plan_source(source, config)
         details = []
         for operation in operations:
-            destination = operation.destination
-            root = next((root for root in roots if destination.absolute().is_relative_to(root.absolute())), None)
-            if root is None:
-                raise PipelineError(f"migration target escapes configured roots: {destination}")
-            _safe_path(destination, root)
-            if operation.source is not None:
-                source_root = next(
-                    root for root in roots if operation.source.absolute().is_relative_to(root.absolute())
-                )
-                _safe_path(operation.source, source_root)
+            root = next(root for root in roots if operation.destination.is_relative_to(root))
+            _safe_path(operation.destination, root)
             content = operation.content()
-            if destination.exists() and not destination.is_file():
-                raise PipelineError(f"migration destination is not a file: {destination}")
-            same = destination.is_file() and destination.read_bytes() == content
-            if destination.exists() and not same and not operation.replace_existing:
-                raise PipelineError(f"migration destination conflicts with existing data: {destination}")
-            details.append({
-                "source": str(operation.source) if operation.source else None,
-                "destination": str(destination), "bytes": len(content),
-                "sha256": sha256(content).hexdigest(), "action": "unchanged" if same else "write",
-            })
-        return operations, {
-            "mode": "storage-migrate", "dryRun": dry_run, "ok": True,
-            "status": "already-migrated" if migrated else "planned" if operations else "no-legacy-storage",
-            "sourceProvider": config.source_provider, "sourceId": config.source_id,
-            "fromStorageVersion": 2, "toStorageVersion": STORAGE_VERSION,
-            "preservesOriginalEvidence": True, "files": details,
-        }
+            destination = operation.destination
+            details.append(
+                {
+                    "source": str(operation.source) if operation.source else None,
+                    "destination": str(destination),
+                    "sha256": sha256(content).hexdigest(),
+                    "sourceSha256": operation.source_hash,
+                    "bytes": len(content),
+                }
+            )
+        signature = sha256(_json(details)).hexdigest()
+        receipt = read_json(receipt_path)
+        if receipt and receipt.get("fingerprint") != signature:
+            raise PipelineError("migration source or configuration changed; choose new destination roots")
+        complete = receipt.get("status") == "complete"
+        if not complete:
+            for operation in operations:
+                path = operation.destination
+                if path.exists() and (not path.is_file() or path.read_bytes() != operation.content()):
+                    raise PipelineError(f"migration destination conflicts with existing data: {path}")
+        return (
+            operations,
+            {
+                "mode": "storage-migrate",
+                "dryRun": dry_run,
+                "ok": True,
+                "status": "already-migrated" if complete else "planned",
+                "sourceProvider": source.provider,
+                "sourceId": source.source_id,
+                "fromStorageVersion": source.version,
+                "toStorageVersion": STORAGE_VERSION,
+                "preservesOriginalEvidence": True,
+                "files": details,
+            },
+            signature,
+        )
 
-    operations, report = inspect()
-    if dry_run or not operations:
+    operations, report, signature = inspect()
+    if dry_run or report["status"] == "already-migrated":
         return report
     for kind, root in zip(ROOT_KINDS, roots, strict=True):
         root.mkdir(parents=True, exist_ok=True)
         marker = root / ROOT_OWNERSHIP_MARKER
         if not marker.exists():
-            atomic_write_bytes(marker, _json(_ownership_marker_document(kind)))
+            atomic_write_bytes(
+                marker,
+                _json(
+                    {
+                        **_ownership_marker_document(kind),
+                        "sourceProvider": source.provider,
+                        "sourceId": source.source_id,
+                    }
+                ),
+            )
     with ExitStack() as stack:
         for root in sorted(roots):
             stack.enter_context(_root_lock(root))
-        operations, report = inspect()
+        operations, report, signature = inspect()
+        atomic_write_bytes(receipt_path, _json({"fingerprint": signature, "status": "pending"}))
         changed: list[tuple[Path, bytes | None]] = []
         try:
             for operation in operations:
                 content = operation.content()
-                prior = operation.destination.read_bytes() if operation.destination.exists() else None
+                path = operation.destination
+                prior = path.read_bytes() if path.exists() else None
                 if prior == content:
                     continue
-                # Record rollback before replacing in case an I/O error follows replacement.
-                changed.append((operation.destination, prior))
-                atomic_write_bytes(operation.destination, content)
-                if operation.destination.read_bytes() != content:
-                    raise PipelineError(f"migration copy verification failed: {operation.destination}")
+                changed.append((path, prior))
+                atomic_write_bytes(path, content)
+                if path.read_bytes() != content:
+                    raise PipelineError(f"migration copy verification failed: {path}")
+            # Re-scan the source and verify the same complete plan before declaring completion.
+            _, _, checked_signature = inspect()
+            if checked_signature != signature:
+                raise PipelineError("migration source changed before completion")
+            if (config.data_root / "provenance/index.json").is_file():
+                validate_provenance(config.data_root)
+            atomic_write_bytes(receipt_path, _json({"fingerprint": signature, "status": "complete"}))
         except Exception:
             failures = []
-            for destination, prior in reversed(changed):
+            for path, prior in reversed(changed):
                 try:
                     if prior is None:
-                        destination.unlink(missing_ok=True)
+                        path.unlink(missing_ok=True)
                     else:
-                        atomic_write_bytes(destination, prior)
+                        atomic_write_bytes(path, prior)
                 except OSError as exc:
-                    failures.append(f"{destination}: {exc}")
+                    failures.append(f"{path}: {exc}")
             if failures:
                 raise PipelineError("migration rollback failed: " + "; ".join(failures)) from None
             raise
-        report["status"] = "migrated"
-    return report
+    return {**report, "status": "migrated"}

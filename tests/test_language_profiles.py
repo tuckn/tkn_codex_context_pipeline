@@ -51,7 +51,7 @@ def test_profile_configuration_precedence_and_old_default(tmp_path: Path, monkey
     home, work = tmp_path / "home", tmp_path / "work"
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     global_path = home / ".tkn/genai_chat_note_pipeline/config.yaml"
-    write_yaml(global_path, {"schema_version": "4.0.0", "idle_minutes": 30})
+    write_yaml(global_path, {"schema_version": CONFIG_SCHEMA_VERSION, "idle_minutes": 30})
     old_bytes = global_path.read_bytes()
     old = resolve_app_config(cwd=work)
     assert old.config.generation.session_note_profile == "default-jp"

@@ -1,30 +1,39 @@
-schema_version: "4.1.0"
-# Shared roots. Source files use <root>/<provider>/<source_id>/.
-# config show displays the resolved paths; catalog and provenance are shared under data_root.
-raw_root: ~/.tkn/genai_chat_note_pipeline/raw
-data_root: ~/.tkn/genai_chat_note_pipeline/data
-state_root: ~/.tkn/genai_chat_note_pipeline/state
+schema_version: "6.0.0"
+# One local cache base; provider/source_id partitions are automatic.
 cache_root: ~/.cache/genai_chat_note_pipeline
 
-# Chat acquisition is independent of generation below.
-# Keep source_id stable after ingestion. Identity is (provider, source_id).
-# Use distinct IDs for each PC/environment/account within a provider.
+# Acquisition is independent of generation. Map keys are stable source_id values.
+# Recommended: lowercase ASCII kebab-case, e.g. laptop-windows or laptop-wsl-ubuntu.
+# Allowed: ASCII letters/digits/._-, starting with a letter/digit. No spaces or Unicode.
+# No trailing dot, Windows reserved names, or case-only duplicate IDs per provider.
 chat:
   providers:
     codex:
-      source_id: my-windows-note-pc
-      enabled: true
-      home: ~/.codex
-      include_archived: true
+      sources:
+        my-windows-note-pc:
+          enabled: true
+          source_root: ~/.codex
+          include_archived: true
+          # Optional final directories; no provider/source_id suffix is added.
+          # Omit roots for ~/.tkn/genai_chat_note_pipeline/<kind>/codex/<source_id>.
+          # raw_root: C:/path/to/codex/raw
+          # data_root: C:/path/to/codex/data
+          # state_root: C:/path/to/codex/state
+        # my-wsl-ubuntu:
+        #   enabled: false
+        #   source_root: '//wsl$/Ubuntu/home/<user>/.codex'
+        #   include_archived: true
     # Configuration placeholders; acquisition adapters are not implemented yet.
     claude-code:
-      source_id: my-windows-note-pc
-      enabled: false
-      home: ~/.claude
+      sources:
+        my-windows-note-pc:
+          enabled: false
+          source_root: ~/.claude
     github-copilot:
-      source_id: my-windows-note-pc
-      enabled: false
-      home: ~/.copilot
+      sources:
+        my-windows-note-pc:
+          enabled: false
+          source_root: ~/.copilot
 generation:
   # Built-in profiles only: default-jp (Japanese) or default-en (English).
   session_note_profile: default-jp

@@ -102,8 +102,8 @@ def _ensure_raw_root(raw_root: Path, *, dry_run: bool) -> None:
 def _source_root(raw_root: Path, source_id: str) -> Path:
     if not SOURCE_ID_PATTERN.fullmatch(source_id):
         raise RawCaptureError(f"source_id is not safe for raw storage: {source_id!r}")
-    result = raw_root / "codex" / source_id
-    for directory in (result.parent, result):
+    result = raw_root
+    for directory in (result,):
         if directory.is_symlink() or getattr(directory, "is_junction", lambda: False)():
             raise RawCaptureError(f"raw namespace must not be a link: {directory}")
         if directory.exists() and not directory.is_dir():
@@ -163,13 +163,16 @@ def _read_manifest(path: Path, source_id: str) -> list[dict[str, Any]]:
             if (
                 value.get("schemaVersion") not in {1, 2, RAW_MANIFEST_SCHEMA_VERSION}
                 or value.get("sourceId") != source_id
-                or value.get("schemaVersion") == 3 and value.get("sourceProvider") != "codex"
+                or value.get("schemaVersion") == 3
+                and value.get("sourceProvider") != "codex"
                 or not source_reference
                 or not re.fullmatch(r"[0-9a-f]{64}", digest)
                 or not isinstance(value.get("byteCount"), int)
                 or int(value["byteCount"]) < 0
-                or value.get("captureRef") != (
-                    _capture_ref(source_id, digest) if value.get("schemaVersion") == 1
+                or value.get("captureRef")
+                != (
+                    _capture_ref(source_id, digest)
+                    if value.get("schemaVersion") == 1
                     else _mirror_ref(source_id, source_reference)
                 )
             ):
@@ -249,7 +252,7 @@ def ingest_raw_sources(
         raise RawCaptureError(f"raw_root and source sessions root must not overlap: {raw}")
     owned_source_root = _source_root(raw, source_id)
     if (raw / source_id / "manifest.jsonl").exists() and not (owned_source_root / "manifest.jsonl").exists():
-        raise RawCaptureError("legacy Raw layout requires `tkn-genai-chat-note storage migrate --dry-run` first")
+        raise RawCaptureError("legacy Raw layout requires `storage migrate --from-config <old-config> --dry-run` first")
     _ensure_raw_root(raw, dry_run=dry_run)
     manifest_path = owned_source_root / "manifest.jsonl"
     records = _read_manifest(manifest_path, source_id)
@@ -318,7 +321,8 @@ def ingest_raw_sources(
             continue
         digest = str(record["sha256"])
         capture_path = (
-            _capture_path(owned_source_root, digest) if record["schemaVersion"] == 1
+            _capture_path(owned_source_root, digest)
+            if record["schemaVersion"] == 1
             else _mirror_path(owned_source_root, relative)
         )
         process_path = processing_paths.get(relative, capture_path)

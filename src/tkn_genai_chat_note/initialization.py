@@ -30,7 +30,7 @@ def _overlaps(left: Path, right: Path) -> bool:
 
 def validate_reset_targets(config: AppConfig, config_path: Path) -> tuple[Path, ...]:
     targets = tuple(
-        _resolved(path) for path in (config.data_root, config.state_root, config.cache_root, config.raw_root)
+        _resolved(path) for path in (config.data_root, config.state_root, config.source_cache_root, config.raw_root)
     )
     home = _resolved(Path.home())
     codex_home = _resolved(config.codex_home)
