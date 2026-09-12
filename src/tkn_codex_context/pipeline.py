@@ -92,7 +92,7 @@ def _agent(config: PipelineConfig, stage: str) -> dict[str, Any]:
     profile = profiles[stage]
     return {
         "software": "tkn-codex-context-pipeline",
-        "version": "0.5.0",
+        "version": "0.7.0",
         "provider": config.provider,
         "model": config.model,
         "reasoningEffort": config.reasoning_effort,
@@ -486,7 +486,7 @@ def _build_scope(
                     started_at=now_iso(),
                     used=[source_entity],
                     generated=[input_entity],
-                    agent={"software": "tkn-codex-context-pipeline", "version": "0.5.0"},
+                    agent={"software": "tkn-codex-context-pipeline", "version": "0.7.0"},
                 )
                 used.append(input_entity)
             if output_path.is_file():

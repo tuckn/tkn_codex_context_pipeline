@@ -1,4 +1,4 @@
-"""Immutable content-addressed capture of source Codex JSONL logs."""
+"""Latest source-aligned copies of Codex JSONL logs; backups are external."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from .chat_logs import read_thread_source, source_ref
 
-RAW_MANIFEST_SCHEMA_VERSION = 1
+RAW_MANIFEST_SCHEMA_VERSION = 2
 RAW_OWNERSHIP_MARKER = ".tkn-codex-context-root.json"
 RAW_OWNER_APPLICATION_ID = "tkn-codex-context-pipeline"
 RAW_OWNER_SCHEMA_VERSION = 1
@@ -113,6 +113,29 @@ def _capture_ref(source_id: str, digest: str) -> str:
     return f"raw:/{source_id}/sha256/{digest[:2]}/{digest}.jsonl"
 
 
+def _mirror_relative(source_reference: str) -> str:
+    parts = source_reference.split("/")
+    if any(part in {"", ".", ".."} or ":" in part or "\\" in part for part in parts):
+        raise RawCaptureError(f"unsafe raw source reference: {source_reference!r}")
+    if parts[0] not in {"sessions", "archived_sessions"}:
+        parts.insert(0, "sessions")
+    return "/".join(parts)
+
+
+def _mirror_path(source_root: Path, source_reference: str) -> Path:
+    destination = source_root / _mirror_relative(source_reference)
+    for parent in (destination, *destination.parents):
+        if parent.is_symlink():
+            raise RawCaptureError(f"raw capture path must not contain symbolic links: {parent}")
+        if parent == source_root.parent:
+            break
+    return destination
+
+
+def _mirror_ref(source_id: str, source_reference: str) -> str:
+    return f"raw:/{source_id}/{_mirror_relative(source_reference)}"
+
+
 def _read_manifest(path: Path, source_id: str) -> list[dict[str, Any]]:
     if not path.exists():
         return []
@@ -132,13 +155,16 @@ def _read_manifest(path: Path, source_id: str) -> list[dict[str, Any]]:
             source_reference = str(value.get("sourceRef") or "")
             digest = str(value.get("sha256") or "")
             if (
-                value.get("schemaVersion") != RAW_MANIFEST_SCHEMA_VERSION
+                value.get("schemaVersion") not in {1, RAW_MANIFEST_SCHEMA_VERSION}
                 or value.get("sourceId") != source_id
                 or not source_reference
                 or not re.fullmatch(r"[0-9a-f]{64}", digest)
                 or not isinstance(value.get("byteCount"), int)
                 or int(value["byteCount"]) < 0
-                or value.get("captureRef") != _capture_ref(source_id, digest)
+                or value.get("captureRef") != (
+                    _capture_ref(source_id, digest) if value.get("schemaVersion") == 1
+                    else _mirror_ref(source_id, source_reference)
+                )
             ):
                 raise RawCaptureError(f"invalid raw manifest record: {path}:{line_number}")
             records.append(value)
@@ -180,7 +206,7 @@ def _record_for_source(
         "schemaVersion": RAW_MANIFEST_SCHEMA_VERSION,
         "sourceId": source_id,
         "sourceRef": source_reference,
-        "captureRef": _capture_ref(source_id, digest),
+        "captureRef": _mirror_ref(source_id, source_reference),
         "sha256": digest,
         "byteCount": byte_count,
         "capturedAt": captured_at,
@@ -244,21 +270,16 @@ def ingest_raw_sources(
         try:
             content = _stable_source_bytes(source_path)
             digest = sha256(content).hexdigest()
-            destination = _capture_path(owned_source_root, digest)
-            if destination.is_symlink():
-                raise RawCaptureError(f"raw capture must not be a symbolic link: {destination}")
-            if destination.is_file():
-                actual = sha256(destination.read_bytes()).hexdigest()
-                if actual != digest:
-                    raise RawCaptureError(f"raw capture hash mismatch: {destination}")
-            elif not dry_run:
+            destination = _mirror_path(owned_source_root, relative)
+            same_bytes = destination.is_file() and sha256(destination.read_bytes()).hexdigest() == digest
+            if not same_bytes and not dry_run:
                 _atomic_write_bytes(destination, content)
                 if sha256(destination.read_bytes()).hexdigest() != digest:
                     raise RawCaptureError(f"raw capture verification failed: {destination}")
                 blob_created_count += 1
-            parse_path = destination if destination.is_file() else source_path
+            parse_path = destination if same_bytes or not dry_run else source_path
             prior = latest.get(relative)
-            if prior is None or prior["sha256"] != digest:
+            if prior is None or prior["sha256"] != digest or prior["schemaVersion"] != RAW_MANIFEST_SCHEMA_VERSION:
                 record = _record_for_source(
                     source_id=source_id,
                     source_reference=relative,
@@ -280,17 +301,16 @@ def ingest_raw_sources(
             statuses[relative] = "deferred"
             blocked_refs.add(relative)
 
-    if new_records:
-        records.extend(new_records)
-        _atomic_write_bytes(manifest_path, _manifest_text(records))
-
     inputs: list[RawSourceInput] = []
     source_details: list[dict[str, Any]] = []
     for relative, record in sorted(latest.items()):
         if relative in blocked_refs:
             continue
         digest = str(record["sha256"])
-        capture_path = _capture_path(owned_source_root, digest)
+        capture_path = (
+            _capture_path(owned_source_root, digest) if record["schemaVersion"] == 1
+            else _mirror_path(owned_source_root, relative)
+        )
         process_path = processing_paths.get(relative, capture_path)
         if not process_path.is_file():
             failed.append(
@@ -334,6 +354,9 @@ def ingest_raw_sources(
                 "status": status,
             }
         )
+
+    if new_records:
+        _atomic_write_bytes(manifest_path, _manifest_text(list(latest.values())))
 
     report = {
         "schemaVersion": 1,

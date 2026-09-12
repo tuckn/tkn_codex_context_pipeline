@@ -20,7 +20,7 @@ collection of related work, or the unassigned conversation collection.
 
 ```mermaid
 flowchart LR
-    S[Local Codex logs] --> R[Immutable Raw captures]
+    S[Local Codex logs] --> R[Latest Raw copies]
     R --> E[Canonical Events]
     E --> T[One Thread Note per conversation]
     M[Project membership and configured scopes] --> D[Decision Records per scope]
@@ -365,6 +365,68 @@ of inference; follow it with `pull` to update the derived artifacts.
 
 <a id="processing-flow"></a>
 
+## Storage layout
+
+The pipeline captures original chats as Raw, normalizes their events, and generates
+Thread Notes. Raw preserves the source log layout; Thread Notes are organized by
+the year and month in which each conversation started.
+
+The following shows the default locations. `~` is the user home directory and
+`<sourceId>` identifies the source (default: `windows`). Each root is configurable.
+
+```text
+~/.tkn/codex_context_pipeline/
+├─ raw/                                  # raw_root
+│  └─ <sourceId>/
+│     ├─ sessions/                       # Original layout below sessions/
+│     │  └─ 2026/09/10/
+│     │     └─ rollout-....jsonl
+│     ├─ archived_sessions/              # Original relative paths and filenames
+│     │  └─ ...
+│     ├─ manifest.jsonl                  # Latest capture record per source file
+│     └─ metadata/<hash>.json             # App membership metadata
+├─ data/                                 # data_root
+│  ├─ source-aligned/<threadKey>/
+│  │  └─ <hash>.json                     # Normalized conversation events
+│  ├─ thread-notes/
+│  │  ├─ 2025/
+│  │  │  └─ 12/
+│  │  │     └─ <start-time>-<slug>.md
+│  │  └─ 2026/
+│  │     ├─ 08/
+│  │     │  └─ <start-time>-<slug>.md
+│  │     └─ 09/
+│  │        └─ 20260910T081831+0900-storage-layout.md
+│  ├─ scopes/<scopeKey>/
+│  │  ├─ decisions/DR-*.md               # Scope Decision Records
+│  │  └─ working-context.md              # Current scope context
+│  ├─ catalog/                           # Conversations, membership, artifacts
+│  └─ provenance/                        # Generation evidence and history
+└─ state/                                # state_root: processing state and reports
+
+~/.cache/codex_context_pipeline/          # cache_root: resumable work data
+```
+
+### Raw: latest chats in their original folder structure
+
+Under `raw_root/<sourceId>/`, the pipeline preserves the relative folder structure
+and filenames from Codex's `sessions/` and `archived_sessions/`. The dated folders
+in the tree are an example of the source layout. Changed logs replace the latest
+copy at the same path; missing originals do not cause saved copies to be deleted.
+Backup generations belong to external tools such as FreeFileSync or Task Scheduler.
+
+### Thread Notes: organized by conversation start year and month
+
+Normalized conversation events produce one Thread Note per conversation at
+`data_root/thread-notes/YYYY/MM/<start-time>-<slug>.md`. Both the folder and filename
+use the conversation start time converted to the system timezone. In Japan, this
+looks like `20260910T081831+0900`; there are no daily note folders. Conversations
+spanning months stay in their starting month, and stable IDs remain in Frontmatter.
+
+Decision Records and Working Context are generated per scope using Thread Notes
+as input. Generation evidence snapshots in `data_root/provenance/` are maintained
+separately from the latest Raw copies.
+
 ## Processing sequence and provenance
 
 The CLI selects inputs, the inference backend returns structured JSON, and the
@@ -412,8 +474,8 @@ sequenceDiagram
 
     P->>C: C/sessions/**/*.jsonl<br/>C/archived_sessions/**/*.jsonl
     C-->>P: Original conversation bytes
-    P->>F: R/{sourceId}/sha256/{prefix}/H.jsonl<br/>Preserve original bytes
-    P->>F: R/{sourceId}/manifest.jsonl<br/>Record source, time, hash
+    P->>F: R/{sourceId}/sessions/YYYY/MM/DD/rollout-*.jsonl<br/>Preserve original bytes
+    P->>F: R/{sourceId}/manifest.jsonl<br/>Update source, time, hash
 
     opt Project metadata is available
         P->>C: C/.codex-global-state.json
@@ -433,7 +495,7 @@ sequenceDiagram
             AI-->>P: Overview and final-state JSON
         end
         P->>P: Preserve and concatenate timelines<br/>Derive timestamps and actors, validate, render Markdown
-        P->>F: D/threads/T/thread-notes/*.md<br/>Thread Note
+        P->>F: D/thread-notes/YYYY/MM/*.md<br/>Thread Note
         P->>F: Record provenance and checkpoint
     end
 ```
@@ -470,7 +532,7 @@ sequenceDiagram
     U->>P: decisions build
     P->>P: Read settings and S/ledger.json<br/>Run shared Raw capture and normalization
     P->>P: Select scopes from membership and config.scopes
-    P->>D: D/threads/T/thread-notes/*.md<br/>D/scopes/K/decisions/DR-*.md
+    P->>D: D/thread-notes/YYYY/MM/*.md<br/>D/scopes/K/decisions/DR-*.md
     D-->>P: Thread Notes and existing Decisions
     alt Selected Thread Notes are incomplete or stale
         P-->>U: Report deferred work<br/>Update Thread Notes first
@@ -523,7 +585,7 @@ sequenceDiagram
     alt Upstream work is incomplete or stale
         P-->>U: Report deferred work<br/>Update upstream generation stages first
     else Upstream is current
-        P->>D: D/threads/T/thread-notes/*.md<br/>D/scopes/K/decisions/DR-*.md
+        P->>D: D/thread-notes/YYYY/MM/*.md<br/>D/scopes/K/decisions/DR-*.md
         D-->>P: Thread Notes and currently supported Decisions
         opt Repository evidence is available
             P->>R: README, AGENTS, configuration files<br/>Git state
@@ -682,15 +744,15 @@ uv run python scripts/review_thread_note.py --source-log <rollout.jsonl> --basel
 identical prompts, profiles, and provider settings. Current validation still runs;
 repairs and uncached calls use the configured provider.
 
-## Storage and downstream contract
+## Downstream data contract
 
 | Root / path | Contents |
 | --- | --- |
-| `raw_root/<sourceId>/sha256/<prefix>/<hash>.jsonl` | Immutable original-byte captures |
-| `raw_root/<sourceId>/manifest.jsonl` | Append-only capture/discovery records |
+| `raw_root/<sourceId>/sessions/<original-relative-path>.jsonl` | Latest original-byte copies (also `archived_sessions/`) |
+| `raw_root/<sourceId>/manifest.jsonl` | Latest capture/discovery record per source |
 | `raw_root/<sourceId>/metadata/<hash>.json` | Captured app membership metadata |
 | `data_root/source-aligned/<threadKey>/<hash>.json` | Immutable canonical events, raw line locators and parser diagnostics |
-| `data_root/threads/<threadKey>/thread-notes/*.md` | One stable-ID Thread Note per conversation |
+| `data_root/thread-notes/YYYY/MM/*.md` | One stable-ID Thread Note per conversation |
 | `data_root/scopes/<scopeKey>/decisions/DR-*.md` | Scope Decision Records |
 | `data_root/scopes/<scopeKey>/working-context.md` | Current scope context |
 | `data_root/catalog/threads.json`, `scopes.json` | Observed membership/history, references and processing status |
@@ -710,11 +772,6 @@ completion semantics, and how to consume provenance. RDF serialization, global
 IRI policy, OWL vocabulary, semantic entity resolution, and PROV-O mapping
 belong to the downstream repository. This repository exports the evidence
 needed for that work and does not implement an ontology or graph store.
-
-Version 0.5 uses storage version 2. Older Project-based output layouts are not
-migrated or reset automatically. Configure fresh data/state/cache locations
-(and preferably fresh Raw storage), retain the old store, and run `clone`.
-The old per-Project backfill/reset command workflow is no longer exposed.
 
 ## Development
 

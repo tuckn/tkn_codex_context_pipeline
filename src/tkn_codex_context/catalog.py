@@ -33,6 +33,7 @@ from .thread_notes import (
     now_local,
     path_variants,
     source_event_time,
+    source_timestamp,
 )
 
 CATALOG_SCHEMA_VERSION = "1.0.0"
@@ -341,7 +342,8 @@ def discover(config: AppConfig, provenance: ProvenanceStore, *, run_id: str) -> 
             project_id=key,
             title="Conversation (preserve every independent work item)",
             current_root=config.data_root / "threads" / key,
-            context_path=config.data_root / "threads" / key,
+            context_path=config.data_root,
+            note_directory=config.data_root / "thread-notes" / source_timestamp(log.timestamp).strftime("%Y/%m"),
             assigned_thread_ids=frozenset({thread_id}),
             source_project_id=str(observed["sourceProjectId"] or ""),
             state_directory=config.state_root / "threads" / key,

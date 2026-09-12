@@ -122,7 +122,7 @@ def test_clone_projectless_archived_and_cross_project_scope(tmp_path: Path) -> N
     assert report["complete"], report
     assert report["threadCounts"] == {"current": 3}
     assert report["scopeCounts"] == {"current": 4}
-    assert len(list((config.data_root / "threads").rglob("*.md"))) == 3
+    assert len(list((config.data_root / "thread-notes").rglob("*.md"))) == 3
     shared = next(scope for scope in report["scopeResults"] if scope["id"] == "work:shared")
     assert len(shared["threadKeys"]) == 3
     index = json.loads((config.data_root / "provenance" / "index.json").read_text())
@@ -311,7 +311,8 @@ def test_append_and_missing_note_preserve_id_and_evidence(tmp_path: Path) -> Non
     assert second["complete"], second
     assert second["threads"][0]["noteId"] == identity
     assert second["threads"][0]["sourceCaptureSha256"] != first["threads"][0]["sourceCaptureSha256"]
-    assert capture.read_bytes() == original_bytes
+    assert capture.read_bytes() == original.read_bytes()
+    assert capture.read_bytes() != original_bytes
     note = config.data_root / second["threads"][0]["noteRef"].removeprefix("data:/")
     note.unlink()
     third = execute(config, "pull")
@@ -482,15 +483,15 @@ def test_working_context_rejects_undeclared_data_reference(tmp_path: Path) -> No
         validate_working_context(context)
 
 
-def test_corrupted_raw_never_claims_completion(tmp_path: Path) -> None:
+def test_corrupted_raw_is_repaired_from_available_original(tmp_path: Path) -> None:
     config = config_for(tmp_path)
     write_chat(config.sessions_root / "one.jsonl", thread_id="one", cwd=tmp_path)
     first = execute(config)
     capture = config.raw_root / first["threads"][0]["sourceCaptureRef"].removeprefix("raw:/")
     capture.write_bytes(b"corrupted")
     second = execute(config, "pull")
-    assert not second["complete"] and not second["ok"]
-    assert second["failed"]
+    assert second["complete"] and second["ok"]
+    assert capture.read_bytes() == (config.sessions_root / "one.jsonl").read_bytes()
 
 
 def test_scope_membership_removal_reconciles_decision_inputs(tmp_path: Path) -> None:
@@ -548,9 +549,28 @@ def test_non_utf8_source_is_captured_before_normalization_fails(tmp_path: Path) 
     captured = execute(config, "raw")
     assert captured["ok"] and captured["rawIngest"]["availableCaptureCount"] == 1
     assert next(config.raw_root.rglob("*.jsonl")).exists()
-    captures = list((config.raw_root / config.source_id / "sha256").rglob("*.jsonl"))
+    captures = list((config.raw_root / config.source_id / "sessions").rglob("*.jsonl"))
     assert len(captures) == 1 and captures[0].read_bytes() == content
     path.unlink()
     report = execute(config, "pull")
     assert not report["complete"] and report["failed"]
     assert report["rawIngest"]["availableCaptureCount"] == 1
+
+
+@pytest.mark.parametrize("started_at", ["2025-12-31T23:30:00Z", "2026-01-31T23:30:00Z"])
+def test_notes_use_start_month_in_system_timezone(tmp_path: Path, started_at: str) -> None:
+    config = config_for(tmp_path)
+    for thread_id in ("one", "two"):
+        write_chat(config.sessions_root / f"{thread_id}.jsonl", thread_id=thread_id,
+                   cwd=tmp_path, started_at=started_at)
+    report = execute(config)
+    assert report["complete"], report
+    local = datetime.fromisoformat(started_at).astimezone()
+    notes = list((config.data_root / "thread-notes" / local.strftime("%Y/%m")).glob("*.md"))
+    assert len(notes) == 2
+    assert all(note.name.startswith(local.strftime("%Y%m%dT%H%M%S%z")) for note in notes)
+    assert len({parse_simple_frontmatter(note.read_text(encoding="utf-8"))["id"] for note in notes}) == 2
+    summary = Summary()
+    again = execute(config, "thread-notes", summarizer=summary)
+    assert not summary.calls
+    assert {entry["noteRef"] for entry in again["threads"]} == {entry["noteRef"] for entry in report["threads"]}

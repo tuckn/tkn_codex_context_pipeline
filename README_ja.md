@@ -337,6 +337,65 @@ OSのロックで同時書き込みを拒否し、プロセス終了時にロッ
 
 <a id="processing-flow"></a>
 
+## 保存構造について
+
+元チャットをRawとして取り込み、正規化した会話イベントからThread Noteを生成します。
+Rawは元ログのフォルダ構造を保ち、Thread Noteは会話開始日時の年月で整理します。
+
+以下は既定の保存先です。`~` はユーザーホーム、`<sourceId>` は取得元の識別子
+（既定値は `windows`）です。各ルートは設定で変更できます。
+
+```text
+~/.tkn/codex_context_pipeline/
+├─ raw/                                  # raw_root
+│  └─ <sourceId>/
+│     ├─ sessions/                       # 元のsessions/以下を再現
+│     │  └─ 2026/09/10/
+│     │     └─ rollout-....jsonl
+│     ├─ archived_sessions/              # 元の相対構造・ファイル名を再現
+│     │  └─ ...
+│     ├─ manifest.jsonl                  # 元ファイルごとの最新の取得記録
+│     └─ metadata/<hash>.json             # アプリの所属情報
+├─ data/                                 # data_root
+│  ├─ source-aligned/<threadKey>/
+│  │  └─ <hash>.json                     # 正規化した会話イベント
+│  ├─ thread-notes/
+│  │  ├─ 2025/
+│  │  │  └─ 12/
+│  │  │     └─ <開始日時>-<slug>.md
+│  │  └─ 2026/
+│  │     ├─ 08/
+│  │     │  └─ <開始日時>-<slug>.md
+│  │     └─ 09/
+│  │        └─ 20260910T081831+0900-storage-layout.md
+│  ├─ scopes/<scopeKey>/
+│  │  ├─ decisions/DR-*.md               # スコープのDecision Record
+│  │  └─ working-context.md              # スコープの現在のコンテキスト
+│  ├─ catalog/                           # 会話・所属・生成物の対応
+│  └─ provenance/                        # 生成根拠と生成履歴
+└─ state/                                # state_root：処理状態・レポート
+
+~/.cache/codex_context_pipeline/          # cache_root：再開用の作業データ
+```
+
+### Raw：元のフォルダ構造で最新のチャットを保存
+
+`raw_root/<sourceId>/` 以下に、Codexの `sessions/` と `archived_sessions/` の
+相対フォルダ構造とファイル名を再現します。ツリー内の日付階層は元ログの配置例です。
+変更されたログは同じ保存先の最新コピーを置き換え、元ログがなくなっても保存済みコピーは削除しません。
+バックアップ世代の管理はFreeFileSyncやTask Schedulerなどの外部ツールの責務です。
+
+### Thread Note：会話開始日時の年月で整理
+
+正規化した会話イベントから、会話ごとに1つのThread Noteを
+`data_root/thread-notes/YYYY/MM/<開始日時>-<slug>.md` に生成します。
+フォルダとファイル名には、会話開始日時をシステムのタイムゾーンへ変換した値を使います。
+日本時間なら `20260910T081831+0900` のようになり、日単位のフォルダは作りません。
+会話が月をまたいでも開始月に保存し、会話の安定したIDはFrontmatterに保持します。
+
+Decision RecordとWorking Contextは、Thread Noteを入力としてスコープごとに生成します。
+`data_root/provenance/` の生成根拠スナップショットは、Rawの最新コピーとは別に維持します。
+
 ## 処理のシーケンスと来歴
 
 CLIが入力を選び、生成AIが構造化JSONを返し、CLIが検証してMarkdownに変換・保存します。
@@ -380,7 +439,7 @@ sequenceDiagram
 
     P->>C: C/sessions/**/*.jsonl<br/>C/archived_sessions/**/*.jsonl
     C-->>P: 会話ログの元のバイト列
-    P->>F: R/{sourceId}/sha256/{prefix}/H.jsonl<br/>元の内容を変更せず保存
+    P->>F: R/{sourceId}/sessions/YYYY/MM/DD/rollout-*.jsonl<br/>元の内容を変更せず保存
     P->>F: R/{sourceId}/manifest.jsonl<br/>取得元・日時・ハッシュを記録
 
     opt Project所属情報を取得できる場合
@@ -401,7 +460,7 @@ sequenceDiagram
             AI-->>P: 概要・終了状態のJSON
         end
         P->>P: 時系列は部分記録を保持して結合<br/>日時・主体・根拠を検証してMarkdownへ
-        P->>F: D/threads/T/thread-notes/*.md<br/>Thread Noteを保存
+        P->>F: D/thread-notes/YYYY/MM/*.md<br/>Thread Noteを保存
         P->>F: 来歴と処理チェックポイントを記録
     end
 ```
@@ -435,7 +494,7 @@ sequenceDiagram
     U->>P: decisions build
     P->>P: 設定・S/ledger.jsonを読む<br/>共通のRaw保存・正規化を行う
     P->>P: Project所属＋config.scopesからscopeを選ぶ
-    P->>D: D/threads/T/thread-notes/*.md<br/>D/scopes/K/decisions/DR-*.md
+    P->>D: D/thread-notes/YYYY/MM/*.md<br/>D/scopes/K/decisions/DR-*.md
     D-->>P: Thread Noteと既存Decision
     alt 対象のThread Noteに未完了・更新待ちがある
         P-->>U: 保留を報告<br/>先にThread Noteを更新
@@ -485,7 +544,7 @@ sequenceDiagram
     alt 上流に未完了・更新待ちがある
         P-->>U: 保留を報告<br/>先に上流の生成段階を更新
     else 上流が最新
-        P->>D: D/threads/T/thread-notes/*.md<br/>D/scopes/K/decisions/DR-*.md
+        P->>D: D/thread-notes/YYYY/MM/*.md<br/>D/scopes/K/decisions/DR-*.md
         D-->>P: Thread Noteと現在の根拠で有効なDecision
         opt リポジトリの根拠を取得できる場合
             P->>R: README・AGENTS・構成ファイルなど<br/>Gitの状態
@@ -633,15 +692,15 @@ uv run python scripts/review_thread_note.py --source-log <rollout.jsonl> --basel
 `--reuse-dir <previous-review-directory>` を指定すると、入力・プロファイル・生成AI設定が
 同一の推論結果を再利用できます。現行の検証は毎回実行し、修正や未取得部分は生成AIを使います。
 
-## 保存構造と下流へのデータ契約
+## 下流へのデータ契約
 
 | ルート／パス | 内容 |
 | --- | --- |
-| `raw_root/<sourceId>/sha256/<prefix>/<hash>.jsonl` | 元のバイト列を変更しないスナップショット |
-| `raw_root/<sourceId>/manifest.jsonl` | 追記式の取得・発見記録 |
+| `raw_root/<sourceId>/sessions/<original-relative-path>.jsonl` | 元のバイト列の最新コピー（`archived_sessions/` も同様） |
+| `raw_root/<sourceId>/manifest.jsonl` | 元ファイルごとの最新の取得・発見記録 |
 | `raw_root/<sourceId>/metadata/<hash>.json` | アプリの所属メタデータのスナップショット |
 | `data_root/source-aligned/<threadKey>/<hash>.json` | 変更しない正規化イベント、Rawの行参照、解析診断 |
-| `data_root/threads/<threadKey>/thread-notes/*.md` | 会話ごとに1つの、安定したIDを持つThread Note |
+| `data_root/thread-notes/YYYY/MM/*.md` | 会話ごとに1つの、安定したIDを持つThread Note |
 | `data_root/scopes/<scopeKey>/decisions/DR-*.md` | スコープのDecision Record |
 | `data_root/scopes/<scopeKey>/working-context.md` | スコープの現在のコンテキスト |
 | `data_root/catalog/threads.json`、`scopes.json` | 観測した所属と履歴、参照、処理状態 |
@@ -658,10 +717,6 @@ Thread Noteはスキーマ5、Decisionはスキーマ5です。旧Thread Noteの
 [データ契約](reference/data-contract.md)に、参照方式、スキーマ、完了状態、来歴の利用方法を記載しています。
 RDF出力、グローバルIRIの方針、OWL語彙、意味に基づくエンティティ同定、PROV-Oへの対応付けは
 下流リポジトリの責務です。本リポジトリはそのための根拠を出力し、オントロジーやグラフストアは実装しません。
-
-バージョン0.5は保存形式2を使います。旧Project単位の保存構造を自動移行・リセットしません。
-新しいdata/state/cacheの保存先（Rawも新しい保存先を推奨）を設定し、旧データを残して `clone` します。
-以前のProjectごとのbackfillやリセットを前提としたコマンドは公開しません。
 
 ## 開発
 

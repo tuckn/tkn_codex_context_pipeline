@@ -136,6 +136,7 @@ class Project:
     data_directory: Path | None = None
     repository_roots: tuple[Path, ...] | None = None
     decision_paths: tuple[Path, ...] | None = None
+    note_directory: Path | None = None
 
     def iter_note_paths(self) -> tuple[Path, ...]:
         if self.note_paths is not None:
@@ -149,7 +150,7 @@ class Project:
 
     @property
     def thread_notes_path(self) -> Path:
-        return self.context_path / "thread-notes"
+        return self.note_directory or self.context_path / "thread-notes"
 
     @property
     def state_path(self) -> Path:
