@@ -201,15 +201,15 @@ def test_config_show_reports_application_owned_summary_profile(
     output = json.loads(capsys.readouterr().out)
 
     profile = output["summaryProfile"]
-    assert profile["name"] == "default"
-    assert profile["source"].endswith("profiles/summary/default")
+    assert profile["name"] == "default-jp"
+    assert profile["source"].endswith("profiles/default-jp")
     assert len(profile["sha256"]) == 64
     assert profile["prompt"]["version"] == "3.4"
-    assert profile["prompt"]["source"].endswith("profiles/summary/default/prompt.md")
-    assert profile["schema"]["source"].endswith("profiles/summary/default/output.schema.json")
+    assert profile["prompt"]["source"].endswith("profiles/default-jp/prompt.md")
+    assert profile["schema"]["source"].endswith("profiles/default-jp/output.schema.json")
     assert len(profile["schema"]["sha256"]) == 64
     assert profile["template"]["version"] == "4.1"
-    assert profile["template"]["source"].endswith("profiles/summary/default/template.md")
+    assert profile["template"]["source"].endswith("profiles/default-jp/template.md")
     assert "decisionProfile" not in output and "workingContextProfile" not in output
     assert output["config"]["schema_version"] == CONFIG_SCHEMA_VERSION
     assert output["configSchema"] == {

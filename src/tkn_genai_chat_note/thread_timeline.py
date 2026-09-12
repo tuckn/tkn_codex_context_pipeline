@@ -67,10 +67,17 @@ def ordered_timeline(items: list[dict[str, Any]], events: Sequence[ChatEvent]) -
     return sorted(items, key=lambda item: order[item["startEventId"]])
 
 
-def render_timeline(items: list[dict[str, Any]], events: Sequence[ChatEvent]) -> str:
+def render_timeline(
+    items: list[dict[str, Any]], events: Sequence[ChatEvent], *, language: str = "ja",
+) -> str:
     validate_timeline(items, events)
     by_id = {event.id: event for event in events}
-    lines: list[str] = ["日時は日本時間（Asia/Tokyo）。ログの記録時刻であり、作業時間の計測値ではありません。", ""]
+    notice = (
+        "Times are in Japan Standard Time (Asia/Tokyo). These are log timestamps, not measured work durations."
+        if language == "en" else
+        "日時は日本時間（Asia/Tokyo）。ログの記録時刻であり、作業時間の計測値ではありません。"
+    )
+    lines: list[str] = [notice, ""]
     previous_day = ""
     for item in ordered_timeline(items, events):
         start, end = by_id[item["startEventId"]], by_id[item["endEventId"]]

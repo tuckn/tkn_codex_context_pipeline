@@ -44,6 +44,10 @@ def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--model")
     parser.add_argument(
+        "--session-note-profile", choices=("default-jp", "default-en"),
+        help="Session Note language (generation.session_note_profile)",
+    )
+    parser.add_argument(
         "--reasoning-effort",
         choices=("low", "medium", "high", "xhigh", "max", "ultra"),
     )
@@ -74,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="tkn-genai-chat-note",
         description="Preserve local AI chat evidence and generate reusable Session Notes.",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 0.11.0")
+    parser.add_argument("--version", action="version", version="%(prog)s 0.12.0")
     _add_runtime_options(parser)
     commands = parser.add_subparsers(dest="command", required=True)
     config = commands.add_parser("config", help="Create or inspect configuration")
@@ -144,7 +148,10 @@ def _overrides(args: argparse.Namespace) -> dict[str, Any]:
         "copilot_executable",
         "ollama_base_url",
     )
-    return {name: getattr(args, name) for name in names if getattr(args, name, None) is not None}
+    result = {name: getattr(args, name) for name in names if getattr(args, name, None) is not None}
+    if args.session_note_profile is not None:
+        result["generation"] = {"session_note_profile": args.session_note_profile}
+    return result
 
 
 def _configure_logging(args: argparse.Namespace) -> None:
@@ -300,7 +307,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             resolved = resolution.config
             try:
-                profile = load_summary_profile()
+                profile = load_summary_profile(resolved.generation.session_note_profile)
             except (RuntimeError, ValueError) as exc:
                 raise PipelineError(str(exc)) from exc
             _emit(

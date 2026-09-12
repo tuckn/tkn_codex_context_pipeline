@@ -119,6 +119,21 @@ Inference transport configuration and authentication details are retained in
 external CLI may send selected inputs to its service; Ollama is restricted to
 a loopback endpoint. Model availability and authentication are provider-owned.
 
+### Session Note language
+
+Set `generation.session_note_profile` in your existing `config.yaml` to `default-jp` (Japanese, the default) or `default-en` (English). The following is a configuration fragment; retain your other settings.
+
+```yaml
+generation:
+  session_note_profile: default-en
+```
+
+For a single run, use `tkn-genai-chat-note --session-note-profile default-en pull`. The option precedes the command. `config show` reports the selected profile, its resources and hashes, and the configuration source.
+
+Both built-in profiles preserve the same schema, headings, timeline, citations, and state rules. Only narrative language and explanatory notices change; times remain in Asia/Tokyo. Custom profile names, directories, and prompts are not supported. Bundles are packaged under `profiles/default-jp/` and `profiles/default-en/`.
+
+Changing language makes an existing note eligible for regeneration on the next build/pull. Each conversation retains one note and its identity; this does not create parallel language editions. Reviewed or edited notes retain their existing protection, and dry-run never generates or writes. Interrupted work from a different profile is not reused.
+
 ### Chat sources and generation AI
 
 `chat.providers` configures conversation acquisition; `generation.providers`
@@ -156,7 +171,7 @@ in one run and acquiring Claude Code/Copilot conversations remain future work.
 
 ### Migrating older configuration
 
-The configuration schema is `"4.0.0"`. Schema 3.0.x fields `codex_home`,
+The configuration schema is `"4.1.0"`. Existing 4.0.x configuration remains readable and defaults to Japanese when no profile is specified. Schema 3.0.x fields `codex_home`,
 `source_id`, and `include_archived` migrate in memory to
 `chat.providers.codex`; `codex_home` becomes `home`. Schema 2.0.x–2.2.x and
 integer `2` remain readable when `scopes` is empty or absent. Reading never
@@ -229,7 +244,7 @@ for this rename. To update an existing CLI installation, run `uv tool install . 
 
 ### Migrating older storage
 
-Storage is version `4`; configuration remains schema `"4.0.0"`. Initialize fresh
+Storage is version `4`; configuration remains schema `"4.1.0"`. Initialize fresh
 roots with `clone`. Ordinary processing stops with migration guidance when it
 finds storage 2/3 or an older Raw-only store. Keep the old source_id and all four
 roots configured, then run:

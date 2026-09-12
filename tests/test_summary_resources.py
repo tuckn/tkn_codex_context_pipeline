@@ -18,7 +18,7 @@ def test_packaged_schema_is_strict_and_versioned_by_hash() -> None:
     resource = load_summary_schema()
     schema = resource.value
 
-    assert resource.source.endswith("profiles/summary/default/output.schema.json")
+    assert resource.source.endswith("profiles/default-jp/output.schema.json")
     assert len(resource.sha256) == 64
     assert schema["additionalProperties"] is False
     assert set(schema["required"]) == set(schema["properties"])
@@ -29,11 +29,11 @@ def test_packaged_schema_is_strict_and_versioned_by_hash() -> None:
 def test_default_summary_profile_loads_one_application_owned_bundle() -> None:
     profile = load_summary_profile()
 
-    assert profile.name == "default"
-    assert profile.source.endswith("profiles/summary/default")
-    assert profile.prompt.source.endswith("profiles/summary/default/prompt.md")
-    assert profile.schema.source.endswith("profiles/summary/default/output.schema.json")
-    assert profile.template.source.endswith("profiles/summary/default/template.md")
+    assert profile.name == "default-jp"
+    assert profile.source.endswith("profiles/default-jp")
+    assert profile.prompt.source.endswith("profiles/default-jp/prompt.md")
+    assert profile.schema.source.endswith("profiles/default-jp/output.schema.json")
+    assert profile.template.source.endswith("profiles/default-jp/template.md")
     assert len(profile.sha256) == 64
 
 

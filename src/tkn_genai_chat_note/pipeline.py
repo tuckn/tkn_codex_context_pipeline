@@ -16,7 +16,6 @@ from .config import AppConfig
 from .frontmatter import parse_simple_frontmatter
 from .provenance import ProvenanceStore, json_bytes
 from .session_notes import (
-    SUMMARY_PROFILE,
     Candidate,
     PipelineConfig,
     PipelineError,
@@ -66,13 +65,14 @@ def _save_ledger(config: AppConfig, ledger: dict[str, Any], dry_run: bool) -> No
 
 
 def _agent(config: PipelineConfig, stage: str) -> dict[str, Any]:
-    profile = SUMMARY_PROFILE
+    profile = config.summary_profile
     return {
         "software": "tkn-genai-chat-note-pipeline",
-        "version": "0.11.0",
+        "version": "0.12.0",
         "provider": config.provider,
         "model": config.model,
         "reasoningEffort": config.reasoning_effort,
+        "profile": profile.name,
         "profileSha256": profile.sha256,
         "promptVersion": profile.prompt.version,
         "promptSha256": profile.prompt.sha256,

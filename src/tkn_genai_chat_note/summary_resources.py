@@ -8,14 +8,15 @@ import re
 import uuid
 from dataclasses import dataclass
 from importlib.resources import files
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
 from .prompting import SummaryPrompt, parse_summary_prompt
 
-DEFAULT_SUMMARY_PROFILE = "default"
-SUMMARY_PROFILES_ROOT = "profiles/summary"
+DEFAULT_SUMMARY_PROFILE = "default-jp"
+BUILT_IN_SUMMARY_PROFILES = ("default-jp", "default-en")
+SUMMARY_PROFILES_ROOT = "profiles"
 PROMPT_FILENAME = "prompt.md"
 SCHEMA_FILENAME = "output.schema.json"
 TEMPLATE_FILENAME = "template.md"
@@ -94,9 +95,13 @@ class SummaryProfile:
     schema: SummarySchema
     template: SummaryTemplate
 
+    @property
+    def language(self) -> Literal["ja", "en"]:
+        return "en" if self.name == "default-en" else "ja"
+
 
 def _profile_resource_name(profile_name: str, filename: str) -> str:
-    if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", profile_name) is None:
+    if profile_name not in BUILT_IN_SUMMARY_PROFILES:
         raise RuntimeError(f"invalid application-owned summary profile name: {profile_name}")
     return f"{SUMMARY_PROFILES_ROOT}/{profile_name}/{filename}"
 

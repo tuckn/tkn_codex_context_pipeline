@@ -36,15 +36,16 @@ def test_packaged_example_config_uses_portable_home_paths() -> None:
     assert "installed_at" not in value
     providers = value["chat"]["providers"]
     assert providers["codex"] == {
-        "enabled": True, "home": "~/.codex", "source_id": "my-windows-pc", "include_archived": True
+        "enabled": True, "home": "~/.codex", "source_id": "my-windows-note-pc", "include_archived": True
     }
     for provider, home in (("claude-code", "~/.claude"), ("github-copilot", "~/.copilot")):
-        assert providers[provider] == {"enabled": False, "home": home, "source_id": f"windows-{provider}"}
+        assert providers[provider] == {"enabled": False, "home": home, "source_id": "my-windows-note-pc"}
     assert not {"codex_home", "source_id", "include_archived"}.intersection(value)
     assert "scopes" not in value
     assert value["schema_version"] == CONFIG_SCHEMA_VERSION
     assert config_example_text().splitlines()[0] == f'schema_version: "{CONFIG_SCHEMA_VERSION}"'
     assert value["generation"] == {
+        "session_note_profile": "default-jp",
         "active_provider": "codex",
         "providers": {
             "codex": {
@@ -195,7 +196,7 @@ def test_config_file_requires_schema_version(tmp_path: Path) -> None:
         ('"2.0"', "expected a quoted MAJOR.MINOR.PATCH"),
         ('"2.0.0-rc1"', "expected a quoted MAJOR.MINOR.PATCH"),
         ('"1.9.0"', "schema v1 is no longer supported"),
-        ('"4.1.0"', "unsupported newer configuration schema_version"),
+        ('"4.2.0"', "unsupported newer configuration schema_version"),
         ('"5.0.0"', "unsupported newer configuration schema_version"),
     ],
 )
@@ -213,13 +214,13 @@ def test_unsupported_schema_versions_are_rejected(
 
 def test_same_major_minor_newer_patch_is_accepted(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
-    write_yaml(path, {"schema_version": "4.0.7", "idle_minutes": 10})
+    write_yaml(path, {"schema_version": "4.1.7", "idle_minutes": 10})
 
     resolution = resolve_app_config(explicit_path=path, cwd=tmp_path)
 
     assert resolution.config.schema_version == CONFIG_SCHEMA_VERSION
     explicit = resolution.layers[-1]
-    assert explicit["schemaVersion"] == "4.0.7"
+    assert explicit["schemaVersion"] == "4.1.7"
     assert explicit["effectiveSchemaVersion"] == CONFIG_SCHEMA_VERSION
     assert explicit["migration"] is None
 

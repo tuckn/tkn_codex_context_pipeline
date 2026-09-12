@@ -1,4 +1,4 @@
-schema_version: "4.0.0"
+schema_version: "4.1.0"
 # Shared roots. Source files use <root>/<provider>/<source_id>/.
 # config show displays the resolved paths; catalog and provenance are shared under data_root.
 raw_root: ~/.tkn/genai_chat_note_pipeline/raw
@@ -26,6 +26,8 @@ chat:
       enabled: false
       home: ~/.copilot
 generation:
+  # Built-in profiles only: default-jp (Japanese) or default-en (English).
+  session_note_profile: default-jp
   active_provider: codex
   providers:
     codex:

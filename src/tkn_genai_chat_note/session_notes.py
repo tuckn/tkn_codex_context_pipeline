@@ -14,7 +14,7 @@ from collections.abc import Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from functools import lru_cache
+from functools import cached_property, lru_cache
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Protocol
@@ -52,6 +52,8 @@ from .prompting import (
 from .raw_capture import RawCaptureError, RawSourceInput, ingest_raw_sources
 from .safety import redact_secret_like_content
 from .summary_resources import (
+    DEFAULT_SUMMARY_PROFILE,
+    SummaryProfile,
     SummaryTemplate,
     load_summary_profile,
     render_summary_template,
@@ -81,15 +83,6 @@ AVOIDABLE_ENGLISH_PHRASES = {
     "supplied events",
 }
 SUMMARY_PROFILE = load_summary_profile()
-SUMMARY_PROMPT_RESOURCE = SUMMARY_PROFILE.prompt
-SUMMARY_SCHEMA_RESOURCE = SUMMARY_PROFILE.schema
-SUMMARY_TEMPLATE_RESOURCE = SUMMARY_PROFILE.template
-NOTE_SCHEMA = SUMMARY_SCHEMA_RESOURCE.value
-OVERVIEW_SCHEMA = deepcopy(NOTE_SCHEMA)
-OVERVIEW_SCHEMA["properties"].pop("timeline")
-OVERVIEW_SCHEMA["required"].remove("timeline")
-ALLOWED_STATUS = set(NOTE_SCHEMA["properties"]["lastKnownState"]["properties"]["workState"]["enum"])
-ALLOWED_LABELS = set(NOTE_SCHEMA["properties"]["timeline"]["items"]["properties"]["label"]["enum"])
 
 
 class PipelineError(RuntimeError):
@@ -116,6 +109,11 @@ class PipelineConfig:
     idle_minutes: int = DEFAULT_IDLE_MINUTES
     runtime_minutes: int = DEFAULT_RUNTIME_MINUTES
     model_timeout_seconds: int = DEFAULT_MODEL_TIMEOUT_SECONDS
+    session_note_profile: str = DEFAULT_SUMMARY_PROFILE
+
+    @cached_property
+    def summary_profile(self) -> SummaryProfile:
+        return load_summary_profile(self.session_note_profile)
 
 
 @dataclass(frozen=True)
@@ -293,6 +291,7 @@ def make_config(
         .expanduser()
         .absolute(),
         source_id=existing.source_id if existing else DEFAULT_SOURCE_ID,
+        session_note_profile=existing.session_note_profile if existing else DEFAULT_SUMMARY_PROFILE,
         codex_bin=resolve_codex_bin(codex_bin or (existing.codex_bin if existing else "")),
         provider=existing.provider if existing else "codex",
         claude_bin=existing.claude_bin if existing else "claude",
@@ -313,6 +312,7 @@ def config_json(config: PipelineConfig) -> dict[str, Any]:
         "sessionsRoot": str(config.sessions_root),
         "rawRoot": str(config.raw_root),
         "sourceId": config.source_id,
+        "sessionNoteProfile": config.session_note_profile,
         "provider": config.provider,
         "codexBin": config.codex_bin,
         "claudeBin": config.claude_bin,
@@ -345,6 +345,7 @@ def load_config(path: Path | None = None) -> PipelineConfig:
         sessions_root=Path(str(value.get("sessionsRoot") or "")).expanduser().absolute(),
         raw_root=Path(str(value.get("rawRoot") or (default_store_root() / "raw"))).expanduser().absolute(),
         source_id=str(value.get("sourceId") or DEFAULT_SOURCE_ID),
+        session_note_profile=str(value.get("sessionNoteProfile", DEFAULT_SUMMARY_PROFILE)),
         codex_bin=str(value.get("codexBin") or ""),
         provider=str(value.get("provider") or "codex"),
         claude_bin=str(value.get("claudeBin") or "claude"),
@@ -469,8 +470,9 @@ def update_refresh_state(
     candidate: Candidate,
     note_path: Path,
 ) -> None:
+    profile = config.summary_profile
     state = load_refresh_state(project, config)
-    prompt = SUMMARY_PROMPT_RESOURCE
+    prompt = profile.prompt
     source = state["sources"][config.source_id]
     relative_note = note_path.relative_to(project.context_path).as_posix()
     processed_at = now_iso()
@@ -486,10 +488,10 @@ def update_refresh_state(
         "summaryPromptId": prompt.prompt_id,
         "summaryPromptVersion": prompt.version,
         "summaryPromptSha256": prompt.sha256,
-        "outputSchemaSha256": SUMMARY_SCHEMA_RESOURCE.sha256,
-        "templateId": SUMMARY_TEMPLATE_RESOURCE.template_id,
-        "templateVersion": SUMMARY_TEMPLATE_RESOURCE.version,
-        "templateSha256": SUMMARY_TEMPLATE_RESOURCE.sha256,
+        "outputSchemaSha256": profile.schema.sha256,
+        "templateId": profile.template.template_id,
+        "templateVersion": profile.template.version,
+        "templateSha256": profile.template.sha256,
         "rendererVersion": RENDERER_VERSION,
         "noteHash": sha256(note_path.read_bytes()).hexdigest(),
         "sourceRefs": [candidate.source_ref],
@@ -943,8 +945,12 @@ def chunk_events(
 
 def validate_note_data(
     value: Any, allowed_event_ids: set[str], *, overview_only: bool = False,
+    profile: SummaryProfile = SUMMARY_PROFILE,
 ) -> dict[str, Any]:
-    schema = OVERVIEW_SCHEMA if overview_only else NOTE_SCHEMA
+    schema = deepcopy(profile.schema.value)
+    if overview_only:
+        schema["properties"].pop("timeline")
+        schema["required"].remove("timeline")
     try:
         validate_summary_output_schema(value, schema)
     except ValueError as exc:
@@ -977,7 +983,7 @@ def validate_note_data(
         raise PipelineError(f"Inference output cited unknown event ids: {', '.join(sorted(invalid))}")
     narrative = json.dumps(value, ensure_ascii=False)
     avoidable = sorted(phrase for phrase in AVOIDABLE_ENGLISH_PHRASES if phrase in narrative.casefold())
-    if avoidable:
+    if profile.name == "default-jp" and avoidable:
         raise PipelineError("Inference output contains avoidable English prose: " + ", ".join(avoidable))
     return value
 
@@ -995,7 +1001,12 @@ class ProviderSummarizer:
         self.chunk_characters = chunk_characters
         self.sleeper = sleeper
         self.observer = observer
-        self.prompt = SUMMARY_PROMPT_RESOURCE
+        self.profile = config.summary_profile
+        self.prompt = self.profile.prompt
+        self.schema = self.profile.schema.value
+        self.overview_schema = deepcopy(self.schema)
+        self.overview_schema["properties"].pop("timeline")
+        self.overview_schema["required"].remove("timeline")
         self.deadline: datetime | None = None
         self.last_metrics: dict[str, int] = {}
 
@@ -1031,7 +1042,7 @@ class ProviderSummarizer:
                     return invoke_structured(
                         self.config,
                         prompt,
-                        OVERVIEW_SCHEMA if overview_only else NOTE_SCHEMA,
+                        self.overview_schema if overview_only else self.schema,
                         cwd=temp,
                         timeout=timeout,
                     )
@@ -1056,10 +1067,10 @@ class ProviderSummarizer:
             value = self._invoke(current_prompt, overview_only=overview_only)
             try:
                 # Check shape first so independent semantic checks can all run safely.
-                validate_summary_output_schema(value, OVERVIEW_SCHEMA if overview_only else NOTE_SCHEMA)
+                validate_summary_output_schema(value, self.overview_schema if overview_only else self.schema)
                 errors: list[str] = []
                 try:
-                    validate_note_data(value, allowed_event_ids, overview_only=overview_only)
+                    validate_note_data(value, allowed_event_ids, overview_only=overview_only, profile=self.profile)
                 except PipelineError as error:
                     errors.append(str(error))
                 if events and not overview_only:
@@ -1138,11 +1149,15 @@ class ProviderSummarizer:
         limitations = list(result["sourceLimitations"])
         unknown_times = [event.id for event in candidate.events if event_time(event.timestamp) is None]
         if unknown_times:
-            limitations.append("日時またはタイムゾーンが確認できないイベント：" + ", ".join(unknown_times))
+            label = (
+                "Events with an unknown timestamp or time zone: " if self.profile.language == "en"
+                else "日時またはタイムゾーンが確認できないイベント："
+            )
+            limitations.append(label + ", ".join(unknown_times))
         result["sourceLimitations"] = list(dict.fromkeys(limitations))
         result["timeline"] = ordered_timeline(result["timeline"], candidate.events)
         validate_timeline(result["timeline"], candidate.events)
-        return validate_note_data(result, allowed_ids)
+        return validate_note_data(result, allowed_ids, profile=self.profile)
 
 
 # Backward-compatible import for callers that used the original provider-specific name.
@@ -1157,7 +1172,8 @@ def source_timestamp(value: str) -> datetime:
 
 
 def generator_fingerprint(config: PipelineConfig) -> str:
-    prompt = SUMMARY_PROMPT_RESOURCE
+    profile = config.summary_profile
+    prompt = profile.prompt
     value = {
         "provider": config.provider,
         "model": config.model,
@@ -1166,10 +1182,10 @@ def generator_fingerprint(config: PipelineConfig) -> str:
         "summaryPromptId": prompt.prompt_id,
         "summaryPromptVersion": prompt.version,
         "summaryPromptSha256": prompt.sha256,
-        "outputSchemaSha256": SUMMARY_SCHEMA_RESOURCE.sha256,
-        "templateId": SUMMARY_TEMPLATE_RESOURCE.template_id,
-        "templateVersion": SUMMARY_TEMPLATE_RESOURCE.version,
-        "templateSha256": SUMMARY_TEMPLATE_RESOURCE.sha256,
+        "outputSchemaSha256": profile.schema.sha256,
+        "templateId": profile.template.template_id,
+        "templateVersion": profile.template.version,
+        "templateSha256": profile.template.sha256,
         "rendererVersion": RENDERER_VERSION,
     }
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
@@ -1266,9 +1282,11 @@ def render_note(
     data: dict[str, Any],
     existing: dict[str, str],
     *,
-    template: SummaryTemplate = SUMMARY_TEMPLATE_RESOURCE,
+    template: SummaryTemplate | None = None,
+    profile: SummaryProfile = SUMMARY_PROFILE,
 ) -> str:
-    default_prompt = SUMMARY_PROMPT_RESOURCE
+    template = template or profile.template
+    default_prompt = profile.prompt
     started = source_timestamp(candidate.started_at)
     created = existing.get("date") or started.isoformat(timespec="seconds")
     session_note_id = (
@@ -1292,7 +1310,7 @@ def render_note(
         ),
         ("promptId", data.get("_summaryPromptId", default_prompt.prompt_id)),
         ("promptVersion", data.get("_summaryPromptVersion", default_prompt.version)),
-        ("outputSchemaSha256", SUMMARY_SCHEMA_RESOURCE.sha256),
+        ("outputSchemaSha256", profile.schema.sha256),
         ("templateId", template.template_id),
         ("templateVersion", template.version),
         ("generatorPromptVersion", GENERATOR_PROMPT_VERSION),
@@ -1318,7 +1336,7 @@ def render_note(
     if candidate.project.source_project_id:
         fields.append(("sourceProjectId", candidate.project.source_project_id))
     summary_lines = [_source_record(item) for item in data.get("summaryItems", [])]
-    timeline_text = render_timeline(data["timeline"], candidate.events)
+    timeline_text = render_timeline(data["timeline"], candidate.events, language=profile.language)
     evidence = [item for item in data.get("evidence", []) if str(item.get("text") or "").strip()]
     limitations = [str(value).strip() for value in data.get("sourceLimitations", []) if str(value).strip()]
     return render_summary_template(
@@ -1373,6 +1391,7 @@ def write_candidate_note(
     work_cache_root: Path,
     force: bool = False,
 ) -> Path:
+    profile = config.summary_profile
     project_key = sha256(candidate.project.project_id.encode()).hexdigest()[:16]
     thread_key = sha256(candidate.thread_id.encode()).hexdigest()[:16]
     pending_parent = work_cache_root.expanduser().absolute() / "pending" / project_key
@@ -1423,7 +1442,7 @@ def write_candidate_note(
             shutil.rmtree(work_root)
         data = summarizer.generate(candidate)
         allowed_ids = {event.id for event in candidate.events}
-        validate_note_data(data, allowed_ids)
+        validate_note_data(data, allowed_ids, profile=profile)
         revalidate_candidate(candidate, config)
         note_path, existing = choose_note_path(
             candidate,
@@ -1434,10 +1453,10 @@ def write_candidate_note(
         data["_generatorProvider"] = config.provider
         data["_generatorModel"] = config.model
         data["_generatorReasoningEffort"] = config.reasoning_effort
-        prompt = SUMMARY_PROMPT_RESOURCE
+        prompt = profile.prompt
         data["_summaryPromptId"] = prompt.prompt_id
         data["_summaryPromptVersion"] = prompt.version
-        rendered = render_note(candidate, data, existing)
+        rendered = render_note(candidate, data, existing, profile=profile)
         staged_note = work_root / note_path.name
         atomic_write_text(staged_note, rendered)
         validate_session_note(staged_note)
@@ -1658,7 +1677,8 @@ def current_note_matches_generation(
     candidate: Candidate,
     config: PipelineConfig,
 ) -> bool:
-    prompt = SUMMARY_PROMPT_RESOURCE
+    profile = config.summary_profile
+    prompt = profile.prompt
     matches = find_note_matches(candidate.project, candidate.thread_id)
     if len(matches) > 1:
         raise PipelineError(
@@ -1692,9 +1712,9 @@ def current_note_matches_generation(
         and metadata.get("generatorReasoningEffort") == config.reasoning_effort
         and metadata.get("promptId") == prompt.prompt_id
         and metadata.get("promptVersion") == prompt.version
-        and metadata.get("outputSchemaSha256") == SUMMARY_SCHEMA_RESOURCE.sha256
-        and metadata.get("templateId") == SUMMARY_TEMPLATE_RESOURCE.template_id
-        and metadata.get("templateVersion") == SUMMARY_TEMPLATE_RESOURCE.version
+        and metadata.get("outputSchemaSha256") == profile.schema.sha256
+        and metadata.get("templateId") == profile.template.template_id
+        and metadata.get("templateVersion") == profile.template.version
         and metadata.get("generatorPromptVersion") == str(GENERATOR_PROMPT_VERSION)
         and metadata.get("rendererVersion") == str(RENDERER_VERSION)
     )
@@ -1707,7 +1727,8 @@ def validate_staged_session_notes(
     *,
     strict_threads: set[str] | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
-    prompt = SUMMARY_PROMPT_RESOURCE
+    profile = config.summary_profile
+    prompt = profile.prompt
     by_thread: dict[str, str] = {}
     note_hashes: dict[str, str] = {}
     candidates_by_thread = {candidate.thread_id: candidate for candidate in candidates}
@@ -1775,9 +1796,9 @@ def validate_staged_session_notes(
                     "generatorReasoningEffort": config.reasoning_effort,
                     "promptId": prompt.prompt_id,
                     "promptVersion": prompt.version,
-                    "outputSchemaSha256": SUMMARY_SCHEMA_RESOURCE.sha256,
-                    "templateId": SUMMARY_TEMPLATE_RESOURCE.template_id,
-                    "templateVersion": SUMMARY_TEMPLATE_RESOURCE.version,
+                    "outputSchemaSha256": profile.schema.sha256,
+                    "templateId": profile.template.template_id,
+                    "templateVersion": profile.template.version,
                     "generatorPromptVersion": str(GENERATOR_PROMPT_VERSION),
                     "rendererVersion": str(RENDERER_VERSION),
                     "automatedValidation": "passed",
@@ -1888,9 +1909,10 @@ def rebuild_state(
     note_by_thread: dict[str, str],
     note_hash_by_thread: dict[str, str],
 ) -> dict[str, Any]:
+    profile = config.summary_profile
     state = deepcopy(previous)
     processed_at = now_iso()
-    prompt = SUMMARY_PROMPT_RESOURCE
+    prompt = profile.prompt
     source = state["sources"][config.source_id]
     threads = deepcopy(source.get("threads", {}))
     for candidate in candidates:
@@ -1906,10 +1928,10 @@ def rebuild_state(
             "summaryPromptId": prompt.prompt_id,
             "summaryPromptVersion": prompt.version,
             "summaryPromptSha256": prompt.sha256,
-            "outputSchemaSha256": SUMMARY_SCHEMA_RESOURCE.sha256,
-            "templateId": SUMMARY_TEMPLATE_RESOURCE.template_id,
-            "templateVersion": SUMMARY_TEMPLATE_RESOURCE.version,
-            "templateSha256": SUMMARY_TEMPLATE_RESOURCE.sha256,
+            "outputSchemaSha256": profile.schema.sha256,
+            "templateId": profile.template.template_id,
+            "templateVersion": profile.template.version,
+            "templateSha256": profile.template.sha256,
             "rendererVersion": RENDERER_VERSION,
             "noteHash": note_hash_by_thread[candidate.thread_id],
             "sourceRefs": [candidate.source_ref],
@@ -2097,6 +2119,7 @@ def execute_rebuild(
     work_cache_root: Path | None = None,
     progress: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[dict[str, Any], Path | None]:
+    profile = config.summary_profile
     started = now_local()
     start_deadline = started + timedelta(minutes=config.runtime_minutes)
     hard_deadline = start_deadline + timedelta(minutes=IN_FLIGHT_GRACE_MINUTES)
@@ -2125,7 +2148,7 @@ def execute_rebuild(
         project,
         source_inputs=source_inputs,
     )
-    prompt = SUMMARY_PROMPT_RESOURCE
+    prompt = profile.prompt
     candidates_by_thread = {item.thread_id: item for item in candidates}
 
     preserve: list[Path] = []
@@ -2165,11 +2188,11 @@ def execute_rebuild(
                     and metadata.get("promptId") == prompt.prompt_id
                     and metadata.get("promptVersion") == prompt.version
                     and metadata.get("outputSchemaSha256")
-                    == SUMMARY_SCHEMA_RESOURCE.sha256
+                    == profile.schema.sha256
                     and metadata.get("templateId")
-                    == SUMMARY_TEMPLATE_RESOURCE.template_id
+                    == profile.template.template_id
                     and metadata.get("templateVersion")
-                    == SUMMARY_TEMPLATE_RESOURCE.version
+                    == profile.template.version
                 )
                 if not prompt_version or not renderer_version:
                     generator_versions["unknown"] += 1
@@ -2217,12 +2240,12 @@ def execute_rebuild(
             "summaryPromptVersion": prompt.version,
             "summaryPromptSource": prompt.source,
             "summaryPromptSha256": prompt.sha256,
-            "outputSchemaSource": SUMMARY_SCHEMA_RESOURCE.source,
-            "outputSchemaSha256": SUMMARY_SCHEMA_RESOURCE.sha256,
-            "templateId": SUMMARY_TEMPLATE_RESOURCE.template_id,
-            "templateVersion": SUMMARY_TEMPLATE_RESOURCE.version,
-            "templateSource": SUMMARY_TEMPLATE_RESOURCE.source,
-            "templateSha256": SUMMARY_TEMPLATE_RESOURCE.sha256,
+            "outputSchemaSource": profile.schema.source,
+            "outputSchemaSha256": profile.schema.sha256,
+            "templateId": profile.template.template_id,
+            "templateVersion": profile.template.version,
+            "templateSource": profile.template.source,
+            "templateSha256": profile.template.sha256,
             "rendererVersion": RENDERER_VERSION,
             "fingerprint": generator_fingerprint(config),
         },
@@ -2332,7 +2355,7 @@ def execute_rebuild(
             )
         try:
             data = summarizer.generate(candidate)
-            validate_note_data(data, {event.id for event in candidate.events})
+            validate_note_data(data, {event.id for event in candidate.events}, profile=profile)
             revalidate_candidate(candidate, config)
             note_path, _existing = choose_note_path(
                 candidate,
@@ -2345,7 +2368,7 @@ def execute_rebuild(
             data["_generatorProvider"] = config.provider
             data["_generatorModel"] = config.model
             data["_generatorReasoningEffort"] = config.reasoning_effort
-            prompt = SUMMARY_PROMPT_RESOURCE
+            prompt = profile.prompt
             data["_summaryPromptId"] = prompt.prompt_id
             data["_summaryPromptVersion"] = prompt.version
             existing_metadata = existing_metadata_by_thread.get(candidate.thread_id)
@@ -2355,6 +2378,7 @@ def execute_rebuild(
                     candidate,
                     data,
                     existing_metadata[1] if existing_metadata is not None else {},
+                    profile=profile,
                 ),
             )
             note_hash = sha256(note_path.read_bytes()).hexdigest()

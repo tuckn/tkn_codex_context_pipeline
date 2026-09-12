@@ -118,6 +118,21 @@ tkn-genai-chat-note --idle-minutes 0 --runtime-minutes 60 pull --limit 20
 Ollamaの接続先はループバックに限定します。利用可能なモデルと認証はプロバイダー側の管理です。
 
 
+### Session Noteの言語
+
+既存の`config.yaml`の`generation.session_note_profile`で、`default-jp`（日本語・既定）または`default-en`（英語）を選択します。以下は設定の抜粋です。他の設定は維持してください。
+
+```yaml
+generation:
+  session_note_profile: default-en
+```
+
+1回だけ切り替える場合は、`tkn-genai-chat-note --session-note-profile default-en pull`を使います。オプションはコマンドの前に指定します。`config show`に選択したprofile、リソースとhash、設定元を表示します。
+
+両profileのschema・見出し・時系列・引用・状態判定は共通です。本文の言語と説明文だけを切り替え、時刻はAsia/Tokyoを維持します。カスタムprofile名・フォルダ・promptの指定には対応しません。組み込みリソースは`profiles/default-jp/`と`profiles/default-en/`に配置しています。
+
+言語を変更すると、次のbuild/pullで既存ノートが再生成の対象になります。1会話につき1ノートとそのIDを維持するため、言語別のノートは併存しません。レビュー済み・編集済みノートの保護は維持し、dry-runでは生成も書き込みも行いません。異なるprofileの途中生成結果は再利用しません。
+
 ### Chat取得元と生成AI
 
 `chat.providers`は会話の取得元、`generation.providers`はノート生成に使うAIの設定です。
@@ -149,7 +164,7 @@ Ollamaの接続先はループバックに限定します。利用可能なモ�
 
 ### 旧設定からの移行
 
-設定schemaは`"4.0.0"`です。旧schema 3.0.xの`codex_home`、`source_id`、
+設定schemaは`"4.1.0"`です。既存の4.0.x設定も読み取れ、profile未指定時は日本語を使います。旧schema 3.0.xの`codex_home`、`source_id`、
 `include_archived`は、読み込み時に`chat.providers.codex`配下へ移行します。
 `codex_home`の新しいキー名は`home`です。schema 2.0.x〜2.2.xと整数`2`も、
 `scopes`が空または未指定の場合は従来どおり読み取れます。
@@ -216,7 +231,7 @@ review済み・手編集済みノートは既存の保護ルールに従いま�
 下流の読み取り側にはschema 6への対応が必要です。別アプリのcuration・insightとの連携は、
 今回の名称変更について未検証です。既存CLIの更新には`uv tool install . --reinstall`を使います。
 
-storageは`4`、設定schemaは引き続き`"4.0.0"`です。新規の保存先は通常の`clone`で初期化します。
+storageは`4`、設定schemaは引き続き`"4.1.0"`です。新規の保存先は通常の`clone`で初期化します。
 旧storage 2/3や旧Rawだけの領域を検出した場合、通常処理は移行の案内を出して停止します。
 `source_id`と4つのrootを旧領域に合わせてから、次の順に実行します。
 

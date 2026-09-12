@@ -28,8 +28,8 @@ from .session_notes import (
     atomic_write_text,
 )
 
-CONFIG_SCHEMA_VERSION: Literal["4.0.0"] = "4.0.0"
-_CONFIG_SCHEMA_VERSION_PARTS = (4, 0, 0)
+CONFIG_SCHEMA_VERSION: Literal["4.1.0"] = "4.1.0"
+_CONFIG_SCHEMA_VERSION_PARTS = (4, 1, 0)
 _CONFIG_SCHEMA_VERSION_PATTERN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 APP_DIRECTORY_NAME = "genai_chat_note_pipeline"
 CONFIG_EXAMPLE_RESOURCE = "resources/config.example.yaml"
@@ -116,6 +116,7 @@ class GenerationConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    session_note_profile: Literal["default-jp", "default-en"] = "default-jp"
     active_provider: InferenceProvider = "codex"
     providers: dict[InferenceProvider, ProviderConfig] = Field(default_factory=_default_providers)
 
@@ -205,7 +206,7 @@ class AppConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["4.0.0"] = CONFIG_SCHEMA_VERSION
+    schema_version: Literal["4.1.0"] = CONFIG_SCHEMA_VERSION
     installed_at: datetime | None = None
     chat: ChatConfig = Field(default_factory=ChatConfig)
     raw_root: Path = Field(default_factory=lambda: default_app_root() / "raw")
@@ -346,6 +347,7 @@ class AppConfig(BaseModel):
             sessions_root=self.sessions_root,
             raw_root=self.raw_root,
             source_id=self.source_id,
+            session_note_profile=self.generation.session_note_profile,
             provider=self.provider,
             codex_bin=self.codex_executable,
             claude_bin=self.claude_executable,
