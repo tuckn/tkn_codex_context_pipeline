@@ -13,7 +13,7 @@ from tkn_genai_chat_note.config import (
     load_app_config,
     resolve_app_config,
 )
-from tkn_genai_chat_note.thread_notes import PipelineError
+from tkn_genai_chat_note.session_notes import PipelineError
 
 
 def write_yaml(path: Path, value: dict[str, object]) -> None:
@@ -343,7 +343,7 @@ def test_inference_providers_resolve_without_changing_codex_source(
     assert config.provider == provider
     assert config.model == model
     assert config.sessions_root == config.codex_home / "sessions"
-    assert config.thread_note_pipeline_config(allow_missing_watermark=True).provider == provider
+    assert config.session_note_pipeline_config(allow_missing_watermark=True).provider == provider
 
 
 def test_remote_ollama_endpoint_is_rejected(tmp_path: Path) -> None:

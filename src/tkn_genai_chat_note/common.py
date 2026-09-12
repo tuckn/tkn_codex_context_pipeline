@@ -1,4 +1,4 @@
-"""Small rendering primitives used by Thread Note v3."""
+"""Small rendering primitives used by Session Notes."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from collections.abc import Iterable
 
 def slugify(value: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9]+", "-", value.strip().lower()).strip("-")
-    return slug or "thread-note"
+    return slug or "session-note"
 
 
 def yaml_string(value: str) -> str:

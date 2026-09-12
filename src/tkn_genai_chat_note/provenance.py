@@ -13,8 +13,8 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from .frontmatter import parse_simple_frontmatter
+from .session_notes import PipelineError, atomic_write_bytes, atomic_write_json, now_iso
 from .storage import read_json
-from .thread_notes import PipelineError, atomic_write_bytes, atomic_write_json, now_iso
 
 PROVENANCE_SCHEMA_VERSION = "1.0.0"
 

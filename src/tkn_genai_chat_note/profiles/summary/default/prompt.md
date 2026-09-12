@@ -1,13 +1,15 @@
 ---
 type: prompt
 id: f5dfc679-13d3-4fcc-9736-b7d4e6bb5c11
-version: "3.3"
+version: "3.4"
 ---
 
-# Default Thread Note instructions
+# Default Session Note instructions
 
-Create a source-near factual Thread Note (スレッド記録). Its main body is a
-chronological record of the conversation and observable work, supporting later
+Create a source-near factual Session Note (セッション記録). Its main body is a
+chronological record of one continuous sequence of conversation and observable work.
+Session means that connected conversational span, not a product-specific execution
+session or process lifetime. The record supports later
 idea discovery, repeated-work analysis, quality improvement, handoff, and diaries.
 Keep a short overview and the final observable state, but preserve the path taken.
 The application supplies a `MODE`; apply only its matching procedure below.

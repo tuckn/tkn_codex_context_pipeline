@@ -7,14 +7,14 @@ from pathlib import Path
 
 import pytest
 from test_pipeline_workflow import config_for
-from test_thread_note_pipeline import FakeSummarizer, write_chat
+from test_session_note_pipeline import FakeSummarizer, write_chat
 
 from tkn_genai_chat_note.catalog import thread_key
 from tkn_genai_chat_note.config import AppConfig
 from tkn_genai_chat_note.pipeline import pipeline_status, run_pipeline
 from tkn_genai_chat_note.provenance import validate_provenance
+from tkn_genai_chat_note.session_notes import PipelineError
 from tkn_genai_chat_note.storage_migration import migrate_storage
-from tkn_genai_chat_note.thread_notes import PipelineError
 
 
 def snapshot(root: Path) -> dict[str, bytes | None]:
@@ -38,7 +38,7 @@ def legacy_store(tmp_path: Path, *, raw_only: bool = False) -> AppConfig:
     return config
 
 
-def test_migration_preserves_notes_ids_snapshots_and_resumes_without_generation(tmp_path: Path) -> None:
+def test_migration_preserves_notes_ids_snapshots_and_regenerates_new_contract(tmp_path: Path) -> None:
     config = legacy_store(tmp_path)
     before = snapshot(tmp_path)
     assert validate_provenance(config.data_root)["ok"]
@@ -56,16 +56,16 @@ def test_migration_preserves_notes_ids_snapshots_and_resumes_without_generation(
         if content is not None and relative.startswith("data/provenance/") and relative != "data/provenance/index.json":
             assert (tmp_path / relative).read_bytes() == content
     old_note = next((config.data_root / "thread-notes").rglob("*.md"))
-    new_note = config.source_data_root / old_note.relative_to(config.data_root)
+    new_note = config.source_data_root / "session-notes" / old_note.relative_to(config.data_root / "thread-notes")
     assert new_note.read_bytes() == old_note.read_bytes()
     assert validate_provenance(config.data_root)["ok"]
     assert pipeline_status(config)["initialized"]
     # Original application logs are absent. Continue from the migrated Raw copies.
     summary = FakeSummarizer()
     report = run_pipeline(config, mode="pull", summarizer=summary)
-    assert report["complete"] and not summary.calls
-    assert new_note.read_bytes() == old_note.read_bytes()
-    assert report["threads"][0]["noteRef"].startswith("data:/codex/windows/thread-notes/")
+    assert report["complete"] and summary.calls
+    assert old_note.read_bytes() == before[old_note.relative_to(tmp_path).as_posix()]
+    assert report["threads"][0]["noteRef"].startswith("data:/codex/windows/session-notes/")
     assert report["threads"][0]["sourceCaptureRef"].startswith("raw:/codex/windows/")
     assert validate_provenance(config.data_root)["ok"]
 
@@ -76,18 +76,22 @@ def test_migration_preserves_hand_edited_note_bytes(tmp_path: Path) -> None:
     edited = note.read_bytes().replace(b"reviewStatus: unreviewed", b"reviewStatus: reviewed") + b"\nPersonal edit.\n"
     note.write_bytes(edited)
     migrate_storage(config, dry_run=False)
-    assert (config.source_data_root / note.relative_to(config.data_root)).read_bytes() == edited
+    assert (
+        config.source_data_root / "session-notes" / note.relative_to(config.data_root / "thread-notes")
+    ).read_bytes() == edited
     summary = FakeSummarizer()
     run_pipeline(config, mode="pull", summarizer=summary)
     assert not summary.calls
-    assert (config.source_data_root / note.relative_to(config.data_root)).read_bytes() == edited
+    assert (
+        config.source_data_root / "session-notes" / note.relative_to(config.data_root / "thread-notes")
+    ).read_bytes() == edited
 
 
 @pytest.mark.parametrize("dry_run", [True, False])
 def test_migration_rejects_conflicts_without_overwriting(tmp_path: Path, dry_run: bool) -> None:
     config = legacy_store(tmp_path)
     old = next((config.data_root / "thread-notes").rglob("*.md"))
-    target = config.source_data_root / old.relative_to(config.data_root)
+    target = config.source_data_root / "session-notes" / old.relative_to(config.data_root / "thread-notes")
     target.parent.mkdir(parents=True)
     target.write_text("different user data", encoding="utf-8")
     before = snapshot(tmp_path)
@@ -165,7 +169,7 @@ def test_two_sources_share_roots_without_overwriting_catalog_notes_or_state(tmp_
     assert len({item["id"] for item in index["artifacts"]}) == 2
     assert validate_provenance(first.data_root)["ok"]
     again = run_pipeline(first, mode="pull", summarizer=FakeSummarizer())
-    assert again["complete"] and again["generatedThreadNoteCount"] == 0
+    assert again["complete"] and again["generatedSessionNoteCount"] == 0
     assert len(json.loads((first.data_root / "catalog/threads.json").read_text())["threads"]) == 2
     assert sha256(first_note.read_bytes()).digest() == sha256(first_bytes).digest()
 
@@ -229,4 +233,105 @@ def test_interrupted_migration_can_resume_after_shared_index_was_updated(
     assert validate_provenance(config.data_root)["ok"]
     summary = FakeSummarizer()
     assert run_pipeline(config, mode="pull", summarizer=summary)["complete"]
-    assert not summary.calls
+    assert summary.calls
+
+
+def provider_source_v3_store(tmp_path: Path) -> AppConfig:
+    """Recreate v3 using the historical v2 bytes and provider/source layout."""
+    config = legacy_store(tmp_path)
+    migrate_storage(config, dry_run=False)
+    new = config.source_data_root / "session-notes"
+    old = config.source_data_root / "thread-notes"
+    assert new.resolve().is_relative_to(tmp_path.resolve())
+    assert old.resolve().is_relative_to(tmp_path.resolve())
+    new.rename(old)
+    for root in (config.source_state_root, config.data_root / "catalog", config.data_root / "provenance"):
+        for path in root.rglob("*.json"):
+            if "migrations" in path.parts or path.parent.name in {"entities", "activities"}:
+                continue
+            text = path.read_text(encoding="utf-8").replace("session-notes", "thread-notes")
+            text = text.replace("sessionNote", "threadNote").replace("SessionNote", "ThreadNote")
+            path.write_text(text, encoding="utf-8")
+    for path in (config.source_state_root / "pipeline.json", config.state_root / "pipeline.json"):
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["storageVersion"] = 3
+        path.write_text(json.dumps(value), encoding="utf-8")
+    assert validate_provenance(config.data_root)["ok"]
+    return config
+
+
+def test_v3_migration_preserves_evidence_and_other_sources(tmp_path: Path) -> None:
+    from tkn_genai_chat_note.frontmatter import parse_simple_frontmatter
+    from tkn_genai_chat_note.storage_migration import _session_names
+
+    config = provider_source_v3_store(tmp_path)
+    old = next((config.source_data_root / "thread-notes").rglob("*.md"))
+    original = old.read_bytes()
+    original_id = parse_simple_frontmatter(original.decode("utf-8"))["id"]
+    before = snapshot(tmp_path)
+    assert migrate_storage(config, dry_run=True)["status"] == "planned"
+    assert snapshot(tmp_path) == before
+    with pytest.raises(PipelineError, match="storage migrate"):
+        run_pipeline(config, mode="pull", dry_run=True)
+    assert migrate_storage(config, dry_run=False)["status"] == "migrated"
+    new = config.source_data_root / "session-notes" / old.relative_to(config.source_data_root / "thread-notes")
+    assert old.read_bytes() == new.read_bytes() == original
+    assert validate_provenance(config.data_root)["ok"]
+    assert migrate_storage(config, dry_run=False)["status"] == "already-migrated"
+    other = {"ref": "data:/codex/other/thread-notes/old-thread-note.md"}
+    assert _session_names(other, config) == other
+    other_path = str(config.source_data_root.parent / "windows-other/thread-notes/note.md")
+    assert _session_names(other_path, config) == other_path
+    summary = FakeSummarizer()
+    report = run_pipeline(config, mode="pull", summarizer=summary)
+    assert report["complete"] and summary.calls
+    current = next((config.source_data_root / "session-notes").rglob("*.md"))
+    metadata = parse_simple_frontmatter(current.read_text(encoding="utf-8"))
+    assert metadata["id"] == original_id
+    assert metadata["type"] == "sessionNote" and metadata["schemaVersion"] == "6"
+    assert old.read_bytes() == original
+    assert validate_provenance(config.data_root)["ok"]
+    again = FakeSummarizer()
+    assert run_pipeline(config, mode="pull", summarizer=again)["complete"]
+    assert not again.calls
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_v3_migration_recovers_failed_or_interrupted_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupt: bool,
+) -> None:
+    import tkn_genai_chat_note.storage_migration as migration
+
+    config = provider_source_v3_store(tmp_path)
+    original_write = migration.atomic_write_bytes
+    stopped = False
+
+    def fail_once(path: Path, content: bytes) -> None:
+        nonlocal stopped
+        if path == config.source_state_root / "pipeline.json" and not stopped:
+            stopped = True
+            if interrupt:
+                raise SystemExit("interrupted")
+            raise OSError("failed")
+        original_write(path, content)
+
+    monkeypatch.setattr(migration, "atomic_write_bytes", fail_once)
+    with pytest.raises(SystemExit if interrupt else OSError):
+        migrate_storage(config, dry_run=False)
+    assert json.loads((config.source_state_root / "pipeline.json").read_text())["storageVersion"] == 3
+    if not interrupt:
+        assert validate_provenance(config.data_root)["ok"]
+    assert migrate_storage(config, dry_run=False)["status"] == "migrated"
+    assert validate_provenance(config.data_root)["ok"]
+
+
+def test_v3_migration_rejects_conflicting_notes(tmp_path: Path) -> None:
+    config = provider_source_v3_store(tmp_path)
+    old = next((config.source_data_root / "thread-notes").rglob("*.md"))
+    new = config.source_data_root / "session-notes" / old.relative_to(config.source_data_root / "thread-notes")
+    new.parent.mkdir(parents=True)
+    new.write_text("User-owned conflict", encoding="utf-8")
+    before = snapshot(tmp_path)
+    with pytest.raises(PipelineError, match="conflicts"):
+        migrate_storage(config, dry_run=False)
+    assert snapshot(tmp_path) == before

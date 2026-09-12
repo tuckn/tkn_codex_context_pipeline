@@ -1,4 +1,4 @@
-"""Generate an isolated Thread Note comparison without updating the live store."""
+"""Generate an isolated Session Note comparison without updating the live store."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from tkn_genai_chat_note.chat_logs import fingerprint_events, read_thread_source
 from tkn_genai_chat_note.config import load_app_config
 from tkn_genai_chat_note.frontmatter import frontmatter_list_value, parse_simple_frontmatter, split_frontmatter_lines
 from tkn_genai_chat_note.inference import provider_name
-from tkn_genai_chat_note.thread_notes import (
+from tkn_genai_chat_note.session_notes import (
     Candidate,
     Project,
     ProviderSummarizer,
@@ -21,7 +21,7 @@ from tkn_genai_chat_note.thread_notes import (
     generator_fingerprint,
     prepare_events,
     render_note,
-    validate_thread_note,
+    validate_session_note,
 )
 
 
@@ -32,7 +32,7 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--reuse-dir", type=Path, help="Reuse identical inference calls from a previous review")
     args = parser.parse_args()
-    config = load_app_config().thread_note_pipeline_config()
+    config = load_app_config().session_note_pipeline_config()
     source_bytes = args.source_log.read_bytes()
     baseline_bytes = args.baseline_note.read_bytes()
     metadata = parse_simple_frontmatter(baseline_bytes.decode("utf-8-sig"))
@@ -49,7 +49,7 @@ def main() -> None:
         raise ValueError("baseline note and source log identify different threads")
     source_ref = "review:/source.jsonl"
     candidate = Candidate(
-        project=Project("review", "Thread Note review", output, output),
+        project=Project("review", "Session Note review", output, output),
         thread_id=thread.id, started_at=thread.timestamp,
         source_path=output / "source.jsonl", source_ref=source_ref,
         source_relative_ref="source.jsonl",
@@ -107,7 +107,7 @@ def main() -> None:
     })
     note = render_note(candidate, result, metadata)
     (output / "after.md").write_text(note, encoding="utf-8")
-    validation = validate_thread_note(output / "after.md")
+    validation = validate_session_note(output / "after.md")
     report = {
         "sourceThreadId": thread.id, "sourceLog": str(args.source_log.absolute()),
         "sourceSha256": sha256(source_bytes).hexdigest(),
@@ -124,7 +124,7 @@ def main() -> None:
         "metrics": runner.last_metrics, "validation": validation,
     }
     (output / "review.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"Thread Note review saved: {output}", file=sys.stderr)
+    print(f"Session Note review saved: {output}", file=sys.stderr)
 
 
 if __name__ == "__main__":

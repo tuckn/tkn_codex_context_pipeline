@@ -11,7 +11,7 @@ from uuid import uuid4
 from .app_state import load_codex_app_state
 from .config import AppConfig, config_document, initialization_config, write_config
 from .projects import create_fresh_projects
-from .thread_notes import PipelineError, atomic_write_json
+from .session_notes import PipelineError, atomic_write_json
 
 ROOT_OWNERSHIP_MARKER = ".tkn-genai-chat-note-root.json"
 ROOT_OWNERSHIP_SCHEMA_VERSION = 1

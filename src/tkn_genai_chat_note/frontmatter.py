@@ -11,6 +11,7 @@ from .common import yaml_string
 FRONTMATTER_PATTERN = re.compile(r"\A---\r?\n.*?\r?\n---\r?\n?", re.DOTALL)
 LEGACY_ARTIFACT_SCHEMA_VERSION = "1"
 SUPPORTED_ARTIFACT_SCHEMA_VERSIONS = {
+    "session note": {"6"},
     "thread note": {"3", "4", "5"},
     "decision record": {"1", "2", "3", "4", "5"},
     "working context": {"1", "2", "3", "4", "5"},

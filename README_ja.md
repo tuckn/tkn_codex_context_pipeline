@@ -2,11 +2,14 @@
 
 English: [README.md](README.md)
 
-AIとの会話を源泉データとして保存し、会話ごとに再利用可能なThread Noteを生成する
+AIとの会話を源泉データとして保存し、会話ごとに再利用可能なSession Noteを生成する
 ローカルCLIです。依頼、訂正、失敗した試行、未解決の問い、根拠付きの時系列、
 最後に確認できた状態を残し、後から異なる観点で考え直せるようにします。
 
-v0.10.0の処理はThread Noteで完了します。分類とWorking Contextは
+**session** は時系列で連続した一連の会話を意味し、そのまとまりを一つのMarkdownノートに記録します。
+GitHub CopilotやClaude Codeなどの製品用語に合わせた名称ではなく、session本来の意味に基づきます。
+
+v0.11.0の処理はSession Noteで完了します。分類とWorking Contextは
 [tkn_genai_context_curation_pipeline](https://github.com/tuckn/tkn_genai_context_curation_pipeline)、
 Decision抽出は
 [tkn_genai_insight_pipeline](https://github.com/tuckn/tkn_genai_insight_pipeline)の責務です。
@@ -43,7 +46,7 @@ tkn-genai-chat-note clone
 ~~~
 
 `clone`は未作成の管理領域を初期化し、取得できる全履歴を保存・正規化して、
-対象のThread Noteを生成します。通常実行は書き込みを行い、履歴量に応じて
+対象のSession Noteを生成します。通常実行は書き込みを行い、履歴量に応じて
 推論時間・トークンを消費します。
 
 `--dry-run`はローカル入力を読み、実行条件と予定を検証します。
@@ -64,7 +67,7 @@ tkn-genai-chat-note provenance validate
 
 結果に表示されたノートとreportのパスを開いて確認します。
 `status`は前回実行時の記録であり、現在の入力を再走査しません。
-完了判定は対象Thread Noteだけで行い、Scope・Decision・Working Contextの生成を待ちません。
+完了判定は対象Session Noteだけで行い、Scope・Decision・Working Contextの生成を待ちません。
 
 ## コマンド一覧
 
@@ -77,8 +80,8 @@ tkn-genai-chat-note provenance validate
 | `clone` | 初期化と全履歴の保存・生成。再実行で再開可能 |
 | `pull` | 初期化済みの保存先へ差分を反映し、ノート生成を再開 |
 | `raw ingest` | 推論せずに元のバイト列を保存 |
-| `thread-notes build` | ノートを更新。`--thread-id`で会話を選択 |
-| `thread-notes validate <artifact>` | ノートの読み取り専用検証 |
+| `session-notes build` | ノートを更新。`--thread-id`で会話を選択 |
+| `session-notes validate <artifact>` | ノートの読み取り専用検証 |
 | `status` | 前回の対象範囲・状態・reportパスを表示 |
 | `provenance validate` | hash、ID、来歴の関係を読み取り専用で検証 |
 | `storage migrate` | 旧storage 2を新階層へコピー移行。`--dry-run`で対象ファイルを確認 |
@@ -161,7 +164,7 @@ Ollamaの接続先はループバックに限定します。利用可能なモ�
 flowchart LR
     L["ローカルCodexログ"] --> R["Rawコピーとmanifest"]
     R --> E["Canonical Events"]
-    E --> T["Thread Note"]
+    E --> T["Session Note"]
     M["観測したProject所属"] --> C["会話catalog"]
     T --> C
     C --> U["Context分類CLI"]
@@ -182,7 +185,7 @@ flowchart LR
 | `<raw_root>/P/I/manifest.jsonl` | 取得元・参照・hashを記録するRaw manifest |
 | `<raw_root>/P/I/metadata/H.json` | 観測したアプリのProject情報 |
 | `<data_root>/P/I/source-aligned/T/H.json` | 元ログの参照位置を持つCanonical Events |
-| `<data_root>/P/I/thread-notes/YYYY/MM/...md` | 会話開始年月で分けた現在のThread Note |
+| `<data_root>/P/I/session-notes/YYYY/MM/...md` | 会話開始年月で分けた現在のSession Note |
 | `<state_root>/P/I/pipeline.json` | 取得元ごとの初期化情報・storageバージョン |
 | `<state_root>/P/I/threads/T/...` | 会話単位の内部checkpoint |
 | `<state_root>/P/I/ledger.json`・`reports/`・`last-run.json`・`normalization/` | 取得元ごとの実行・正規化状態 |
@@ -192,7 +195,7 @@ flowchart LR
 
 例えば、providerが`codex`、source_idが`my-windows-pc`なら、Rawは
 `~/.tkn/genai_chat_note_pipeline/raw/codex/my-windows-pc/sessions/...`、
-ノートは`~/.tkn/genai_chat_note_pipeline/data/codex/my-windows-pc/thread-notes/YYYY/MM/...md`です。
+ノートは`~/.tkn/genai_chat_note_pipeline/data/codex/my-windows-pc/session-notes/YYYY/MM/...md`です。
 同じsource_idでも`claude-code`や`github-copilot`とは別のフォルダになります。
 `config show`の`storage.sourceRoots`で各providerの実際の保存先を確認できます。
 
@@ -203,8 +206,18 @@ root直下には共通の所有権markerとロックも置きます。共通cata
 
 ### 旧保存領域の移行
 
-storageは`3`、設定schemaは引き続き`"4.0.0"`です。新規の保存先は通常の`clone`で初期化します。
-旧storage 2や旧Rawだけの領域を検出した場合、通常処理は移行の案内を出して停止します。
+
+v0.11.0では成果物名をSession Note、コマンドと出力フォルダを`session-notes`へ変更しました。
+新規ノートは`type: sessionNote`、`sessionNoteId`、schema 6を使います。
+旧Thread Noteのschema 3～5は読み取り可能です。移行処理は旧ノートの内容を変えずコピーします。
+その後の`pull`では対象の未reviewノートを新形式で再生成するため、推論を実行する場合があります。
+review済み・手編集済みノートは既存の保護ルールに従います。
+`threadId`や`sourceThreadIds`はCodex側の会話を識別するため維持します。
+下流の読み取り側にはschema 6への対応が必要です。別アプリのcuration・insightとの連携は、
+今回の名称変更について未検証です。既存CLIの更新には`uv tool install . --reinstall`を使います。
+
+storageは`4`、設定schemaは引き続き`"4.0.0"`です。新規の保存先は通常の`clone`で初期化します。
+旧storage 2/3や旧Rawだけの領域を検出した場合、通常処理は移行の案内を出して停止します。
 `source_id`と4つのrootを旧領域に合わせてから、次の順に実行します。
 
 ~~~console
@@ -225,14 +238,15 @@ Rawだけの移行では来歴indexがまだないため、`provenance validate`
 **旧Raw・ノート・正規化データも残します。** 既存ノートや過去の来歴が持つ旧参照を維持するためです。
 新しい処理は新階層を使います。移行後に旧フォルダを手動で削除すると過去の参照を失う場合があります。
 変更する共通管理ファイルの元データは
-`<state_root>/P/I/migrations/storage-v2-backup/`に保存します。
-既知の書き込みエラー時は変更したファイルを復元します。旧版CLIによる再書き込みを防ぐため、
+storage 2では`<state_root>/P/I/migrations/storage-v2-backup/`、
+storage 3では`<state_root>/P/I/migrations/session-note-v4-backup/`に保存します。
+既知の書き込みエラー時は変更したファイルを復元します。storage 2の移行では、旧版CLIによる再書き込みを防ぐため、
 旧`<state_root>/pipeline.json`は共通の新レイアウトmarkerに置き換え、元ファイルをバックアップします。
 旧領域がない場合の`storage migrate`は何も作成せず終了します。
 
 Projectへの所属が変わっても会話のIDは変わりません。所属の観測は上流に残し、
 意味に基づくScopeや承認済みの関連は下流で扱います。
-Thread Noteは派生した記録であり、元の根拠を置き換えません。
+Session Noteは派生した記録であり、元の根拠を置き換えません。
 取得元と推論プロバイダーは別の概念です。
 
 ローカルの`sessions`と、既定では`archived_sessions`を対象にします。
@@ -243,7 +257,7 @@ Project未所属・対応先不明・所属が曖昧な会話も対象です。
 
 ID、hash、schema、引用、保存構造、入力準備の詳細は
 [データ契約](reference/data-contract.md)、
-[Thread Noteの内容](reference/thread-note-format_ja.md)、
+[Session Noteの内容](reference/session-note-format_ja.md)、
 [処理のシーケンス](reference/processing-flow_ja.md)を参照してください。
 
 ## 更新後の再インストール

@@ -74,8 +74,8 @@ def test_packaged_markdown_template_controls_heading_order() -> None:
 
     rendered = render_summary_template(template, values)
 
-    assert template.version == "4.0"
-    assert rendered.index("# Thread Note") < rendered.index("## Summary")
+    assert template.version == "4.1"
+    assert rendered.index("# Session Note") < rendered.index("## Summary")
     assert rendered.index("## Summary") < rendered.index("## Timeline")
     assert rendered.index("## Timeline") < rendered.index(
         "## Last Known State"

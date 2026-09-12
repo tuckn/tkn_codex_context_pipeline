@@ -3,11 +3,15 @@
 Japanese: [README_ja.md](README_ja.md)
 
 Preserve local AI conversations as source evidence and turn each conversation into
-a reusable Thread Note. Notes retain requests, corrections, failed attempts,
+a reusable Session Note. Notes retain requests, corrections, failed attempts,
 unresolved questions, a source-backed timeline, and the last known state.
 They support later reconsideration from different viewpoints.
 
-Version 0.10.0 ends at Thread Notes. Classification and Working Context belong to
+A **session** means one continuous sequence of conversation, listed chronologically
+in one Markdown note. The name uses the ordinary meaning of session, independently
+of any product terminology.
+
+Version 0.11.0 ends at Session Notes. Classification and Working Context belong to
 [tkn_genai_context_curation_pipeline](https://github.com/tuckn/tkn_genai_context_curation_pipeline);
 Decision distillation belongs to
 [tkn_genai_insight_pipeline](https://github.com/tuckn/tkn_genai_insight_pipeline).
@@ -43,7 +47,7 @@ tkn-genai-chat-note clone
 ~~~
 
 `clone` initializes missing owned storage, captures all locally available
-history, normalizes supported events, and generates eligible Thread Notes.
+history, normalizes supported events, and generates eligible Session Notes.
 It writes by default and may use substantial inference time/tokens.
 `--dry-run` reads local inputs and validates the plan; it makes no inference or
 network calls and creates no directories, locks, caches, or reports.
@@ -62,7 +66,7 @@ calls. The default idle interval is 30 minutes; Raw capture still precedes
 deferral of active conversations. `--limit 20` bounds note generation attempts.
 
 Open the note and report paths shown in the result. `status` reads the last-run
-record, not live source state. Completion now depends only on eligible Thread
+record, not live source state. Completion now depends only on eligible Session
 Notes; no Scope, Decision, or Working Context build is required.
 
 ## Commands
@@ -76,11 +80,11 @@ Global options, including `--config` and inference options, precede the command.
 | `clone` | Initialize and capture/build available history; resumable |
 | `pull` | Update an initialized store and resume notes |
 | `raw ingest` | Capture source bytes without inference |
-| `thread-notes build` | Refresh notes; `--thread-id` selects one conversation |
-| `thread-notes validate <artifact>` | Read-only note validation |
+| `session-notes build` | Refresh notes; `--thread-id` selects one conversation |
+| `session-notes validate <artifact>` | Read-only note validation |
 | `status` | Read the previous run's coverage and report path |
 | `provenance validate` | Read-only hash, identity, and relationship checks |
-| `storage migrate` | Copy storage 2 into the new layout; inspect files first with `--dry-run` |
+| `storage migrate` | Copy storage 2/3 into the new layout; inspect files first with `--dry-run` |
 
 Build commands support `--dry-run`, `--force`, `--allow-edited`, and
 `--full-output`. `--force` re-evaluates unchanged input but does not unlock
@@ -168,7 +172,7 @@ Configuration-writing operations emit only the new form.
 flowchart LR
     L["Local Codex logs"] --> R["Raw copies and manifest"]
     R --> E["Canonical Events"]
-    E --> T["Thread Notes"]
+    E --> T["Session Notes"]
     M["Observed Project membership"] --> C["Thread catalog"]
     T --> C
     C --> U["Context curation CLI"]
@@ -190,7 +194,7 @@ not change these paths.
 | `<raw_root>/P/I/manifest.jsonl` | Raw source references, hashes, and acquisition metadata |
 | `<raw_root>/P/I/metadata/H.json` | Observed application Project metadata |
 | `<data_root>/P/I/source-aligned/T/H.json` | Canonical Events retaining source references |
-| `<data_root>/P/I/thread-notes/YYYY/MM/...md` | Current Thread Notes by conversation start year/month |
+| `<data_root>/P/I/session-notes/YYYY/MM/...md` | Current Session Notes by conversation start year/month |
 | `<state_root>/P/I/pipeline.json` | Per-source initialization and storage version |
 | `<state_root>/P/I/threads/T/...` | Per-conversation checkpoints |
 | `<state_root>/P/I/ledger.json`, `reports/`, `last-run.json`, `normalization/` | Per-source run and normalization state |
@@ -200,7 +204,7 @@ not change these paths.
 
 For provider `codex` and source_id `my-windows-pc`, Raw goes to
 `~/.tkn/genai_chat_note_pipeline/raw/codex/my-windows-pc/sessions/...`; notes go to
-`~/.tkn/genai_chat_note_pipeline/data/codex/my-windows-pc/thread-notes/YYYY/MM/...md`.
+`~/.tkn/genai_chat_note_pipeline/data/codex/my-windows-pc/session-notes/YYYY/MM/...md`.
 Other providers use separate folders even when they share a source_id.
 Inspect resolved paths in `config show` under `storage.sourceRoots`.
 
@@ -211,11 +215,23 @@ the shared provenance. The same conversation in multiple environments retains
 its threadKey, but each environment has independent note IDs and checkpoints.
 Catalog rows are distinguished by `(sourceProvider, sourceId, threadKey)`.
 
+
+Version 0.11.0 renames the artifact, command, and output directory to Session Note,
+`session-notes`, and `session-notes/`. New notes use `type: sessionNote`,
+`sessionNoteId`, and schema 6. Readers retain support for historical Thread Note
+schemas 3–5. Migration copies old notes without changing their bytes; subsequent
+`pull` regenerates eligible unreviewed notes in the new format and may invoke
+inference. Reviewed or manually edited notes keep their existing protections.
+Source identifiers such as `threadId` and `sourceThreadIds` still identify Codex
+source conversations. Downstream consumers need explicit schema-6 support;
+compatibility with the separate curation/insight applications has not been verified
+for this rename. To update an existing CLI installation, run `uv tool install . --reinstall`.
+
 ### Migrating older storage
 
-Storage is version `3`; configuration remains schema `"4.0.0"`. Initialize fresh
+Storage is version `4`; configuration remains schema `"4.0.0"`. Initialize fresh
 roots with `clone`. Ordinary processing stops with migration guidance when it
-finds storage 2 or an older Raw-only store. Keep the old source_id and all four
+finds storage 2/3 or an older Raw-only store. Keep the old source_id and all four
 roots configured, then run:
 
 ~~~console
@@ -239,14 +255,15 @@ provenance index yet; validate provenance after its first note generation.
 historical provenance can still contain their old references. New processing uses
 the new layout; deleting old folders manually can break historical references.
 Original shared management files are backed up under
-`<state_root>/P/I/migrations/storage-v2-backup/`. Known write errors restore
-changed files. To prevent older CLIs from writing the old layout again, the old
+`<state_root>/P/I/migrations/storage-v2-backup/` for storage 2 or
+`<state_root>/P/I/migrations/session-note-v4-backup/` for storage 3. Known write errors restore
+changed files. For storage-2 migration, to prevent older CLIs from writing the old layout again, the old
 `<state_root>/pipeline.json` becomes a shared layout marker and its original is
 backed up. When no legacy store exists, migration exits without creating anything.
 
 Thread identity survives Project reassignment. Membership observations are
 retained upstream; semantic scopes and approved relationships belong downstream.
-Thread Notes are derived records, not a replacement for original evidence.
+Session Notes are derived records, not a replacement for original evidence.
 Source and inference providers remain separate concepts.
 
 Local `sessions` and, by default, `archived_sessions` are scanned. Projectless,
@@ -256,7 +273,7 @@ normalized but excluded from notes. Cloud-only ChatGPT/Work history is not
 fetched. Unsupported records and divergent versions remain visible in reports.
 
 See [data contract](reference/data-contract.md),
-[Thread Note format](reference/thread-note-format.md), and
+[Session Note format](reference/session-note-format.md), and
 [processing sequence](reference/processing-flow.md) for IDs, hashes, schemas,
 citations, storage details, and input preparation.
 

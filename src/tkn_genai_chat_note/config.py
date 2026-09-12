@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from .config_validation import validate_config_layer
 from .inference import InferenceProvider, validate_ollama_base_url
-from .thread_notes import (
+from .session_notes import (
     DEFAULT_IDLE_MINUTES,
     DEFAULT_MODEL,
     DEFAULT_MODEL_TIMEOUT_SECONDS,
@@ -335,7 +335,7 @@ class AppConfig(BaseModel):
             return settings.base_url
         return "http://127.0.0.1:11434"
 
-    def thread_note_pipeline_config(self, *, allow_missing_watermark: bool = False) -> PipelineConfig:
+    def session_note_pipeline_config(self, *, allow_missing_watermark: bool = False) -> PipelineConfig:
         installed_at = self.installed_at
         if installed_at is None:
             if not allow_missing_watermark:

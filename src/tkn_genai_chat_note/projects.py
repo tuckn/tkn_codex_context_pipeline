@@ -10,7 +10,7 @@ from typing import Any
 from .app_state import CodexAppProject, CodexAppState
 from .chat_logs import normalize_path_text
 from .config import AppConfig
-from .thread_notes import PipelineError, Project, atomic_write_text, now_iso
+from .session_notes import PipelineError, Project, atomic_write_text, now_iso
 
 IDENTITY_KIND = "codexAppLocalProject"
 REGISTRY_SCHEMA_VERSION = 2
@@ -74,7 +74,7 @@ def _new_record(project: CodexAppProject, config: AppConfig) -> dict[str, Any]:
         "currentRoot": str(current_root),
         "projectDataPath": str(data),
         "projectStatePath": str(state),
-        "threadNotesPath": str(data / "thread-notes"),
+        "sessionNotesPath": str(data / "session-notes"),
         "workingContextPath": str(data / "working-context.md"),
         "sensitivity": "private",
         "status": "active",
@@ -91,7 +91,7 @@ def _update_storage_paths(record: dict[str, Any], config: AppConfig) -> None:
     state = config.projects_state_root / project_id
     record["projectDataPath"] = str(data)
     record["projectStatePath"] = str(state)
-    record["threadNotesPath"] = str(data / "thread-notes")
+    record["sessionNotesPath"] = str(data / "session-notes")
     record["workingContextPath"] = str(data / "working-context.md")
     for legacy_key in (
         "projectContextPath",
@@ -225,7 +225,7 @@ def create_fresh_projects(
     records = [_new_record(project, config) for project in app_state.projects]
     if not dry_run:
         for record in records:
-            Path(str(record["threadNotesPath"])).mkdir(parents=True, exist_ok=True)
+            Path(str(record["sessionNotesPath"])).mkdir(parents=True, exist_ok=True)
             (Path(str(record["projectDataPath"])) / "decisions").mkdir(
                 parents=True,
                 exist_ok=True,
@@ -293,7 +293,7 @@ def fetch_projects(
     if not dry_run:
         for project_id in current_ids:
             record = by_id[project_id]
-            Path(str(record["threadNotesPath"])).mkdir(parents=True, exist_ok=True)
+            Path(str(record["sessionNotesPath"])).mkdir(parents=True, exist_ok=True)
             Path(str(record["projectStatePath"])).mkdir(parents=True, exist_ok=True)
         _write_registry(config.registry_path, records)
     report = {

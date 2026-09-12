@@ -30,11 +30,11 @@ def test_application_owned_prompt_is_versioned_and_rendered_with_managed_input()
     )
 
     assert prompt.prompt_id == "f5dfc679-13d3-4fcc-9736-b7d4e6bb5c11"
-    assert prompt.version == "3.3"
+    assert prompt.version == "3.4"
     assert len(prompt.sha256) == 64
-    assert "Default Thread Note instructions" in prompt.instructions
+    assert "Default Session Note instructions" in prompt.instructions
     assert f"PROMPT_ID: {prompt.prompt_id}" in rendered
-    assert "PROMPT_DOCUMENT_VERSION: 3.3" in rendered
+    assert "PROMPT_DOCUMENT_VERSION: 3.4" in rendered
     assert "## Output elements" in rendered
     assert "## Mode: `source-events`" in rendered
     assert "## Mode: `merge-partial-summaries`" in rendered

@@ -1,4 +1,4 @@
-"""Command-line interface for Tkn Codex Context Pipeline."""
+"""Command-line interface for Tkn GenAI Chat Note Pipeline."""
 
 from __future__ import annotations
 
@@ -18,11 +18,11 @@ from .config import (
 )
 from .console_logging import ColorFormatter, log_success, supports_color
 from .raw_capture import RawCaptureError
-from .summary_resources import load_summary_profile
-from .thread_notes import (
+from .session_notes import (
     PipelineError,
-    validate_thread_note,
+    validate_session_note,
 )
+from .summary_resources import load_summary_profile
 
 LOGGER = logging.getLogger("tkn_genai_chat_note")
 
@@ -72,9 +72,9 @@ def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tkn-genai-chat-note",
-        description="Preserve local AI chat evidence and generate reusable Thread Notes.",
+        description="Preserve local AI chat evidence and generate reusable Session Notes.",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 0.10.0")
+    parser.add_argument("--version", action="version", version="%(prog)s 0.11.0")
     _add_runtime_options(parser)
     commands = parser.add_subparsers(dest="command", required=True)
     config = commands.add_parser("config", help="Create or inspect configuration")
@@ -84,13 +84,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("show", help="Show effective values and their sources")
     for name, help_text in (
         ("clone", "Initialize and process all available history; resume safely when repeated"),
-        ("pull", "Capture new/changed logs and resume unfinished Thread Notes"),
+        ("pull", "Capture new/changed logs and resume unfinished Session Notes"),
     ):
         command = commands.add_parser(
             name, help=help_text, description=help_text + ". Generates and writes by default."
         )
         _add_build_options(command)
-        command.add_argument("--limit", type=int, help="Maximum Thread Note generations; remaining work is deferred")
+        command.add_argument("--limit", type=int, help="Maximum Session Note generations; remaining work is deferred")
     storage = commands.add_parser("storage", help="Inspect or migrate storage layout")
     migrate = storage.add_subparsers(dest="storage_command", required=True).add_parser(
         "migrate", help="Copy legacy data into provider/source folders; retain original evidence"
@@ -108,7 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ingest.add_argument("--dry-run", action="store_true", help="Inspect without writing")
     ingest.add_argument("--full-output", action="store_true")
-    for name, dest, label in (("thread-notes", "notes_command", "Thread Notes"),):
+    for name, dest, label in (("session-notes", "notes_command", "Session Notes"),):
         group = commands.add_parser(name, help="Build or validate " + label)
         sub = group.add_subparsers(dest=dest, required=True)
         build = sub.add_parser("build", help="Re-evaluate " + label + " (generates and writes by default)")
@@ -207,9 +207,9 @@ def _metric_summary(value: dict[str, Any]) -> str:
     return f" ({', '.join(metrics)})" if metrics else ""
 
 
-def _thread_note_path_summary(value: dict[str, Any]) -> str:
-    path = value.get("threadNotePath")
-    return f" — Thread Note: {path}" if isinstance(path, str) and path else ""
+def _session_note_path_summary(value: dict[str, Any]) -> str:
+    path = value.get("sessionNotePath")
+    return f" — Session Note: {path}" if isinstance(path, str) and path else ""
 
 
 def _progress(value: dict[str, Any]) -> None:
@@ -231,7 +231,7 @@ def _progress(value: dict[str, Any]) -> None:
             value.get("index", "?"),
             value.get("total", "?"),
             value.get("threadId", "unknown"),
-            _thread_note_path_summary(value),
+            _session_note_path_summary(value),
         )
     elif event_type == "chunk-start":
         LOGGER.info(
@@ -254,7 +254,7 @@ def _progress(value: dict[str, Any]) -> None:
             value.get("total", "?"),
             value.get("threadId", "unknown"),
             _metric_summary(value),
-            _thread_note_path_summary(value),
+            _session_note_path_summary(value),
         )
     elif event_type == "thread-failed":
         LOGGER.error(
@@ -367,7 +367,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if getattr(args, "artifact", None) is not None:
             validators = {
-                "thread-notes": validate_thread_note,
+                "session-notes": validate_session_note,
             }
             _emit(validators[args.command](args.artifact.expanduser().absolute()))
             log_success(LOGGER, "Validation succeeded: %s", args.artifact)

@@ -7,15 +7,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from test_thread_note_pipeline import FakeSummarizer, note_data, write_chat
+from test_session_note_pipeline import FakeSummarizer, note_data, write_chat
 
 from tkn_genai_chat_note.catalog import thread_key
 from tkn_genai_chat_note.config import AppConfig, ChatConfig
 from tkn_genai_chat_note.frontmatter import parse_simple_frontmatter
 from tkn_genai_chat_note.pipeline import pipeline_status, run_pipeline
 from tkn_genai_chat_note.provenance import validate_provenance
+from tkn_genai_chat_note.session_notes import Candidate, PipelineError
 from tkn_genai_chat_note.storage import pipeline_storage
-from tkn_genai_chat_note.thread_notes import Candidate, PipelineError
 
 
 def config_for(tmp_path: Path) -> AppConfig:
@@ -82,7 +82,7 @@ def test_clone_projectless_archived_and_multiple_projects(tmp_path: Path) -> Non
     report = execute(config)
     assert report["complete"], report
     assert report["threadCounts"] == {"current": 3}
-    assert len(list((config.source_data_root / "thread-notes").rglob("*.md"))) == 3
+    assert len(list((config.source_data_root / "session-notes").rglob("*.md"))) == 3
     index = json.loads((config.data_root / "provenance" / "index.json").read_text())
     assert len({item["id"] for item in index["artifacts"]}) == len(index["artifacts"])
     for activity_path in (config.data_root / "provenance" / "activities").glob("*.json"):
@@ -211,7 +211,7 @@ def test_edited_and_reviewed_notes_are_protected_even_with_force(tmp_path: Path)
     note.write_text(content, encoding="utf-8")
     assert parse_simple_frontmatter(content)["reviewStatus"] == "reviewed"
     report = execute(config, "pull", force=True, allow_edited=True)
-    assert report["threads"][0]["reason"] == "reviewed-thread-note"
+    assert report["threads"][0]["reason"] == "reviewed-session-note"
     assert note.read_text(encoding="utf-8") == content
 
 
@@ -300,7 +300,7 @@ def test_edited_note_requires_explicit_override(tmp_path: Path) -> None:
     note.write_bytes(note.read_bytes() + b"\nA manual correction.\n")
     edited = note.read_bytes()
     blocked = execute(config, "pull", force=True)
-    assert blocked["threads"][0]["reason"] == "edited-thread-note"
+    assert blocked["threads"][0]["reason"] == "edited-session-note"
     assert note.read_bytes() == edited
     replaced = execute(config, "pull", allow_edited=True)
     assert replaced["complete"], replaced
@@ -388,17 +388,17 @@ def test_notes_use_start_month_in_system_timezone(tmp_path: Path, started_at: st
     report = execute(config)
     assert report["complete"], report
     local = datetime.fromisoformat(started_at).astimezone()
-    notes = list((config.source_data_root / "thread-notes" / local.strftime("%Y/%m")).glob("*.md"))
+    notes = list((config.source_data_root / "session-notes" / local.strftime("%Y/%m")).glob("*.md"))
     assert len(notes) == 2
     assert all(note.name.startswith(local.strftime("%Y%m%dT%H%M%S%z")) for note in notes)
     assert len({parse_simple_frontmatter(note.read_text(encoding="utf-8"))["id"] for note in notes}) == 2
     summary = Summary()
-    again = execute(config, "thread-notes", summarizer=summary)
+    again = execute(config, "session-notes", summarizer=summary)
     assert not summary.calls
     assert {entry["noteRef"] for entry in again["threads"]} == {entry["noteRef"] for entry in report["threads"]}
 
 
-def test_clone_completion_and_catalog_belong_only_to_thread_notes(tmp_path: Path) -> None:
+def test_clone_completion_and_catalog_belong_only_to_session_notes(tmp_path: Path) -> None:
     from hashlib import sha256
 
     config = config_for(tmp_path)
@@ -449,7 +449,7 @@ def test_explicit_legacy_store_requires_migration_without_modifying_files(tmp_pa
 
 
 @pytest.mark.parametrize("provider", ["claude-code", "github-copilot", "codex"])
-@pytest.mark.parametrize("mode", ["clone", "pull", "raw", "thread-notes"])
+@pytest.mark.parametrize("mode", ["clone", "pull", "raw", "session-notes"])
 @pytest.mark.parametrize("dry_run", [False, True])
 def test_unavailable_chat_source_stops_before_any_writes(
     tmp_path: Path, provider: str, mode: str, dry_run: bool

@@ -18,8 +18,8 @@ from tkn_genai_chat_note.console_logging import SUCCESS, ColorFormatter
     [
         ["init"],
         ["projects", "fetch"],
-        ["thread-notes", "pull"],
-        ["thread-notes", "rebuild"],
+        ["session-notes", "pull"],
+        ["session-notes", "rebuild"],
         ["pull", "--backfill"],
         ["decisions", "build", "--write"],
         ["working-context", "build", "--write"],
@@ -30,7 +30,7 @@ def test_retired_commands_and_compatibility_flags_are_removed(args: list[str]) -
         build_parser().parse_args(args)
 
 
-@pytest.mark.parametrize("args", [["clone"], ["pull"], ["thread-notes", "build"]])
+@pytest.mark.parametrize("args", [["clone"], ["pull"], ["session-notes", "build"]])
 def test_builds_write_by_default_and_have_explicit_dry_run(args: list[str]) -> None:
     assert not build_parser().parse_args(args).dry_run
     assert build_parser().parse_args([*args, "--dry-run"]).dry_run
@@ -38,7 +38,7 @@ def test_builds_write_by_default_and_have_explicit_dry_run(args: list[str]) -> N
 
 def test_clone_dry_run_and_pull_initialization_boundary(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
     from test_pipeline_workflow import config_for
-    from test_thread_note_pipeline import write_chat
+    from test_session_note_pipeline import write_chat
 
     from tkn_genai_chat_note.config import write_config
 
@@ -149,7 +149,7 @@ def test_progress_events_are_human_readable(
             "index": 2,
             "total": 7,
             "threadId": "thread-2",
-            "threadNotePath": r"C:\notes\thread-2.md",
+            "sessionNotePath": r"C:\notes\thread-2.md",
             "durationSeconds": 12.5,
             "chunkCount": 2,
             "modelCalls": 3,
@@ -161,7 +161,7 @@ def test_progress_events_are_human_readable(
     assert captured.err.splitlines() == [
         "[INFO] Starting thread 2/7: thread-2",
         "[SUCCESS] Completed thread 2/7: thread-2 "
-        r"(12.5s, 2 chunks, 3 model calls) — Thread Note: C:\notes\thread-2.md",
+        r"(12.5s, 2 chunks, 3 model calls) — Session Note: C:\notes\thread-2.md",
     ]
 
 
@@ -204,11 +204,11 @@ def test_config_show_reports_application_owned_summary_profile(
     assert profile["name"] == "default"
     assert profile["source"].endswith("profiles/summary/default")
     assert len(profile["sha256"]) == 64
-    assert profile["prompt"]["version"] == "3.3"
+    assert profile["prompt"]["version"] == "3.4"
     assert profile["prompt"]["source"].endswith("profiles/summary/default/prompt.md")
     assert profile["schema"]["source"].endswith("profiles/summary/default/output.schema.json")
     assert len(profile["schema"]["sha256"]) == 64
-    assert profile["template"]["version"] == "4.0"
+    assert profile["template"]["version"] == "4.1"
     assert profile["template"]["source"].endswith("profiles/summary/default/template.md")
     assert "decisionProfile" not in output and "workingContextProfile" not in output
     assert output["config"]["schema_version"] == CONFIG_SCHEMA_VERSION
@@ -281,7 +281,7 @@ def test_invalid_config_returns_machine_readable_error(
     assert output["ok"] is False
 
 
-def test_validate_command_accepts_thread_note_v3(
+def test_validate_command_accepts_legacy_thread_note_v3(
     tmp_path: Path,
     capsys: CaptureFixture[str],
 ) -> None:
@@ -326,7 +326,7 @@ sourceFingerprint: abc123
         encoding="utf-8",
     )
 
-    result = main(["thread-notes", "validate", str(note)])
+    result = main(["session-notes", "validate", str(note)])
 
     assert result == 0
     output = json.loads(capsys.readouterr().out)
@@ -349,3 +349,12 @@ def test_future_chat_provider_can_be_inspected_but_not_processed(
     assert main(["--config", str(target), "raw", "ingest", "--dry-run"]) == 1
     assert "chat acquisition is not implemented" in json.loads(capsys.readouterr().out)["error"]
     assert not (tmp_path / "user").exists()
+
+
+def test_session_note_command_and_legacy_reader(capsys: CaptureFixture[str]) -> None:
+    assert main(["session-notes", "validate", str(Path(__file__).parent / "fixtures/session-note-v6.md")]) == 0
+    assert json.loads(capsys.readouterr().out)["schemaVersion"] == 6
+    assert main(["session-notes", "validate", str(Path(__file__).parent / "fixtures/thread-note-v5.md")]) == 0
+    assert json.loads(capsys.readouterr().out)["schemaVersion"] == 5
+    with pytest.raises(SystemExit):
+        main(["thread-notes", "build"])

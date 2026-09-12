@@ -1,2 +1,2 @@
-"""Preserve AI chat evidence and generate source-near Thread Notes."""
-__version__ = "0.10.0"
+"""Preserve AI chat evidence and generate source-near Session Notes."""
+__version__ = "0.11.0"

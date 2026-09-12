@@ -19,7 +19,7 @@ from tkn_genai_chat_note.projects import (
     resolve_project_selector,
     runtime_projects,
 )
-from tkn_genai_chat_note.thread_notes import PipelineError, Project
+from tkn_genai_chat_note.session_notes import PipelineError, Project
 
 
 def app_project(project_id: str, name: str, roots: list[Path]) -> CodexAppProject:
@@ -140,7 +140,7 @@ def test_fetch_binds_multi_root_and_preserves_unknown_fields(tmp_path: Path) -> 
     assert projects[0].assigned_thread_ids == frozenset({"thread-1"})
     assert projects[0].projectless_thread_ids == frozenset({"thread-2"})
     assert projects[0].project_id == "source-1"
-    assert projects[0].thread_notes_path == data_root / "codex/windows/projects/source-1/thread-notes"
+    assert projects[0].session_notes_path == data_root / "codex/windows/projects/source-1/session-notes"
     assert projects[0].state_path == state_root / "codex/windows/projects/source-1/chat-refresh-state.json"
 
 
@@ -227,7 +227,7 @@ def test_same_id_survives_drive_and_name_change(tmp_path: Path) -> None:
         "currentRoot": str(old),
         "projectDataPath": str(config.projects_data_root / "source"),
         "projectStatePath": str(config.projects_state_root / "source"),
-        "threadNotesPath": str(config.projects_data_root / "source/thread-notes"),
+        "sessionNotesPath": str(config.projects_data_root / "source/session-notes"),
         "status": "active",
         "roots": [{"path": str(old), "role": "primary", "status": "active"}],
     }
@@ -267,7 +267,7 @@ def test_missing_app_project_becomes_inactive_and_can_reactivate(tmp_path: Path)
         "currentRoot": str(tmp_path / "old"),
         "projectDataPath": str(config.projects_data_root / "source"),
         "projectStatePath": str(config.projects_state_root / "source"),
-        "threadNotesPath": str(config.projects_data_root / "source/thread-notes"),
+        "sessionNotesPath": str(config.projects_data_root / "source/session-notes"),
         "status": "active",
         "roots": [],
     }

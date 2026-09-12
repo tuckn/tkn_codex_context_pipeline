@@ -1,4 +1,4 @@
-"""Explicit, copy-based migration from storage v2 to provider/source namespaces.
+"""Explicit, copy-based migration from storage v2/v3 to Session Note storage v4.
 
 Original Raw, notes, canonical files, and immutable provenance stay readable.
 Only mutable catalogs/state locators are rewritten; old notes keep their bytes.
@@ -6,8 +6,9 @@ Only mutable catalogs/state locators are rewritten; old notes keep their bytes.
 from __future__ import annotations
 
 import json
+import re
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -15,8 +16,8 @@ from typing import Any
 from .config import AppConfig
 from .initialization import ROOT_KINDS, ROOT_OWNERSHIP_MARKER, _ownership_marker_document
 from .raw_capture import _mirror_relative
+from .session_notes import PipelineError, atomic_write_bytes, now_iso
 from .storage import STORAGE_VERSION, _root_lock, read_json, validate_storage
-from .thread_notes import PipelineError, atomic_write_bytes, now_iso
 
 
 def _json(value: Any) -> bytes:
@@ -135,7 +136,7 @@ def _manifest(content: bytes, config: AppConfig) -> bytes:
     ).encode("utf-8")
 
 
-def _plan(config: AppConfig) -> tuple[list[MigrationFile], bool]:
+def _plan_v2(config: AppConfig) -> tuple[list[MigrationFile], bool]:
     legacy_path = config.state_root / "pipeline.json"
     _safe_path(legacy_path, config.state_root)
     legacy = read_json(legacy_path)
@@ -203,7 +204,7 @@ def _plan(config: AppConfig) -> tuple[list[MigrationFile], bool]:
             value["sourceRuns"] = {
                 f"{config.source_provider}/{config.source_id}": bool(value.get("pipelineComplete", False))
             }
-        output = _json(_rewrite(value, config))
+        output = _json(_session_names(_rewrite(value, config)))
         if saved.exists():
             if source.read_bytes() not in (original, output):
                 raise PipelineError(f"shared catalog changed after migration began: {source}")
@@ -227,6 +228,102 @@ def _plan(config: AppConfig) -> tuple[list[MigrationFile], bool]:
     else:
         operations.append(MigrationFile(legacy_path, output=retired))
     return operations, False
+
+
+def _session_names(value: Any, config: AppConfig | None = None) -> Any:
+    """Rewrite mutable artifact locators; immutable evidence keeps its bytes."""
+    if isinstance(value, list):
+        return [_session_names(item, config) for item in value]
+    if isinstance(value, dict):
+        return {key.replace("threadNote", "sessionNote").replace("ThreadNote", "SessionNote"):
+                _session_names(item, config) for key, item in value.items()}
+    if isinstance(value, str):
+        if config is not None and value.startswith("data:/") and not value.startswith(
+            f"data:/{config.source_provider}/{config.source_id}/"
+        ):
+            return value
+        if config is not None and not value.startswith("data:/") and (
+            ":\\" in value or ":/" in value or value.startswith("/")
+        ):
+            roots = (config.source_data_root, config.source_state_root)
+            prefixes = [text for root in roots for text in (str(root), root.as_posix())]
+            if not any(value == text or value.startswith((text + "/", text + "\\")) for text in prefixes):
+                return value
+        return re.sub(r"(^|[/\\])thread-notes(?=[/\\]|$)", r"\1session-notes", value)
+    return value
+
+
+def _session_destination(path: Path, config: AppConfig) -> Path:
+    if not path.is_relative_to(config.source_data_root):
+        return path
+    relative = path.relative_to(config.source_data_root)
+    return config.source_data_root.joinpath(*(
+        "session-notes" if part == "thread-notes" else part for part in relative.parts
+    ))
+
+
+def _plan_v3(config: AppConfig, current: dict[str, Any]) -> tuple[list[MigrationFile], bool]:
+    if current.get("sourceId") != config.source_id or current.get("sourceProvider") != config.source_provider:
+        raise PipelineError("destination namespace has incompatible source identity")
+    operations: list[MigrationFile] = []
+    backup = config.source_state_root / "migrations" / "session-note-v4-backup"
+    # Copy notes, including project-assigned notes. Originals and note IDs survive.
+    for directory in (config.source_data_root / "thread-notes", config.projects_data_root):
+        for source in _files(directory, config.data_root):
+            destination = _session_destination(source, config)
+            if destination != source:
+                operations.append(MigrationFile(destination, source, sha256(source.read_bytes()).hexdigest()))
+    mutable = [config.data_root / "catalog/threads.json", config.data_root / "provenance/index.json",
+               config.source_data_root / "project-registry.jsonl",
+               config.source_state_root / "ledger.json", config.source_state_root / "last-run.json"]
+    for directory in (config.source_state_root / "threads", config.source_state_root / "projects"):
+        mutable.extend(path for path in _files(directory, config.state_root) if path.suffix == ".json")
+    # The pipeline version is the final write, so interrupted copies can be resumed.
+    mutable.append(config.source_state_root / "pipeline.json")
+    for source in mutable:
+        if not source.exists():
+            continue
+        root = config.data_root if source.is_relative_to(config.data_root) else config.state_root
+        _safe_path(source, root)
+        saved = backup / ("data" if root == config.data_root else "state") / source.relative_to(root)
+        _safe_path(saved, config.state_root)
+        original = saved.read_bytes() if saved.exists() else source.read_bytes()
+        if source.suffix == ".jsonl":
+            records = [_session_names(json.loads(line), config) for line in original.decode("utf-8-sig").splitlines()
+                       if line.strip()]
+            output = "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in records).encode("utf-8")
+        else:
+            value = _session_names(json.loads(original.decode("utf-8-sig")), config)
+            if source == config.source_state_root / "pipeline.json":
+                value.update(storageVersion=STORAGE_VERSION, migratedFromStorageVersion=3)
+            output = _json(value)
+        if saved.exists() and source.read_bytes() not in (original, output):
+            raise PipelineError(f"mutable state changed after migration began: {source}")
+        if not saved.exists():
+            operations.append(MigrationFile(saved, source, sha256(source.read_bytes()).hexdigest()))
+        operations.append(MigrationFile(source, source, sha256(source.read_bytes()).hexdigest(), output, True))
+    return operations, False
+
+
+def _plan(config: AppConfig) -> tuple[list[MigrationFile], bool]:
+    current = read_json(config.source_state_root / "pipeline.json")
+    if current.get("storageVersion") == 3:
+        return _plan_v3(config, current)
+    operations, migrated = _plan_v2(config)
+    updated = []
+    for operation in operations:
+        destination = _session_destination(operation.destination, config)
+        output = operation.output
+        # v2 backups and immutable provenance are historical evidence.
+        if "migrations" not in destination.parts:
+            if output is not None and destination.suffix == ".json":
+                output = _json(_session_names(json.loads(output)))
+            elif destination.name == "project-registry.jsonl":
+                records = [_session_names(json.loads(line)) for line in operation.content().decode(
+                    "utf-8-sig").splitlines() if line.strip()]
+                output = "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in records).encode("utf-8")
+        updated.append(replace(operation, destination=destination, output=output))
+    return updated, migrated
 
 
 def migrate_storage(config: AppConfig, *, dry_run: bool, config_path: Path | None = None) -> dict[str, Any]:

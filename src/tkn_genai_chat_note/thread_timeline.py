@@ -1,4 +1,4 @@
-"""Source-derived ordering, timestamps, actors, and coverage for Thread Notes."""
+"""Source-derived ordering, timestamps, actors, and coverage for Session Notes."""
 
 from __future__ import annotations
 

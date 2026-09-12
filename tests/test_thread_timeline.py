@@ -7,10 +7,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from test_thread_note_pipeline import note_data
+from test_session_note_pipeline import note_data
 
 from tkn_genai_chat_note.chat_logs import ChatEvent
-from tkn_genai_chat_note.thread_notes import (
+from tkn_genai_chat_note.session_notes import (
     Candidate,
     PipelineConfig,
     PipelineError,
@@ -18,7 +18,7 @@ from tkn_genai_chat_note.thread_notes import (
     ProviderSummarizer,
     render_note,
     validate_note_data,
-    validate_thread_note,
+    validate_session_note,
 )
 from tkn_genai_chat_note.thread_timeline import render_timeline, validate_timeline
 
@@ -163,11 +163,11 @@ def test_long_v5_note_retains_all_timeline_entries(tmp_path: Path) -> None:
     data["timeline"] += [
         entry(reply, f"試行{i}：" + "確認できた結果を記録する。" * 50, "Reported Result") for i in range(60)
     ]
-    path = case.project.thread_notes_path / "long.md"
+    path = case.project.session_notes_path / "long.md"
     path.parent.mkdir()
     path.write_text(render_note(case, data, {}), encoding="utf-8")
     assert path.stat().st_size > 30000
-    assert validate_thread_note(path)["valid"]
+    assert validate_session_note(path)["valid"]
     assert "試行59" in path.read_text(encoding="utf-8")
 
 
@@ -249,7 +249,7 @@ def test_empty_state_values_remain_unrecorded_and_optional_sections_stay_optiona
     assert "  - Sources: L000006" in text.split("## Timeline")[0]
     path = tmp_path / "note.md"
     path.write_text(text, encoding="utf-8")
-    assert validate_thread_note(path)["valid"]
+    assert validate_session_note(path)["valid"]
 
 
 def test_state_lists_and_multiline_prose_cannot_override_metadata(tmp_path: Path) -> None:
@@ -272,4 +272,4 @@ def test_state_lists_and_multiline_prose_cannot_override_metadata(tmp_path: Path
     assert "Sources:" not in text.split("## Source Notes")[1]
     path = tmp_path / "note.md"
     path.write_text(text, encoding="utf-8")
-    assert validate_thread_note(path)["status"] == "blocked"
+    assert validate_session_note(path)["status"] == "blocked"

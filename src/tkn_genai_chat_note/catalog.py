@@ -23,8 +23,7 @@ from .chat_logs import (
 from .config import AppConfig
 from .provenance import ProvenanceStore, immutable_bytes, json_bytes
 from .raw_capture import RawCaptureError, RawSourceInput, _stable_source_bytes, ingest_raw_sources
-from .storage import read_json
-from .thread_notes import (
+from .session_notes import (
     Candidate,
     PipelineError,
     Project,
@@ -35,6 +34,7 @@ from .thread_notes import (
     source_event_time,
     source_timestamp,
 )
+from .storage import read_json
 
 CATALOG_SCHEMA_VERSION = "1.0.0"
 EVENT_SCHEMA_VERSION = "1.0.0"
@@ -344,7 +344,9 @@ def discover(config: AppConfig, provenance: ProvenanceStore, *, run_id: str) -> 
             title="Conversation (preserve every independent work item)",
             current_root=config.source_data_root / "threads" / key,
             context_path=config.data_root,
-            note_directory=config.source_data_root / "thread-notes" / source_timestamp(log.timestamp).strftime("%Y/%m"),
+            note_directory=(
+                config.source_data_root / "session-notes" / source_timestamp(log.timestamp).strftime("%Y/%m")
+            ),
             assigned_thread_ids=frozenset({thread_id}),
             source_project_id=str(observed["sourceProjectId"] or ""),
             state_directory=config.source_state_root / "threads" / key,

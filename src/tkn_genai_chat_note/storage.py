@@ -17,9 +17,9 @@ from .initialization import (
     inspect_reset_target_ownership,
     validate_reset_targets,
 )
-from .thread_notes import PipelineError, atomic_write_json, now_iso
+from .session_notes import PipelineError, atomic_write_json, now_iso
 
-STORAGE_VERSION = 3
+STORAGE_VERSION = 4
 
 
 def read_json(path: Path, default: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -35,6 +35,11 @@ def read_json(path: Path, default: dict[str, Any] | None = None) -> dict[str, An
 
 
 def legacy_storage_pending(config: AppConfig) -> bool:
+    current = read_json(config.source_state_root / "pipeline.json")
+    if current.get("storageVersion") == STORAGE_VERSION:
+        return False
+    if current.get("storageVersion") == 3:
+        return True
     legacy = read_json(config.state_root / "pipeline.json")
     if legacy.get("storageVersion") == STORAGE_VERSION and legacy.get("layout") == "provider-source":
         return False

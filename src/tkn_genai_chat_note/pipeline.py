@@ -15,8 +15,7 @@ from .catalog import CATALOG_SCHEMA_VERSION, Discovery, capture_sources, discove
 from .config import AppConfig
 from .frontmatter import parse_simple_frontmatter
 from .provenance import ProvenanceStore, json_bytes
-from .storage import legacy_storage_pending, pipeline_storage, read_json
-from .thread_notes import (
+from .session_notes import (
     SUMMARY_PROFILE,
     Candidate,
     PipelineConfig,
@@ -29,9 +28,10 @@ from .thread_notes import (
     generation_fingerprint,
     now_iso,
     now_local,
-    validate_thread_note,
+    validate_session_note,
     write_candidate_note,
 )
+from .storage import legacy_storage_pending, pipeline_storage, read_json
 
 LEDGER_SCHEMA_VERSION = 1
 Progress = Callable[[dict[str, Any]], None]
@@ -69,7 +69,7 @@ def _agent(config: PipelineConfig, stage: str) -> dict[str, Any]:
     profile = SUMMARY_PROFILE
     return {
         "software": "tkn-genai-chat-note-pipeline",
-        "version": "0.10.0",
+        "version": "0.11.0",
         "provider": config.provider,
         "model": config.model,
         "reasoningEffort": config.reasoning_effort,
@@ -134,16 +134,16 @@ def _notes(
                 and current_note_matches_generation(candidate, pipeline_config)
             )
             if unchanged and not (force and selected):
-                validate_thread_note(existing)  # type: ignore[arg-type]
+                validate_session_note(existing)  # type: ignore[arg-type]
                 entry.update(status="current", reason=None)
                 continue
             if not generate or not selected:
-                entry.update(status="pending", reason="thread-note-needs-build")
+                entry.update(status="pending", reason="session-note-needs-build")
                 continue
             if existing:
                 metadata = parse_simple_frontmatter(existing.read_text(encoding="utf-8-sig"))
                 if metadata.get("reviewStatus") != "unreviewed":
-                    entry.update(status="blocked", reason="reviewed-thread-note")
+                    entry.update(status="blocked", reason="reviewed-session-note")
                     continue
                 internal_state = read_json(candidate.project.state_path)
                 internal_thread = (
@@ -161,13 +161,13 @@ def _notes(
                     and internal_thread.get("generationFingerprint") == fingerprint
                 )
                 if prior.get("noteHash") != _hash(existing) and not allow_edited and not recoverable:
-                    entry.update(status="blocked", reason="edited-thread-note")
+                    entry.update(status="blocked", reason="edited-session-note")
                     continue
             if now_local() >= deadline or limit is not None and attempted >= limit:
                 entry.update(status="deferred", reason="runtime-deadline" if now_local() >= deadline else "limit")
                 continue
             if provenance.dry_run:
-                entry.update(status="planned", reason="thread-note-needs-build")
+                entry.update(status="planned", reason="session-note-needs-build")
                 attempted += 1
                 continue
             attempted += 1
@@ -204,12 +204,12 @@ def _notes(
                 used.extend(prior_activity.get("generated", []))
             activity = provenance.activity(
                 run_id=run_id,
-                stage="thread-note",
+                stage="session-note",
                 subject=key,
                 started_at=started,
                 used=used,
                 generated=[output],
-                agent=_agent(pipeline_config, "thread-note"),
+                agent=_agent(pipeline_config, "session-note"),
             )
             ledger["threads"][key] = {
                 "status": "current",
@@ -228,13 +228,13 @@ def _notes(
                     {
                         "type": "thread-complete",
                         "threadId": entry["threadId"],
-                        "threadNotePath": str(note),
+                        "sessionNotePath": str(note),
                         "index": attempted,
                         "total": len(discovery.candidates),
                     }
                 )
         except Exception as exc:
-            entry.update(status="failed", reason="thread-note-failed", error=str(exc))
+            entry.update(status="failed", reason="session-note-failed", error=str(exc))
             ledger["threads"][key] = {**prior, "status": "failed", "error": str(exc), "attemptedAt": now_iso()}
             if progress:
                 progress(
@@ -263,7 +263,7 @@ def run_pipeline(
     summarizer: Summarizer | None = None,
     progress: Progress | None = None,
 ) -> dict[str, Any]:
-    if mode not in {"clone", "pull", "raw", "thread-notes"}:
+    if mode not in {"clone", "pull", "raw", "session-notes"}:
         raise PipelineError(f"unknown pipeline mode: {mode}")
     if limit is not None and limit <= 0:
         raise PipelineError("limit must be positive")
@@ -298,7 +298,7 @@ def run_pipeline(
                 ok=not raw_report["failed"],
                 threadCounts={},
                 threads=[],
-                generatedThreadNoteCount=0,
+                generatedSessionNoteCount=0,
                 finishedAt=now_iso(),
             )
             if not dry_run:
@@ -311,7 +311,7 @@ def run_pipeline(
         discovery = discover(config, provenance, run_id=run_id)
         report.update(rawIngest=discovery.raw_report, warnings=discovery.warnings)
         report["failed"].extend(discovery.failures)
-        pipeline_config = config.thread_note_pipeline_config(allow_missing_watermark=True)
+        pipeline_config = config.session_note_pipeline_config(allow_missing_watermark=True)
         _notes(
             config,
             pipeline_config,
@@ -320,8 +320,8 @@ def run_pipeline(
             provenance,
             run_id=run_id,
             deadline=deadline,
-            generate=mode in {"clone", "pull", "thread-notes"},
-            force=force and mode in {"clone", "pull", "thread-notes"},
+            generate=mode in {"clone", "pull", "session-notes"},
+            force=force and mode in {"clone", "pull", "session-notes"},
             allow_edited=allow_edited,
             thread_id=thread_id,
             limit=limit,
@@ -330,12 +330,12 @@ def run_pipeline(
         )
         report["threads"] = discovery.entries
         report["threadCounts"] = dict(Counter(entry["status"] for entry in discovery.entries))
-        report["generatedThreadNoteCount"] = sum(bool(entry.get("generated")) for entry in discovery.entries)
+        report["generatedSessionNoteCount"] = sum(bool(entry.get("generated")) for entry in discovery.entries)
         failures = [entry for entry in discovery.entries if entry["status"] in {"failed", "blocked"}]
         report["ok"] = not report["failed"] and not failures
         report["complete"] = bool(
             report["ok"]
-            and mode in {"clone", "pull", "thread-notes"}
+            and mode in {"clone", "pull", "session-notes"}
             and not dry_run
             and all(entry["status"] in {"current", "excluded"} for entry in discovery.entries)
         )
