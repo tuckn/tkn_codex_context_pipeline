@@ -13,9 +13,9 @@ from .config import AppConfig, config_document, initialization_config, write_con
 from .projects import create_fresh_projects
 from .thread_notes import PipelineError, atomic_write_json
 
-ROOT_OWNERSHIP_MARKER = ".tkn-codex-context-root.json"
+ROOT_OWNERSHIP_MARKER = ".tkn-genai-chat-note-root.json"
 ROOT_OWNERSHIP_SCHEMA_VERSION = 1
-ROOT_OWNER_APPLICATION_ID = "tkn-codex-context-pipeline"
+ROOT_OWNER_APPLICATION_ID = "tkn-genai-chat-note-pipeline"
 ROOT_KINDS = ("data", "state", "cache", "raw")
 SAFE_RESET_OWNERSHIP_STATUSES = frozenset({"missing", "empty", "owned"})
 
@@ -30,8 +30,7 @@ def _overlaps(left: Path, right: Path) -> bool:
 
 def validate_reset_targets(config: AppConfig, config_path: Path) -> tuple[Path, ...]:
     targets = tuple(
-        _resolved(path)
-        for path in (config.data_root, config.state_root, config.cache_root, config.raw_root)
+        _resolved(path) for path in (config.data_root, config.state_root, config.cache_root, config.raw_root)
     )
     home = _resolved(Path.home())
     codex_home = _resolved(config.codex_home)
@@ -60,6 +59,10 @@ def _ownership_marker_document(kind: str) -> dict[str, str | int]:
 
 def _inspect_root_ownership(kind: str, path: Path) -> dict[str, Any]:
     marker = path / ROOT_OWNERSHIP_MARKER
+    legacy_marker = path / ".tkn-codex-context-root.json"
+    legacy = not marker.exists() and legacy_marker.exists()
+    if legacy:
+        marker = legacy_marker
     report: dict[str, Any] = {
         "kind": kind,
         "path": str(path),
@@ -95,6 +98,8 @@ def _inspect_root_ownership(kind: str, path: Path) -> dict[str, Any]:
         report.update(status="invalid-marker", reason=f"cannot read ownership marker: {exc}")
         return report
     expected = _ownership_marker_document(kind)
+    if legacy:
+        expected["applicationId"] = "tkn-codex-context-pipeline"
     if not isinstance(value, dict) or any(value.get(key) != expected_value for key, expected_value in expected.items()):
         report.update(
             status="invalid-marker",
@@ -123,7 +128,7 @@ def _require_owned_reset_targets(ownership: list[dict[str, Any]]) -> None:
         raise PipelineError(
             "refusing to reset targets without valid ownership markers: "
             f"{_ownership_details(unsafe)}; inspect and explicitly adopt existing directories with "
-            "`tkn-codex-context init --adopt-existing --dry-run` before using --force"
+            "`tkn-genai-chat-note init --adopt-existing --dry-run` before using --force"
         )
 
 
@@ -137,7 +142,7 @@ def _adopt_existing_targets(
         raise PipelineError(f"refusing to adopt targets with invalid ownership state: {_ownership_details(invalid)}")
     existing = [item for item in ownership if item["exists"]]
     if not existing:
-        raise PipelineError("no existing reset targets to adopt; run `tkn-codex-context init` instead")
+        raise PipelineError("no existing reset targets to adopt; run `tkn-genai-chat-note init` instead")
     adoptable = [item for item in ownership if item["status"] in {"empty", "unowned"}]
     planned = [str(item["path"]) for item in adoptable]
     if dry_run:
@@ -212,6 +217,7 @@ def initialize_application(
         overrides=overrides,
         refresh_installed_at=not adopt_existing,
     )
+    config.require_supported_chat_sources()
     reset_targets = validate_reset_targets(config, target)
     ownership = inspect_reset_target_ownership(reset_targets)
     if adopt_existing:
@@ -227,21 +233,17 @@ def initialize_application(
             "adoptedTargets": [] if dry_run else planned_adoptions,
             "config": config_document(config),
         }
-    existing = [
-        str(path)
-        for path in reset_targets
-        if path.exists() or path.is_symlink()
-    ]
+    existing = [str(path) for path in reset_targets if path.exists() or path.is_symlink()]
     if existing and not force:
         unsafe = _unsafe_reset_ownership(ownership)
         if unsafe:
             raise PipelineError(
                 "existing pipeline storage is not marked as application-owned: "
                 f"{_ownership_details(unsafe)}; inspect and explicitly adopt it with "
-                "`tkn-codex-context init --adopt-existing --dry-run`"
+                "`tkn-genai-chat-note init --adopt-existing --dry-run`"
             )
         raise PipelineError(
-            "pipeline is already initialized; run `tkn-codex-context init --force --dry-run` "
+            "pipeline is already initialized; run `tkn-genai-chat-note init --force --dry-run` "
             "to inspect a clean rebuild"
         )
     if force:

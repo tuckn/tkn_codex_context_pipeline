@@ -127,18 +127,33 @@ class ProvenanceStore:
     def has_activity(self, activity_id: str | None) -> bool:
         return bool(activity_id and (self.root / "activities" / f"{activity_id}.json").is_file())
 
-    def publish_index(self, artifacts: list[dict[str, Any]], *, run_id: str, complete: bool = False) -> None:
+    def publish_index(
+        self, artifacts: list[dict[str, Any]], *, run_id: str, complete: bool = False,
+        source: tuple[str, str] | None = None,
+    ) -> None:
         if self.dry_run:
             return
         ids = [artifact["id"] for artifact in artifacts]
         if len(ids) != len(set(ids)):
             raise PipelineError("duplicate artifact id in downstream index")
         current_ids = set(ids)
-        previous = read_json(self.root / "index.json").get("artifacts", [])
-        artifacts = [
-            *artifacts,
-            *[{**artifact, "status": "inactive"} for artifact in previous if artifact["id"] not in current_ids],
-        ]
+        previous_index = read_json(self.root / "index.json")
+        previous = previous_index.get("artifacts", [])
+        source_runs = dict(previous_index.get("sourceRuns", {}))
+        if source is not None:
+            source_runs["/".join(source)] = complete
+            complete = all(source_runs.values())
+        retained = []
+        for artifact in previous:
+            prior_source = (artifact.get("sourceProvider"), artifact.get("sourceId"))
+            if artifact["id"] in current_ids:
+                if source is not None and prior_source != source:
+                    raise PipelineError("artifact id is already owned by another source namespace")
+                continue
+            retained.append(
+                {**artifact, "status": "inactive"} if source is None or prior_source == source else artifact
+            )
+        artifacts = [*artifacts, *retained]
         atomic_write_json(
             self.root / "index.json",
             {
@@ -146,6 +161,7 @@ class ProvenanceStore:
                 "runId": run_id,
                 "asOf": now_iso(),
                 "pipelineComplete": complete,
+                "sourceRuns": source_runs,
                 "artifacts": artifacts,
                 "activityRefs": [
                     "data:/" + path.relative_to(self.data_root).as_posix()

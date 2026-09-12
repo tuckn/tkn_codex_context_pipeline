@@ -14,9 +14,9 @@ from uuid import uuid4
 
 from .chat_logs import read_thread_source, source_ref
 
-RAW_MANIFEST_SCHEMA_VERSION = 2
-RAW_OWNERSHIP_MARKER = ".tkn-codex-context-root.json"
-RAW_OWNER_APPLICATION_ID = "tkn-codex-context-pipeline"
+RAW_MANIFEST_SCHEMA_VERSION = 3
+RAW_OWNERSHIP_MARKER = ".tkn-genai-chat-note-root.json"
+RAW_OWNER_APPLICATION_ID = "tkn-genai-chat-note-pipeline"
 RAW_OWNER_SCHEMA_VERSION = 1
 SOURCE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -102,7 +102,13 @@ def _ensure_raw_root(raw_root: Path, *, dry_run: bool) -> None:
 def _source_root(raw_root: Path, source_id: str) -> Path:
     if not SOURCE_ID_PATTERN.fullmatch(source_id):
         raise RawCaptureError(f"source_id is not safe for raw storage: {source_id!r}")
-    return raw_root / source_id
+    result = raw_root / "codex" / source_id
+    for directory in (result.parent, result):
+        if directory.is_symlink() or getattr(directory, "is_junction", lambda: False)():
+            raise RawCaptureError(f"raw namespace must not be a link: {directory}")
+        if directory.exists() and not directory.is_dir():
+            raise RawCaptureError(f"raw namespace must be a directory: {directory}")
+    return result
 
 
 def _capture_path(source_root: Path, digest: str) -> Path:
@@ -110,7 +116,7 @@ def _capture_path(source_root: Path, digest: str) -> Path:
 
 
 def _capture_ref(source_id: str, digest: str) -> str:
-    return f"raw:/{source_id}/sha256/{digest[:2]}/{digest}.jsonl"
+    return f"raw:/codex/{source_id}/sha256/{digest[:2]}/{digest}.jsonl"
 
 
 def _mirror_relative(source_reference: str) -> str:
@@ -133,7 +139,7 @@ def _mirror_path(source_root: Path, source_reference: str) -> Path:
 
 
 def _mirror_ref(source_id: str, source_reference: str) -> str:
-    return f"raw:/{source_id}/{_mirror_relative(source_reference)}"
+    return f"raw:/codex/{source_id}/{_mirror_relative(source_reference)}"
 
 
 def _read_manifest(path: Path, source_id: str) -> list[dict[str, Any]]:
@@ -155,8 +161,9 @@ def _read_manifest(path: Path, source_id: str) -> list[dict[str, Any]]:
             source_reference = str(value.get("sourceRef") or "")
             digest = str(value.get("sha256") or "")
             if (
-                value.get("schemaVersion") not in {1, RAW_MANIFEST_SCHEMA_VERSION}
+                value.get("schemaVersion") not in {1, 2, RAW_MANIFEST_SCHEMA_VERSION}
                 or value.get("sourceId") != source_id
+                or value.get("schemaVersion") == 3 and value.get("sourceProvider") != "codex"
                 or not source_reference
                 or not re.fullmatch(r"[0-9a-f]{64}", digest)
                 or not isinstance(value.get("byteCount"), int)
@@ -205,6 +212,7 @@ def _record_for_source(
     return {
         "schemaVersion": RAW_MANIFEST_SCHEMA_VERSION,
         "sourceId": source_id,
+        "sourceProvider": "codex",
         "sourceRef": source_reference,
         "captureRef": _mirror_ref(source_id, source_reference),
         "sha256": digest,
@@ -239,8 +247,10 @@ def ingest_raw_sources(
         or sessions_resolved.is_relative_to(raw_resolved)
     ):
         raise RawCaptureError(f"raw_root and source sessions root must not overlap: {raw}")
-    _ensure_raw_root(raw, dry_run=dry_run)
     owned_source_root = _source_root(raw, source_id)
+    if (raw / source_id / "manifest.jsonl").exists() and not (owned_source_root / "manifest.jsonl").exists():
+        raise RawCaptureError("legacy Raw layout requires `tkn-genai-chat-note storage migrate --dry-run` first")
+    _ensure_raw_root(raw, dry_run=dry_run)
     manifest_path = owned_source_root / "manifest.jsonl"
     records = _read_manifest(manifest_path, source_id)
     latest: dict[str, dict[str, Any]] = {str(record["sourceRef"]): record for record in records}
@@ -363,6 +373,7 @@ def ingest_raw_sources(
         "mode": "raw-ingest",
         "dryRun": dry_run,
         "sourceId": source_id,
+        "sourceProvider": "codex",
         "sessionsRoot": str(sessions),
         "rawRoot": str(raw),
         "manifestPath": str(manifest_path),

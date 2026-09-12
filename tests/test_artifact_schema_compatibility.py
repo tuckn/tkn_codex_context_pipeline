@@ -9,7 +9,7 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 LIB_ROOT = PLUGIN_ROOT / "lib"
 sys.path.insert(0, str(LIB_ROOT))
 
-from tkn_codex_context.frontmatter import (  # noqa: E402
+from tkn_genai_chat_note.frontmatter import (  # noqa: E402
     ensure_artifact_schema_version,
     parse_simple_frontmatter,
     require_supported_artifact_schema,

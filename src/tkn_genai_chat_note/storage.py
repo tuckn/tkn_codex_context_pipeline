@@ -19,7 +19,7 @@ from .initialization import (
 )
 from .thread_notes import PipelineError, atomic_write_json, now_iso
 
-STORAGE_VERSION = 2
+STORAGE_VERSION = 3
 
 
 def read_json(path: Path, default: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -34,7 +34,31 @@ def read_json(path: Path, default: dict[str, Any] | None = None) -> dict[str, An
     return value
 
 
-def validate_storage(config: AppConfig, config_path: Path | None = None) -> tuple[Path, ...]:
+def legacy_storage_pending(config: AppConfig) -> bool:
+    legacy = read_json(config.state_root / "pipeline.json")
+    if legacy.get("storageVersion") == STORAGE_VERSION and legacy.get("layout") == "provider-source":
+        return False
+    if legacy:
+        source_id = str(legacy.get("sourceId") or "")
+        # Resolve only a validated ID; never follow arbitrary metadata as a path.
+        from .raw_capture import SOURCE_ID_PATTERN
+
+        if not SOURCE_ID_PATTERN.fullmatch(source_id):
+            raise PipelineError("invalid legacy storage sourceId")
+        migrated = read_json(config.state_root / "codex" / source_id / "pipeline.json")
+        return migrated.get("migratedFromStorageVersion") != legacy.get("storageVersion")
+    return bool(
+        (config.raw_root / config.source_id / "manifest.jsonl").exists()
+        and not (config.source_state_root / "pipeline.json").exists()
+        or (config.data_root / "thread-notes").exists()
+        and not (config.source_state_root / "pipeline.json").exists()
+    )
+
+
+def validate_storage(
+    config: AppConfig, config_path: Path | None = None, *, allow_legacy: bool = False,
+) -> tuple[Path, ...]:
+    config.require_supported_chat_sources()
     roots = validate_reset_targets(config, config_path or global_config_path())
     for path in (config.data_root, config.state_root, config.raw_root, config.cache_root):
         if path.is_symlink():
@@ -42,6 +66,14 @@ def validate_storage(config: AppConfig, config_path: Path | None = None) -> tupl
     for ownership in inspect_reset_target_ownership(roots):
         if ownership["status"] not in {"missing", "empty", "owned"}:
             raise PipelineError(f"refusing unowned or invalid pipeline root: {ownership['path']}; choose fresh roots")
+    for kind, namespace in config.source_storage_paths(config.source_provider).items():
+        for directory in (namespace.parent, namespace):
+            if directory.is_symlink() or getattr(directory, "is_junction", lambda: False)():
+                raise PipelineError(f"{kind} source namespace must not be a link: {directory}")
+            if directory.exists() and not directory.is_dir():
+                raise PipelineError(f"{kind} source namespace must be a directory: {directory}")
+    if not allow_legacy and legacy_storage_pending(config):
+        raise PipelineError("legacy storage layout requires `tkn-genai-chat-note storage migrate --dry-run` first")
     return roots
 
 
@@ -85,14 +117,16 @@ def pipeline_storage(
     config_path: Path | None = None,
 ) -> Iterator[None]:
     roots = validate_storage(config, config_path)
-    metadata_path = config.state_root / "pipeline.json"
+    metadata_path = config.source_state_root / "pipeline.json"
     metadata = read_json(metadata_path)
     if metadata and metadata.get("storageVersion") != STORAGE_VERSION:
         raise PipelineError("unsupported pipeline storage version; choose fresh configured roots")
     if not metadata and not initialize:
-        raise PipelineError("pipeline is not initialized; run `tkn-codex-context clone` first")
-    if metadata and metadata.get("sourceId") != config.source_id:
-        raise PipelineError("source_id differs from this store; use a separate store for another source")
+        raise PipelineError("pipeline is not initialized; run `tkn-genai-chat-note clone` first")
+    if metadata and (
+        metadata.get("sourceId") != config.source_id or metadata.get("sourceProvider") != config.source_provider
+    ):
+        raise PipelineError("source identity differs from this namespace")
     if not metadata and (config.data_root / "project-registry.jsonl").exists():
         raise PipelineError(
             "legacy Project storage cannot be used by clone; choose fresh roots; existing data is retained"
@@ -108,7 +142,7 @@ def pipeline_storage(
                 marker,
                 {
                     "schemaVersion": 1,
-                    "applicationId": "tkn-codex-context-pipeline",
+                    "applicationId": "tkn-genai-chat-note-pipeline",
                     "rootKind": kind,
                 },
             )
@@ -123,9 +157,13 @@ def pipeline_storage(
                 {
                     "storageVersion": STORAGE_VERSION,
                     "sourceId": config.source_id,
+                    "sourceProvider": config.source_provider,
                     "createdAt": now_iso(),
                 },
             )
-        elif metadata.get("storageVersion") != STORAGE_VERSION or metadata.get("sourceId") != config.source_id:
+        elif (
+            metadata.get("storageVersion") != STORAGE_VERSION or metadata.get("sourceId") != config.source_id
+            or metadata.get("sourceProvider") != config.source_provider
+        ):
             raise PipelineError("pipeline storage changed while acquiring its lock")
         yield

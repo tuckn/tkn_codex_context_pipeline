@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from importlib.resources import files
@@ -14,6 +15,7 @@ from typing import Any, Literal, Self
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .config_validation import validate_config_layer
 from .inference import InferenceProvider, validate_ollama_base_url
 from .thread_notes import (
     DEFAULT_IDLE_MINUTES,
@@ -26,10 +28,10 @@ from .thread_notes import (
     atomic_write_text,
 )
 
-CONFIG_SCHEMA_VERSION: Literal["2.2.0"] = "2.2.0"
-_CONFIG_SCHEMA_VERSION_PARTS = (2, 2, 0)
+CONFIG_SCHEMA_VERSION: Literal["4.0.0"] = "4.0.0"
+_CONFIG_SCHEMA_VERSION_PARTS = (4, 0, 0)
 _CONFIG_SCHEMA_VERSION_PATTERN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
-APP_DIRECTORY_NAME = "codex_context_pipeline"
+APP_DIRECTORY_NAME = "genai_chat_note_pipeline"
 CONFIG_EXAMPLE_RESOURCE = "resources/config.example.yaml"
 ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max", "ultra"]
 LEGACY_GENERATION_KEYS = frozenset(
@@ -136,50 +138,14 @@ class GenerationConfig(BaseModel):
         return self
 
 
-class ScopeConfig(BaseModel):
-    """Explicit, many-to-many grouping; never inferred by a language model."""
-
-    model_config = ConfigDict(extra="forbid")
-    title: str
-    project_ids: list[str] = Field(default_factory=list)
-    thread_ids: list[str] = Field(default_factory=list)
-    repository_roots: list[Path] = Field(default_factory=list)
-
-    @field_validator("title")
-    @classmethod
-    def nonempty_title(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("scope title must not be empty")
-        return value.strip()
-
-
-class AppConfig(BaseModel):
-    """Resolved application configuration and inference backend selection."""
+class ChatSourceConfig(BaseModel):
+    """A source installation, independent of the inference backend."""
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["2.2.0"] = CONFIG_SCHEMA_VERSION
-    installed_at: datetime | None = None
-    codex_home: Path = Field(default_factory=lambda: Path.home() / ".codex")
-    raw_root: Path = Field(default_factory=lambda: default_app_root() / "raw")
-    data_root: Path = Field(default_factory=lambda: default_app_root() / "data")
-    state_root: Path = Field(default_factory=lambda: default_app_root() / "state")
-    cache_root: Path = Field(default_factory=default_user_cache_root)
-    generation: GenerationConfig = Field(default_factory=GenerationConfig)
-    idle_minutes: int = Field(default=DEFAULT_IDLE_MINUTES, ge=0)
-    runtime_minutes: int = Field(default=DEFAULT_RUNTIME_MINUTES, gt=0)
-    model_timeout_seconds: int = Field(default=DEFAULT_MODEL_TIMEOUT_SECONDS, gt=0)
-    source_id: str = DEFAULT_SOURCE_ID
-    include_archived: bool = True
-    scopes: dict[str, ScopeConfig] = Field(default_factory=dict)
-
-    @field_validator("scopes")
-    @classmethod
-    def safe_scope_ids(cls, value: dict[str, ScopeConfig]) -> dict[str, ScopeConfig]:
-        for key in value:
-            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", key):
-                raise ValueError("scope keys must use only letters, digits, dot, underscore, or hyphen")
-        return value
+    enabled: bool = False
+    home: Path
+    source_id: str
 
     @field_validator("source_id")
     @classmethod
@@ -188,6 +154,123 @@ class AppConfig(BaseModel):
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", normalized):
             raise ValueError("source_id must use only letters, digits, dot, underscore, or hyphen")
         return normalized
+
+    @field_validator("home", mode="before")
+    @classmethod
+    def require_home(cls, value: Any) -> Any:
+        if isinstance(value, str) and not value.strip():
+            raise ValueError("home must not be empty")
+        return value
+
+
+class CodexChatSourceConfig(ChatSourceConfig):
+    enabled: bool = True
+    home: Path = Field(default_factory=lambda: Path.home() / ".codex")
+    source_id: str = DEFAULT_SOURCE_ID
+    include_archived: bool = True
+
+
+class ChatProvidersConfig(BaseModel):
+    """Provider-specific fields; future adapters are configured but disabled."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    codex: CodexChatSourceConfig = Field(default_factory=CodexChatSourceConfig)
+    claude_code: ChatSourceConfig = Field(
+        alias="claude-code",
+        default_factory=lambda: ChatSourceConfig(
+            home=Path.home() / ".claude", source_id="windows-claude-code"
+        ),
+    )
+    github_copilot: ChatSourceConfig = Field(
+        alias="github-copilot",
+        default_factory=lambda: ChatSourceConfig(
+            home=Path.home() / ".copilot", source_id="windows-github-copilot"
+        ),
+    )
+
+    def entries(self) -> dict[str, ChatSourceConfig]:
+        return {"codex": self.codex, "claude-code": self.claude_code, "github-copilot": self.github_copilot}
+
+
+
+class ChatConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    providers: ChatProvidersConfig = Field(default_factory=ChatProvidersConfig)
+
+
+class AppConfig(BaseModel):
+    """Resolved application configuration and inference backend selection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["4.0.0"] = CONFIG_SCHEMA_VERSION
+    installed_at: datetime | None = None
+    chat: ChatConfig = Field(default_factory=ChatConfig)
+    raw_root: Path = Field(default_factory=lambda: default_app_root() / "raw")
+    data_root: Path = Field(default_factory=lambda: default_app_root() / "data")
+    state_root: Path = Field(default_factory=lambda: default_app_root() / "state")
+    cache_root: Path = Field(default_factory=default_user_cache_root)
+    generation: GenerationConfig = Field(default_factory=GenerationConfig)
+    idle_minutes: int = Field(default=DEFAULT_IDLE_MINUTES, ge=0)
+    runtime_minutes: int = Field(default=DEFAULT_RUNTIME_MINUTES, gt=0)
+    model_timeout_seconds: int = Field(default=DEFAULT_MODEL_TIMEOUT_SECONDS, gt=0)
+
+    @property
+    def codex_home(self) -> Path:
+        return self.chat.providers.codex.home
+
+    @property
+    def source_id(self) -> str:
+        return self.chat.providers.codex.source_id
+
+    @property
+    def source_provider(self) -> str:
+        return "codex"
+
+    def source_storage_paths(self, provider: str) -> dict[str, Path]:
+        settings = self.chat.providers.entries()[provider]
+        return {
+            kind: root / provider / settings.source_id
+            for kind, root in (
+                ("raw", self.raw_root), ("data", self.data_root),
+                ("state", self.state_root), ("cache", self.cache_root),
+            )
+        }
+
+    @property
+    def source_raw_root(self) -> Path:
+        return self.source_storage_paths(self.source_provider)["raw"]
+
+    @property
+    def source_data_root(self) -> Path:
+        return self.source_storage_paths(self.source_provider)["data"]
+
+    @property
+    def source_state_root(self) -> Path:
+        return self.source_storage_paths(self.source_provider)["state"]
+
+    @property
+    def source_cache_root(self) -> Path:
+        return self.source_storage_paths(self.source_provider)["cache"]
+
+    @property
+    def include_archived(self) -> bool:
+        return self.chat.providers.codex.include_archived
+
+    def require_supported_chat_sources(self) -> None:
+        unsupported = [
+            provider for provider, settings in self.chat.providers.entries().items()
+            if settings.enabled and provider != "codex"
+        ]
+        if unsupported:
+            raise PipelineError(
+                "chat acquisition is not implemented for " + ", ".join(unsupported)
+                + "; set chat.providers.<provider>.enabled to false; generation providers are independent"
+            )
+        if not self.chat.providers.codex.enabled:
+            raise PipelineError("no supported chat source is enabled; set chat.providers.codex.enabled to true")
 
     @property
     def sessions_root(self) -> Path:
@@ -199,19 +282,19 @@ class AppConfig(BaseModel):
 
     @property
     def registry_path(self) -> Path:
-        return self.data_root / "project-registry.jsonl"
+        return self.source_data_root / "project-registry.jsonl"
 
     @property
     def projects_data_root(self) -> Path:
-        return self.data_root / "projects"
+        return self.source_data_root / "projects"
 
     @property
     def projects_state_root(self) -> Path:
-        return self.state_root / "projects"
+        return self.source_state_root / "projects"
 
     @property
     def reports_root(self) -> Path:
-        return self.state_root / "reports"
+        return self.source_state_root / "reports"
 
     @property
     def provider(self) -> InferenceProvider:
@@ -256,7 +339,7 @@ class AppConfig(BaseModel):
         installed_at = self.installed_at
         if installed_at is None:
             if not allow_missing_watermark:
-                raise PipelineError("installed_at is missing; run `tkn-codex-context init` first")
+                raise PipelineError("installed_at is missing; run `tkn-genai-chat-note init` first")
             installed_at = datetime.now().astimezone()
         return PipelineConfig(
             installed_at=installed_at.astimezone().isoformat(timespec="seconds"),
@@ -334,7 +417,7 @@ def _without_null_provider_settings(value: dict[str, Any]) -> dict[str, Any]:
 
 
 def _default_config_document() -> dict[str, Any]:
-    return _without_null_provider_settings(AppConfig().model_dump(mode="python"))
+    return _without_null_provider_settings(AppConfig().model_dump(mode="python", by_alias=True))
 
 
 def _reject_legacy_generation_config(value: dict[str, Any], path: Path) -> None:
@@ -356,29 +439,50 @@ def _inspect_config_schema(value: dict[str, Any], path: Path) -> dict[str, Any]:
             f'configuration schema_version is required: {path}; set schema_version: "{CONFIG_SCHEMA_VERSION}"'
         )
     raw_version = value["schema_version"]
-    if type(raw_version) is int and raw_version == _CONFIG_SCHEMA_VERSION_PARTS[0]:
+    if (
+        type(raw_version) is int
+        and raw_version == 2
+        or isinstance(raw_version, str)
+        and re.fullmatch(r"2\.[0-2]\.[0-9]+", raw_version)
+    ):
+        if value.get("scopes"):
+            raise PipelineError(
+                "scopes moved to tkn-genai-context-curation; move their definitions before using this config"
+            )
         return {
             "schemaVersion": raw_version,
             "effectiveSchemaVersion": CONFIG_SCHEMA_VERSION,
             "migration": {
-                "kind": "legacy-integer-version",
+                "kind": "repository-split",
                 "fromVersion": raw_version,
                 "toVersion": CONFIG_SCHEMA_VERSION,
                 "persistentConfigUpdated": False,
             },
         }
+
     if not isinstance(raw_version, str) or not _CONFIG_SCHEMA_VERSION_PATTERN.fullmatch(raw_version):
         raise PipelineError(
             f"invalid configuration schema_version {raw_version!r}: {path}; "
             f'expected a quoted MAJOR.MINOR.PATCH value such as "{CONFIG_SCHEMA_VERSION}"'
         )
     parts = tuple(int(part) for part in raw_version.split("."))
+    if parts[0] == 3 and parts[1] == 0:
+        return {
+            "schemaVersion": raw_version,
+            "effectiveSchemaVersion": CONFIG_SCHEMA_VERSION,
+            "migration": {
+                "kind": "chat-provider-hierarchy",
+                "fromVersion": raw_version,
+                "toVersion": CONFIG_SCHEMA_VERSION,
+                "persistentConfigUpdated": False,
+            },
+        }
     current_major, current_minor, _current_patch = _CONFIG_SCHEMA_VERSION_PARTS
     major, minor, _patch = parts
     if major != current_major:
         direction = "newer" if major > current_major else "older"
         action = (
-            "upgrade tkn-codex-context"
+            "upgrade tkn-genai-chat-note"
             if major > current_major
             else "migrate the configuration explicitly; no migration path is available"
         )
@@ -391,7 +495,7 @@ def _inspect_config_schema(value: dict[str, Any], path: Path) -> dict[str, Any]:
         raise PipelineError(
             f"unsupported newer configuration schema_version {raw_version!r}: {path}; "
             f"this application supports schema versions through {CONFIG_SCHEMA_VERSION}; "
-            "upgrade tkn-codex-context"
+            "upgrade tkn-genai-chat-note"
         )
     migration: dict[str, Any] | None = None
     if minor < current_minor:
@@ -411,29 +515,27 @@ def _inspect_config_schema(value: dict[str, Any], path: Path) -> dict[str, Any]:
 def _config_properties(value: dict[str, Any]) -> dict[str, Any]:
     result = dict(value)
     result.pop("schema_version", None)
+    major = str(value.get("schema_version", "")).split(".")[0]
+    if major in {"2", "3"}:
+        if "chat" in result:
+            raise PipelineError('chat requires schema_version: "4.0.0"; do not mix legacy and nested chat settings')
+        codex = {}
+        for old, new in (("codex_home", "home"), ("source_id", "source_id"), ("include_archived", "include_archived")):
+            if old in result:
+                codex[new] = result.pop(old)
+        if codex:
+            result["chat"] = {"providers": {"codex": codex}}
+    elif any(key in result for key in ("codex_home", "source_id", "include_archived")):
+        raise PipelineError("move codex_home, source_id, and include_archived under chat.providers.codex (home)")
+    if major == "2" and result.get("scopes") == {}:
+        result.pop("scopes")
     return result
 
 
 def _resolve_paths(value: dict[str, Any], base: Path) -> dict[str, Any]:
-    result = dict(value)
-    if isinstance(result.get("scopes"), dict):
-        result["scopes"] = {
-            key: (
-                {
-                    **scope,
-                    "repository_roots": [
-                        _resolve_paths({"data_root": root}, base)["data_root"] for root in scope["repository_roots"]
-                    ],
-                }
-                if isinstance(scope, dict) and isinstance(scope.get("repository_roots"), list)
-                else scope
-            )
-            for key, scope in result["scopes"].items()
-        }
-    for key in ("codex_home", "raw_root", "data_root", "state_root", "cache_root"):
-        raw = result.get(key)
-        if raw is None:
-            continue
+    result = deepcopy(value)
+
+    def resolve(raw: Any) -> Path:
         expanded_text = os.path.expandvars(str(raw))
         if expanded_text == "~":
             expanded = Path.home()
@@ -441,7 +543,19 @@ def _resolve_paths(value: dict[str, Any], base: Path) -> dict[str, Any]:
             expanded = Path.home() / expanded_text[2:]
         else:
             expanded = Path(expanded_text).expanduser()
-        result[key] = expanded if expanded.is_absolute() else (base / expanded).absolute()
+        return expanded if expanded.is_absolute() else (base / expanded).absolute()
+
+    for key in ("raw_root", "data_root", "state_root", "cache_root"):
+        if result.get(key) is not None:
+            result[key] = resolve(result[key])
+    chat = result.get("chat")
+    providers = chat.get("providers") if isinstance(chat, dict) else None
+    if isinstance(providers, dict):
+        for settings in providers.values():
+            if isinstance(settings, dict) and settings.get("home") is not None:
+                if isinstance(settings["home"], str) and not settings["home"].strip():
+                    raise PipelineError("chat provider home must not be empty")
+                settings["home"] = resolve(settings["home"])
     return result
 
 
@@ -593,6 +707,8 @@ def resolve_app_config(
             "migration": None,
         }
         layer_report.append(report)
+        if kind == "explicit" and not report["exists"]:
+            raise PipelineError(f"explicit configuration file not found: {path}")
         if report["exists"]:
             raw_layer = _read_layer(path)
             _reject_legacy_generation_config(raw_layer, path)
@@ -602,6 +718,10 @@ def resolve_app_config(
                 _config_properties(raw_layer),
                 remove_configured=False,
             )
+            try:
+                validate_config_layer(AppConfig, layer)
+            except ValueError as exc:
+                raise PipelineError(f"invalid configuration layer {path}: {exc}") from exc
             resolved_layer = _resolve_paths(layer, path.parent)
             _deep_merge(merged, resolved_layer)
             _mark_sources(sources, resolved_layer, f"{kind}: {path}")
@@ -617,7 +737,6 @@ def resolve_app_config(
         raise PipelineError(f"invalid configuration: {exc}") from exc
     resolved = config.model_copy(
         update={
-            "codex_home": config.codex_home.expanduser().absolute(),
             "raw_root": config.raw_root.expanduser().absolute(),
             "data_root": config.data_root.expanduser().absolute(),
             "state_root": config.state_root.expanduser().absolute(),
@@ -652,7 +771,7 @@ def config_example_text() -> str:
     """Read the application-owned example distributed in the package."""
 
     try:
-        return files("tkn_codex_context").joinpath(CONFIG_EXAMPLE_RESOURCE).read_text(encoding="utf-8")
+        return files("tkn_genai_chat_note").joinpath(CONFIG_EXAMPLE_RESOURCE).read_text(encoding="utf-8")
     except (FileNotFoundError, OSError) as exc:
         raise PipelineError(f"packaged config example is unavailable: {exc}") from exc
 
@@ -706,7 +825,7 @@ def initialize_user_config(
 
 
 def config_document(config: AppConfig) -> dict[str, Any]:
-    value = _without_null_provider_settings(config.model_dump(mode="json"))
+    value = _without_null_provider_settings(config.model_dump(mode="json", by_alias=True))
     value["installed_at"] = (
         config.installed_at.astimezone().isoformat(timespec="seconds") if config.installed_at else None
     )
@@ -725,7 +844,7 @@ def initialization_config(
 
     target = (path or global_config_path()).expanduser().absolute()
     if not target.is_file():
-        raise PipelineError(f"config not found: {target}; run `tkn-codex-context config init` first")
+        raise PipelineError(f"config not found: {target}; run `tkn-genai-chat-note config init` first")
     raw: dict[str, Any] = {}
     removed: list[str] = []
     if target.is_file():
@@ -761,7 +880,6 @@ def initialization_config(
     return (
         config.model_copy(
             update={
-                "codex_home": config.codex_home.expanduser().absolute(),
                 "raw_root": config.raw_root.expanduser().absolute(),
                 "data_root": config.data_root.expanduser().absolute(),
                 "state_root": config.state_root.expanduser().absolute(),

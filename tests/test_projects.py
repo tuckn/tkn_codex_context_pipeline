@@ -6,20 +6,20 @@ from pathlib import Path
 
 import pytest
 
-from tkn_codex_context.app_state import (
+from tkn_genai_chat_note.app_state import (
     CodexAppProject,
     CodexAppState,
     ThreadAssignment,
     load_codex_app_state,
 )
-from tkn_codex_context.config import AppConfig
-from tkn_codex_context.projects import (
+from tkn_genai_chat_note.config import AppConfig, ChatConfig
+from tkn_genai_chat_note.projects import (
     fetch_projects,
     list_registered_projects,
     resolve_project_selector,
     runtime_projects,
 )
-from tkn_codex_context.thread_notes import PipelineError, Project
+from tkn_genai_chat_note.thread_notes import PipelineError, Project
 
 
 def app_project(project_id: str, name: str, roots: list[Path]) -> CodexAppProject:
@@ -101,7 +101,7 @@ def test_fetch_binds_multi_root_and_preserves_unknown_fields(tmp_path: Path) -> 
     secondary = tmp_path / "secondary"
     data_root = tmp_path / "pipeline" / "data"
     state_root = tmp_path / "pipeline" / "state"
-    registry = data_root / "project-registry.jsonl"
+    registry = data_root / "codex/windows/project-registry.jsonl"
     registry.parent.mkdir(parents=True)
     existing = {
         "schemaVersion": 2,
@@ -109,14 +109,15 @@ def test_fetch_binds_multi_root_and_preserves_unknown_fields(tmp_path: Path) -> 
         "projectId": "source-1",
         "title": "Old",
         "currentRoot": str(primary),
-        "projectDataPath": str(data_root / "projects/existing"),
-        "projectStatePath": str(state_root / "projects/existing"),
+        "projectDataPath": str(data_root / "codex/windows/projects/existing"),
+        "projectStatePath": str(state_root / "codex/windows/projects/existing"),
         "status": "active",
         "customField": {"keep": True},
     }
+    registry.parent.mkdir(parents=True, exist_ok=True)
     registry.write_text(json.dumps(existing) + "\n", encoding="utf-8")
     config = AppConfig(
-        codex_home=tmp_path / "codex",
+        chat=ChatConfig.model_validate({"providers": {"codex": {"home": tmp_path / "codex"}}}),
         data_root=data_root,
         state_root=state_root,
         cache_root=tmp_path / "cache",
@@ -139,15 +140,15 @@ def test_fetch_binds_multi_root_and_preserves_unknown_fields(tmp_path: Path) -> 
     assert projects[0].assigned_thread_ids == frozenset({"thread-1"})
     assert projects[0].projectless_thread_ids == frozenset({"thread-2"})
     assert projects[0].project_id == "source-1"
-    assert projects[0].thread_notes_path == data_root / "projects/source-1/thread-notes"
-    assert projects[0].state_path == state_root / "projects/source-1/chat-refresh-state.json"
+    assert projects[0].thread_notes_path == data_root / "codex/windows/projects/source-1/thread-notes"
+    assert projects[0].state_path == state_root / "codex/windows/projects/source-1/chat-refresh-state.json"
 
 
 def test_same_name_and_root_remain_distinct_projects(tmp_path: Path) -> None:
     data_root = tmp_path / "pipeline" / "data"
     state_root = tmp_path / "pipeline" / "state"
     config = AppConfig(
-        codex_home=tmp_path / "codex",
+        chat=ChatConfig.model_validate({"providers": {"codex": {"home": tmp_path / "codex"}}}),
         data_root=data_root,
         state_root=state_root,
         cache_root=tmp_path / "cache",
@@ -172,7 +173,7 @@ def test_replaced_active_root_becomes_historical_alias(tmp_path: Path) -> None:
     new = tmp_path / "new"
     data_root = tmp_path / "pipeline" / "data"
     state_root = tmp_path / "pipeline" / "state"
-    registry = data_root / "project-registry.jsonl"
+    registry = data_root / "codex/windows/project-registry.jsonl"
     registry.parent.mkdir(parents=True)
     record = {
         "schemaVersion": 2,
@@ -180,14 +181,15 @@ def test_replaced_active_root_becomes_historical_alias(tmp_path: Path) -> None:
         "projectId": "source",
         "title": "Project",
         "currentRoot": str(old),
-        "projectDataPath": str(data_root / "projects/existing"),
-        "projectStatePath": str(state_root / "projects/existing"),
+        "projectDataPath": str(data_root / "codex/windows/projects/existing"),
+        "projectStatePath": str(state_root / "codex/windows/projects/existing"),
         "status": "active",
         "roots": [{"path": str(old), "role": "primary", "status": "active"}],
     }
+    registry.parent.mkdir(parents=True, exist_ok=True)
     registry.write_text(json.dumps(record) + "\n", encoding="utf-8")
     config = AppConfig(
-        codex_home=tmp_path / "codex",
+        chat=ChatConfig.model_validate({"providers": {"codex": {"home": tmp_path / "codex"}}}),
         data_root=data_root,
         state_root=state_root,
         cache_root=tmp_path / "cache",
@@ -212,7 +214,7 @@ def test_same_id_survives_drive_and_name_change(tmp_path: Path) -> None:
     old = Path(r"C:\path\to\project")
     new = Path(r"D:\path\to\project")
     config = AppConfig(
-        codex_home=tmp_path / "codex",
+        chat=ChatConfig.model_validate({"providers": {"codex": {"home": tmp_path / "codex"}}}),
         data_root=tmp_path / "pipeline/data",
         state_root=tmp_path / "pipeline/state",
         cache_root=tmp_path / "cache",
@@ -252,7 +254,7 @@ def test_same_id_survives_drive_and_name_change(tmp_path: Path) -> None:
 
 def test_missing_app_project_becomes_inactive_and_can_reactivate(tmp_path: Path) -> None:
     config = AppConfig(
-        codex_home=tmp_path / "codex",
+        chat=ChatConfig.model_validate({"providers": {"codex": {"home": tmp_path / "codex"}}}),
         data_root=tmp_path / "pipeline/data",
         state_root=tmp_path / "pipeline/state",
         cache_root=tmp_path / "cache",
@@ -288,7 +290,7 @@ def test_missing_app_project_becomes_inactive_and_can_reactivate(tmp_path: Path)
 
 def test_fetch_rejects_old_registry_schema(tmp_path: Path) -> None:
     config = AppConfig(
-        codex_home=tmp_path / "codex",
+        chat=ChatConfig.model_validate({"providers": {"codex": {"home": tmp_path / "codex"}}}),
         data_root=tmp_path / "pipeline" / "data",
         state_root=tmp_path / "pipeline" / "state",
         cache_root=tmp_path / "cache",

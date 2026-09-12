@@ -66,7 +66,7 @@ def observe_app_state(
     try:
         content = _stable_source_bytes(config.app_state_path)
         digest = sha256(content).hexdigest()
-        relative = f"{config.source_id}/metadata/{digest}.json"
+        relative = f"{config.source_provider}/{config.source_id}/metadata/{digest}.json"
         capture = config.raw_root / relative
         if not provenance.dry_run:
             immutable_bytes(capture, content)
@@ -189,6 +189,7 @@ def discover(config: AppConfig, provenance: ProvenanceStore, *, run_id: str) -> 
     previous = {
         entry["threadKey"]: entry
         for entry in read_json(config.data_root / "catalog" / "threads.json").get("threads", [])
+        if entry.get("sourceProvider") == config.source_provider and entry.get("sourceId") == config.source_id
     }
     inputs, raw_report = capture_sources(config, dry_run=provenance.dry_run, captured_at=started)
     app_state, metadata_entity, warnings = observe_app_state(config, provenance)
@@ -286,7 +287,7 @@ def discover(config: AppConfig, provenance: ProvenanceStore, *, run_id: str) -> 
         }
         encoded = json_bytes(canonical)
         canonical_hash = sha256(encoded).hexdigest()
-        canonical_path = config.data_root / "source-aligned" / key / f"{canonical_hash}.json"
+        canonical_path = config.source_data_root / "source-aligned" / key / f"{canonical_hash}.json"
         if not provenance.dry_run:
             immutable_bytes(canonical_path, encoded)
         raw_entity = provenance.entity(
@@ -305,7 +306,7 @@ def discover(config: AppConfig, provenance: ProvenanceStore, *, run_id: str) -> 
         evidence[key] = [raw_entity, normalized_entity]
         entry.update(canonicalRef=normalized_entity["ref"], canonicalSha256=canonical_hash)
         # Deterministic normalization needs no inference and retains its own input lineage.
-        activity_marker = config.state_root / "normalization" / f"{canonical_hash}.json"
+        activity_marker = config.source_state_root / "normalization" / f"{canonical_hash}.json"
         if not provenance.dry_run and not provenance.has_activity(read_json(activity_marker).get("activityId")):
             activity = provenance.activity(
                 run_id=run_id,
@@ -314,7 +315,7 @@ def discover(config: AppConfig, provenance: ProvenanceStore, *, run_id: str) -> 
                 started_at=started,
                 used=[raw_entity],
                 generated=[normalized_entity],
-                agent={"software": "tkn-codex-context-pipeline", "parserVersion": PARSER_VERSION},
+                agent={"software": "tkn-genai-chat-note-pipeline", "parserVersion": PARSER_VERSION},
             )
             atomic_write_json(activity_marker, {"activityId": activity})
         if diagnostics["invalidLines"] or len(diagnostics["metadataThreadIds"]) != 1:
@@ -341,12 +342,12 @@ def discover(config: AppConfig, provenance: ProvenanceStore, *, run_id: str) -> 
         project = Project(
             project_id=key,
             title="Conversation (preserve every independent work item)",
-            current_root=config.data_root / "threads" / key,
+            current_root=config.source_data_root / "threads" / key,
             context_path=config.data_root,
-            note_directory=config.data_root / "thread-notes" / source_timestamp(log.timestamp).strftime("%Y/%m"),
+            note_directory=config.source_data_root / "thread-notes" / source_timestamp(log.timestamp).strftime("%Y/%m"),
             assigned_thread_ids=frozenset({thread_id}),
             source_project_id=str(observed["sourceProjectId"] or ""),
-            state_directory=config.state_root / "threads" / key,
+            state_directory=config.source_state_root / "threads" / key,
         )
         qualified_ref = f"codex/{thread_id}"
         candidates[key] = Candidate(

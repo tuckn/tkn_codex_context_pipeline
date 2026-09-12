@@ -6,14 +6,14 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tkn_codex_context.config import (
+from tkn_genai_chat_note.config import (
     CONFIG_SCHEMA_VERSION,
     config_example_text,
     initialize_user_config,
     load_app_config,
     resolve_app_config,
 )
-from tkn_codex_context.thread_notes import PipelineError
+from tkn_genai_chat_note.thread_notes import PipelineError
 
 
 def write_yaml(path: Path, value: dict[str, object]) -> None:
@@ -30,12 +30,18 @@ def write_yaml(path: Path, value: dict[str, object]) -> None:
 def test_packaged_example_config_uses_portable_home_paths() -> None:
     value = yaml.safe_load(config_example_text())
 
-    for key in ("codex_home", "raw_root", "data_root", "state_root", "cache_root"):
+    for key in ("raw_root", "data_root", "state_root", "cache_root"):
         assert "\\" not in value[key]
         assert value[key].startswith("~/")
     assert "installed_at" not in value
-    assert value["include_archived"] is True
-    assert value["scopes"] == {}
+    providers = value["chat"]["providers"]
+    assert providers["codex"] == {
+        "enabled": True, "home": "~/.codex", "source_id": "my-windows-pc", "include_archived": True
+    }
+    for provider, home in (("claude-code", "~/.claude"), ("github-copilot", "~/.copilot")):
+        assert providers[provider] == {"enabled": False, "home": home, "source_id": f"windows-{provider}"}
+    assert not {"codex_home", "source_id", "include_archived"}.intersection(value)
+    assert "scopes" not in value
     assert value["schema_version"] == CONFIG_SCHEMA_VERSION
     assert config_example_text().splitlines()[0] == f'schema_version: "{CONFIG_SCHEMA_VERSION}"'
     assert value["generation"] == {
@@ -77,7 +83,7 @@ def test_precedence_and_relative_paths(tmp_path: Path, monkeypatch: pytest.Monke
     explicit = tmp_path / "explicit" / "config.yaml"
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     write_yaml(
-        home / ".tkn/codex_context_pipeline/config.yaml",
+        home / ".tkn/genai_chat_note_pipeline/config.yaml",
         {
             "idle_minutes": 10,
             "generation": {"providers": {"codex": {"model": "global"}}},
@@ -101,9 +107,9 @@ def test_precedence_and_relative_paths(tmp_path: Path, monkeypatch: pytest.Monke
     assert config.idle_minutes == 40
     assert config.model == "local"
     assert config.state_root == (explicit.parent / "state").absolute()
-    assert config.registry_path == config.data_root / "project-registry.jsonl"
-    assert config.projects_data_root == config.data_root / "projects"
-    assert config.projects_state_root == config.state_root / "projects"
+    assert config.registry_path == config.source_data_root / "project-registry.jsonl"
+    assert config.projects_data_root == config.source_data_root / "projects"
+    assert config.projects_state_root == config.source_state_root / "projects"
 
 
 def test_config_resolution_reports_the_winning_source(
@@ -115,7 +121,7 @@ def test_config_resolution_reports_the_winning_source(
     explicit = tmp_path / "explicit.yaml"
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     write_yaml(
-        home / ".tkn/codex_context_pipeline/config.yaml",
+        home / ".tkn/genai_chat_note_pipeline/config.yaml",
         {"generation": {"providers": {"codex": {"model": "global"}}}},
     )
     write_yaml(
@@ -148,37 +154,6 @@ def test_config_resolution_reports_the_winning_source(
     assert not resolution.has_in_memory_migrations
 
 
-def test_scope_paths_resolve_from_declaring_layer_and_survive_title_override(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    home = tmp_path / "home"
-    cwd = tmp_path / "work"
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    global_path = home / ".tkn/codex_context_pipeline/config.yaml"
-    write_yaml(
-        global_path,
-        {
-            "scopes": {
-                "shared": {"title": "Original", "thread_ids": ["one"], "repository_roots": ["relative-repository"]}
-            }
-        },
-    )
-    write_yaml(cwd / ".tkn/config.yaml", {"scopes": {"shared": {"title": "Updated"}}})
-    config = load_app_config(cwd=cwd)
-    assert config.scopes["shared"].title == "Updated"
-    assert config.scopes["shared"].repository_roots == [(global_path.parent / "relative-repository").absolute()]
-    assert config.scopes["shared"].thread_ids == ["one"]
-
-
-@pytest.mark.parametrize("roots", [None, 42, "not-a-list"])
-def test_invalid_scope_roots_have_a_configuration_error(tmp_path: Path, roots: object) -> None:
-    target = tmp_path / "config.yaml"
-    write_yaml(target, {"scopes": {"shared": {"title": "Shared", "thread_ids": ["one"], "repository_roots": roots}}})
-    with pytest.raises(PipelineError, match="repository_roots"):
-        load_app_config(explicit_path=target, cwd=tmp_path)
-
-
 def test_retired_null_summary_prompt_is_ignored(
     tmp_path: Path,
 ) -> None:
@@ -200,7 +175,7 @@ def test_retired_configured_summary_prompt_is_rejected(tmp_path: Path) -> None:
 def test_unknown_key_is_rejected(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     write_yaml(path, {"unknown_setting": True})
-    with pytest.raises(PipelineError, match="extra"):
+    with pytest.raises(PipelineError, match="unknown configuration key"):
         load_app_config(explicit_path=path, cwd=tmp_path)
 
 
@@ -215,12 +190,13 @@ def test_config_file_requires_schema_version(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("schema_version", "message"),
     [
+        ("3", "expected a quoted MAJOR.MINOR.PATCH"),
         ('"2"', "expected a quoted MAJOR.MINOR.PATCH"),
         ('"2.0"', "expected a quoted MAJOR.MINOR.PATCH"),
         ('"2.0.0-rc1"', "expected a quoted MAJOR.MINOR.PATCH"),
         ('"1.9.0"', "schema v1 is no longer supported"),
-        ('"2.3.0"', "unsupported newer configuration schema_version"),
-        ('"3.0.0"', "unsupported newer configuration schema_version"),
+        ('"4.1.0"', "unsupported newer configuration schema_version"),
+        ('"5.0.0"', "unsupported newer configuration schema_version"),
     ],
 )
 def test_unsupported_schema_versions_are_rejected(
@@ -237,13 +213,13 @@ def test_unsupported_schema_versions_are_rejected(
 
 def test_same_major_minor_newer_patch_is_accepted(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
-    write_yaml(path, {"schema_version": "2.2.7", "idle_minutes": 10})
+    write_yaml(path, {"schema_version": "4.0.7", "idle_minutes": 10})
 
     resolution = resolve_app_config(explicit_path=path, cwd=tmp_path)
 
     assert resolution.config.schema_version == CONFIG_SCHEMA_VERSION
     explicit = resolution.layers[-1]
-    assert explicit["schemaVersion"] == "2.2.7"
+    assert explicit["schemaVersion"] == "4.0.7"
     assert explicit["effectiveSchemaVersion"] == CONFIG_SCHEMA_VERSION
     assert explicit["migration"] is None
 
@@ -254,9 +230,9 @@ def test_previous_minor_is_normalized_in_memory_and_gets_default_raw_root(tmp_pa
 
     resolution = resolve_app_config(explicit_path=path, cwd=tmp_path)
 
-    assert resolution.config.raw_root == Path.home() / ".tkn" / "codex_context_pipeline" / "raw"
+    assert resolution.config.raw_root == Path.home() / ".tkn" / "genai_chat_note_pipeline" / "raw"
     assert resolution.layers[-1]["migration"] == {
-        "kind": "compatible-version-normalization",
+        "kind": "repository-split",
         "fromVersion": "2.0.0",
         "toVersion": CONFIG_SCHEMA_VERSION,
         "persistentConfigUpdated": False,
@@ -265,7 +241,7 @@ def test_previous_minor_is_normalized_in_memory_and_gets_default_raw_root(tmp_pa
 
 def test_source_id_must_be_safe_for_storage(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
-    write_yaml(path, {"source_id": "../outside"})
+    write_yaml(path, {"chat": {"providers": {"codex": {"source_id": "../outside"}}}})
 
     with pytest.raises(PipelineError, match="source_id must use only"):
         load_app_config(explicit_path=path, cwd=tmp_path)
@@ -280,7 +256,7 @@ def test_legacy_integer_schema_v2_is_migrated_in_memory(tmp_path: Path) -> None:
     assert resolution.config.schema_version == CONFIG_SCHEMA_VERSION
     assert resolution.has_in_memory_migrations
     assert resolution.layers[-1]["migration"] == {
-        "kind": "legacy-integer-version",
+        "kind": "repository-split",
         "fromVersion": 2,
         "toVersion": CONFIG_SCHEMA_VERSION,
         "persistentConfigUpdated": False,
@@ -380,3 +356,136 @@ def test_remote_ollama_endpoint_is_rejected(tmp_path: Path) -> None:
                 "ollama_base_url": "https://ollama.example.com",
             },
         )
+
+
+@pytest.mark.parametrize("schema_version", [2, "2.2.1", "3.0.0", "3.0.7"])
+def test_legacy_chat_migration_preserves_identity_paths_and_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, schema_version: object
+) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "user"))
+    target = tmp_path / "old/config.yaml"
+    write_yaml(target, {
+        "schema_version": schema_version,
+        "codex_home": "../codex-source",
+        "source_id": "existing-wsl-account",
+        "include_archived": False,
+    })
+    before = target.read_bytes()
+    resolution = resolve_app_config(explicit_path=target, cwd=tmp_path)
+    config = resolution.config
+    assert config.codex_home.resolve() == (tmp_path / "codex-source").resolve()
+    assert config.source_id == "existing-wsl-account"
+    assert config.include_archived is False
+    assert config.chat.providers.codex.enabled is True
+    assert target.read_bytes() == before
+    assert resolution.has_in_memory_migrations
+    for key in ("home", "source_id", "include_archived"):
+        assert resolution.sources[f"chat.providers.codex.{key}"].startswith("explicit:")
+    assert not {"codex_home", "source_id", "include_archived"}.intersection(resolution.sources)
+
+
+def test_chat_layers_resolve_paths_per_file_and_preserve_other_providers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tkn_genai_chat_note.config import config_document, write_config
+
+    home = tmp_path / "user"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    global_path = home / ".tkn/genai_chat_note_pipeline/config.yaml"
+    write_yaml(global_path, {
+        "schema_version": "3.0.0", "codex_home": "logs", "source_id": "pc-a-windows-user-a-codex"
+    })
+    project = tmp_path / "work/.tkn/config.yaml"
+    write_yaml(project, {"chat": {"providers": {
+        "codex": {"include_archived": False},
+        "claude-code": {"home": "claude", "source_id": "pc-a-windows-user-a-claude"},
+    }}})
+    explicit = tmp_path / "explicit/config.yaml"
+    write_yaml(explicit, {"chat": {"providers": {"github-copilot": {"home": "copilot"}}}})
+    resolution = resolve_app_config(explicit_path=explicit, cwd=tmp_path / "work", overrides={
+        "chat": {"providers": {"codex": {"home": "cli-codex"}}}
+    })
+    config = resolution.config
+    assert config.codex_home == tmp_path / "work/cli-codex"
+    assert config.source_id == "pc-a-windows-user-a-codex"
+    assert config.include_archived is False
+    assert config.chat.providers.claude_code.home == project.parent / "claude"
+    assert config.chat.providers.github_copilot.home == explicit.parent / "copilot"
+    assert resolution.sources["chat.providers.codex.home"] == "CLI option"
+    assert resolution.sources["chat.providers.codex.source_id"].startswith("global:")
+    assert resolution.sources["chat.providers.claude-code.home"].startswith("project:")
+    assert resolution.sources["chat.providers.github-copilot.home"].startswith("explicit:")
+    saved = tmp_path / "saved.yaml"
+    write_config(config, saved)
+    document = yaml.safe_load(saved.read_text(encoding="utf-8"))
+    assert document == config_document(config)
+    assert "claude-code" in document["chat"]["providers"]
+    assert "claude_code" not in document["chat"]["providers"]
+    assert config_document(load_app_config(explicit_path=saved, cwd=tmp_path)) == document
+
+
+@pytest.mark.parametrize("provider", ["codex", "claude-code", "github-copilot"])
+def test_chat_home_expansion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, provider: str) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setenv("CHAT_SOURCE_TEST_ROOT", str(tmp_path / "environment"))
+    for raw, expected in [
+        ("~/logs", tmp_path / "logs"),
+        ("$CHAT_SOURCE_TEST_ROOT/logs", tmp_path / "environment/logs"),
+    ]:
+        target = tmp_path / "config.yaml"
+        write_yaml(target, {"chat": {"providers": {provider: {"home": raw}}}})
+        config = load_app_config(explicit_path=target, cwd=tmp_path)
+        assert config.chat.providers.entries()[provider].home == expected
+
+
+@pytest.mark.parametrize("settings,message", [
+    ({"codex": {"source_id": "../outside"}}, "source_id must use only"),
+    ({"github-copilot": {"include_archived": True}}, "unknown configuration key"),
+    ({"ollama": {"enabled": False}}, "unknown configuration key"),
+    ({"claude_code": {"enabled": False}}, "unknown configuration key"),
+    ({"codex": {"home": "  "}}, "home must not be empty"),
+    ({"codex": {"home": None}}, "Input is not a valid path"),
+])
+def test_invalid_chat_settings_are_rejected_before_merging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settings: dict[str, object], message: str
+) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    target = tmp_path / "config.yaml"
+    write_yaml(target, {"chat": {"providers": settings}})
+    with pytest.raises(PipelineError, match=message):
+        load_app_config(explicit_path=target, cwd=tmp_path)
+
+
+def test_unknown_chat_key_in_lower_layer_cannot_be_hidden(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    write_yaml(tmp_path / ".tkn/genai_chat_note_pipeline/config.yaml", {
+        "chat": {"providers": {"codex": {"hom": "typo"}}}
+    })
+    with pytest.raises(PipelineError, match="unknown configuration key: chat.providers.codex.hom"):
+        load_app_config(cwd=tmp_path, overrides={"chat": {"providers": {"codex": {"home": "correct"}}}})
+
+
+@pytest.mark.parametrize("schema_version,settings,message", [
+    ("4.0.0", {"codex_home": "old"}, "move codex_home"),
+    ("3.0.0", {"chat": {"providers": {}}}, "do not mix legacy and nested"),
+])
+def test_chat_schema_cannot_mix_old_and_new_forms(
+    tmp_path: Path, schema_version: str, settings: dict[str, object], message: str
+) -> None:
+    target = tmp_path / "config.yaml"
+    write_yaml(target, {"schema_version": schema_version, **settings})
+    with pytest.raises(PipelineError, match=message):
+        load_app_config(explicit_path=target, cwd=tmp_path)
+
+
+def test_source_id_is_scoped_by_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    path = tmp_path / "config.yaml"
+    write_yaml(path, {"chat": {"providers": {
+        provider: {"source_id": "pc-a-windows-main"}
+        for provider in ("codex", "claude-code", "github-copilot")
+    }}})
+    config = load_app_config(explicit_path=path, cwd=tmp_path)
+    for provider in config.chat.providers.entries():
+        assert config.source_storage_paths(provider)["raw"] == config.raw_root / provider / "pc-a-windows-main"
+    assert config.source_data_root == config.data_root / "codex/pc-a-windows-main"

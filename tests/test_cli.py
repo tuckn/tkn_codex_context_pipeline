@@ -7,10 +7,10 @@ from pathlib import Path
 import pytest
 from pytest import CaptureFixture
 
-from tkn_codex_context.chat_logs import read_thread_source
-from tkn_codex_context.cli import LOGGER, _configure_logging, _progress, build_parser, main
-from tkn_codex_context.config import CONFIG_SCHEMA_VERSION
-from tkn_codex_context.console_logging import SUCCESS, ColorFormatter
+from tkn_genai_chat_note.chat_logs import read_thread_source
+from tkn_genai_chat_note.cli import LOGGER, _configure_logging, _progress, build_parser, main
+from tkn_genai_chat_note.config import CONFIG_SCHEMA_VERSION
+from tkn_genai_chat_note.console_logging import SUCCESS, ColorFormatter
 
 
 @pytest.mark.parametrize(
@@ -30,9 +30,7 @@ def test_retired_commands_and_compatibility_flags_are_removed(args: list[str]) -
         build_parser().parse_args(args)
 
 
-@pytest.mark.parametrize(
-    "args", [["clone"], ["pull"], ["thread-notes", "build"], ["decisions", "build"], ["working-context", "build"]]
-)
+@pytest.mark.parametrize("args", [["clone"], ["pull"], ["thread-notes", "build"]])
 def test_builds_write_by_default_and_have_explicit_dry_run(args: list[str]) -> None:
     assert not build_parser().parse_args(args).dry_run
     assert build_parser().parse_args([*args, "--dry-run"]).dry_run
@@ -42,7 +40,7 @@ def test_clone_dry_run_and_pull_initialization_boundary(tmp_path: Path, capsys: 
     from test_pipeline_workflow import config_for
     from test_thread_note_pipeline import write_chat
 
-    from tkn_codex_context.config import write_config
+    from tkn_genai_chat_note.config import write_config
 
     config = config_for(tmp_path)
     target = tmp_path / "config.yaml"
@@ -53,7 +51,6 @@ def test_clone_dry_run_and_pull_initialization_boundary(tmp_path: Path, capsys: 
     assert main(["--config", str(target), "clone", "--dry-run", "--full-output"]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["threads"][0]["status"] == "planned"
-    assert result["scopeResults"][0]["status"] == "awaiting-upstream"
     assert not config.data_root.exists() and result["reportPath"] is None
 
 
@@ -65,7 +62,7 @@ def test_pipeline_exit_codes_and_compact_output(
     failed: bool,
     expected: int,
 ) -> None:
-    import tkn_codex_context.pipeline as pipeline
+    import tkn_genai_chat_note.pipeline as pipeline
 
     def fake_run(*args, **kwargs):
         return {
@@ -168,38 +165,6 @@ def test_progress_events_are_human_readable(
     ]
 
 
-def test_decision_batch_progress_logs_created_record_paths(
-    capsys: CaptureFixture[str],
-) -> None:
-    args = build_parser().parse_args(["config", "show"])
-    _configure_logging(args)
-
-    _progress(
-        {
-            "type": "decision-batch-complete",
-            "index": 1,
-            "total": 2,
-            "threadNotes": ["thread-notes/source.md", "thread-notes/verification.md"],
-            "createdCount": 2,
-            "decisionRecordPaths": [
-                r"C:\notes\decisions\DR-0001-first.md",
-                r"C:\notes\decisions\DR-0002-second.md",
-            ],
-            "referencedCount": 0,
-            "durationSeconds": 12.5,
-            "modelCalls": 1,
-        }
-    )
-
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert captured.err.splitlines() == [
-        "[SUCCESS] Completed decision synthesis batch 1/2 (2 created, 0 updated, 0 existing) (12.5s, 1 model call)",
-        r"[INFO] Decision Record: C:\notes\decisions\DR-0001-first.md",
-        r"[INFO] Decision Record: C:\notes\decisions\DR-0002-second.md",
-    ]
-
-
 @pytest.mark.parametrize(
     ("level", "name", "color"),
     [
@@ -245,18 +210,7 @@ def test_config_show_reports_application_owned_summary_profile(
     assert len(profile["schema"]["sha256"]) == 64
     assert profile["template"]["version"] == "4.0"
     assert profile["template"]["source"].endswith("profiles/summary/default/template.md")
-    decision_profile = output["decisionProfile"]
-    assert decision_profile["name"] == "default"
-    assert decision_profile["source"].endswith("profiles/decision/default")
-    assert decision_profile["prompt"]["version"] == "4.1"
-    assert decision_profile["schema"]["source"].endswith("profiles/decision/default/output.schema.json")
-    assert decision_profile["template"]["version"] == "2.0"
-    working_context_profile = output["workingContextProfile"]
-    assert working_context_profile["name"] == "default"
-    assert working_context_profile["source"].endswith("profiles/working_context/default")
-    assert working_context_profile["prompt"]["version"] == "1.1"
-    assert working_context_profile["schema"]["source"].endswith("profiles/working_context/default/output.schema.json")
-    assert working_context_profile["template"]["version"] == "1.1"
+    assert "decisionProfile" not in output and "workingContextProfile" not in output
     assert output["config"]["schema_version"] == CONFIG_SCHEMA_VERSION
     assert output["configSchema"] == {
         "effectiveVersion": CONFIG_SCHEMA_VERSION,
@@ -273,7 +227,7 @@ def test_config_init_cli_creates_then_keeps_the_user_config(
     capsys: CaptureFixture[str],
 ) -> None:
     home = tmp_path / "home"
-    target = home / ".tkn/codex_context_pipeline/config.yaml"
+    target = home / ".tkn/genai_chat_note_pipeline/config.yaml"
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
 
@@ -377,3 +331,21 @@ sourceFingerprint: abc123
     assert result == 0
     output = json.loads(capsys.readouterr().out)
     assert output["valid"] is True
+
+
+@pytest.mark.parametrize("provider", ["claude-code", "github-copilot"])
+def test_future_chat_provider_can_be_inspected_but_not_processed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: CaptureFixture[str], provider: str
+) -> None:
+    from test_config import write_yaml
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "user"))
+    target = tmp_path / "config.yaml"
+    write_yaml(target, {"chat": {"providers": {provider: {"enabled": True}}}})
+    assert main(["--config", str(target), "config", "show"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["config"]["chat"]["providers"][provider]["enabled"] is True
+    assert output["sources"][f"chat.providers.{provider}.enabled"].startswith("explicit:")
+    assert main(["--config", str(target), "raw", "ingest", "--dry-run"]) == 1
+    assert "chat acquisition is not implemented" in json.loads(capsys.readouterr().out)["error"]
+    assert not (tmp_path / "user").exists()

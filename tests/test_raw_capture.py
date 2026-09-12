@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-import tkn_codex_context.raw_capture as raw_capture
-from tkn_codex_context.raw_capture import RawCaptureError, ingest_raw_sources
+import tkn_genai_chat_note.raw_capture as raw_capture
+from tkn_genai_chat_note.raw_capture import RawCaptureError, ingest_raw_sources
 
 
 def write_source(path: Path, text: str = '{"type":"event_msg","payload":{}}\n') -> bytes:
@@ -40,11 +40,11 @@ def test_ingest_copies_exact_bytes_without_mutating_source_and_is_idempotent(tmp
     assert report["blobCreatedCount"] == 1
     assert len(inputs) == 1
     digest = sha256(original).hexdigest()
-    capture = raw / "windows" / "sessions" / "2026" / "09" / "chat.jsonl"
+    capture = raw / "codex" / "windows" / "sessions" / "2026" / "09" / "chat.jsonl"
     assert capture.read_bytes() == original
     assert inputs[0].source_path == capture
     assert inputs[0].capture_sha256 == digest
-    assert inputs[0].capture_ref == "raw:/windows/sessions/2026/09/chat.jsonl"
+    assert inputs[0].capture_ref == "raw:/codex/windows/sessions/2026/09/chat.jsonl"
 
     second_inputs, second_report = ingest(sessions, raw)
 
@@ -54,7 +54,7 @@ def test_ingest_copies_exact_bytes_without_mutating_source_and_is_idempotent(tmp
     assert second_inputs == inputs
     records = [
         json.loads(line)
-        for line in (raw / "windows" / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in (raw / "codex" / "windows" / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert len(records) == 1
     assert records[0]["sourceRef"] == "2026/09/chat.jsonl"
@@ -74,7 +74,7 @@ def test_changed_source_replaces_capture_and_keeps_only_latest_manifest_record(t
     assert first_inputs[0].source_path == second_inputs[0].source_path
     assert second_inputs[0].source_path.read_bytes() == second
     assert first_inputs[0].capture_sha256 != second_inputs[0].capture_sha256
-    manifest = raw / "windows" / "manifest.jsonl"
+    manifest = raw / "codex" / "windows" / "manifest.jsonl"
     assert len(manifest.read_text(encoding="utf-8").splitlines()) == 1
 
 
@@ -95,7 +95,7 @@ def test_reverted_source_appends_observation_and_becomes_latest_bronze_only(tmp_
     source.unlink()
     bronze_only, _report = ingest(sessions, raw)
     assert bronze_only[0].capture_sha256 == first_inputs[0].capture_sha256
-    manifest = raw / "windows" / "manifest.jsonl"
+    manifest = raw / "codex" / "windows" / "manifest.jsonl"
     assert len(manifest.read_text(encoding="utf-8").splitlines()) == 1
 
 
@@ -190,8 +190,8 @@ def test_sessions_and_archives_preserve_relative_folders(tmp_path: Path) -> None
     inputs, report = ingest_raw_sources(sessions, raw, "windows", dry_run=False, captured_at="now",
         scan_roots=[("sessions/", sessions), ("archived_sessions/", archives)])
     assert not report["failed"] and len(inputs) == 2
-    assert (raw / "windows/sessions/2026/09/10/one.jsonl").read_bytes() == content
-    assert (raw / "windows/archived_sessions/2025/12/two.jsonl").read_bytes() == archived
+    assert (raw / "codex/windows/sessions/2026/09/10/one.jsonl").read_bytes() == content
+    assert (raw / "codex/windows/archived_sessions/2025/12/two.jsonl").read_bytes() == archived
 
 
 @pytest.mark.parametrize("reference", ["../escape.jsonl", "sessions/../../escape.jsonl", "C:/escape.jsonl"])
@@ -207,7 +207,7 @@ def test_legacy_hash_manifest_remains_readable(tmp_path: Path, original_present:
     content = write_source(source)
     raw_capture._ensure_raw_root(raw, dry_run=False)
     digest = sha256(content).hexdigest()
-    legacy = raw_capture._capture_path(raw / "windows", digest)
+    legacy = raw_capture._capture_path(raw / "codex" / "windows", digest)
     legacy.parent.mkdir(parents=True)
     legacy.write_bytes(content)
     record = {
@@ -215,14 +215,14 @@ def test_legacy_hash_manifest_remains_readable(tmp_path: Path, original_present:
         "captureRef": raw_capture._capture_ref("windows", digest), "sha256": digest,
         "byteCount": len(content), "capturedAt": "before", "threadId": None, "lastEventAt": None,
     }
-    (raw / "windows/manifest.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+    (raw / "codex/windows/manifest.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
     if not original_present:
         source.unlink()
     inputs, report = ingest(sessions, raw)
     assert not report["failed"] and inputs[0].source_path.read_bytes() == content
     assert legacy.read_bytes() == content
     if original_present:
-        assert inputs[0].capture_ref == "raw:/windows/sessions/2025/chat.jsonl"
+        assert inputs[0].capture_ref == "raw:/codex/windows/sessions/2025/chat.jsonl"
     else:
         assert inputs[0].capture_ref == record["captureRef"]
 

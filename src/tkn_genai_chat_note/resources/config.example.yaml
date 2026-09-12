@@ -1,0 +1,36 @@
+schema_version: "4.0.0"
+# Chat acquisition is independent of generation below.
+# Keep source_id stable after ingestion. Identity is (provider, source_id).
+# Use distinct IDs for each PC/environment/account within a provider.
+chat:
+  providers:
+    codex:
+      enabled: true
+      home: ~/.codex
+      source_id: my-windows-pc
+      include_archived: true
+    # Configuration placeholders; acquisition adapters are not implemented yet.
+    claude-code:
+      enabled: false
+      home: ~/.claude
+      source_id: windows-claude-code
+    github-copilot:
+      enabled: false
+      home: ~/.copilot
+      source_id: windows-github-copilot
+# Shared roots. Source files use <root>/<provider>/<source_id>/.
+# config show displays the resolved paths; catalog and provenance are shared under data_root.
+raw_root: ~/.tkn/genai_chat_note_pipeline/raw
+data_root: ~/.tkn/genai_chat_note_pipeline/data
+state_root: ~/.tkn/genai_chat_note_pipeline/state
+cache_root: ~/.cache/genai_chat_note_pipeline
+generation:
+  active_provider: codex
+  providers:
+    codex:
+      model: gpt-5.6-sol
+      reasoning_effort: high
+      executable: codex
+idle_minutes: 30
+runtime_minutes: 230
+model_timeout_seconds: 1800

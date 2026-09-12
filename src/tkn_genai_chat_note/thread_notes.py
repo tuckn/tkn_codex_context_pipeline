@@ -221,7 +221,7 @@ def now_iso() -> str:
 
 
 def default_store_root() -> Path:
-    return Path.home() / ".tkn" / "codex_context_pipeline"
+    return Path.home() / ".tkn" / "genai_chat_note_pipeline"
 
 
 def default_config_path() -> Path:
@@ -235,7 +235,7 @@ def default_registry_path() -> Path:
 def default_cache_root() -> Path:
     override = os.environ.get("XDG_CACHE_HOME")
     base = Path(override).expanduser() if override else Path.home() / ".cache"
-    return base / "codex_context_pipeline"
+    return base / "genai_chat_note_pipeline"
 
 
 def parse_datetime(value: str) -> datetime:

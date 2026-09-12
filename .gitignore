@@ -9,3 +9,7 @@ __pycache__/
 *.py[cod]
 .tkn/config.yaml
 .tkn/config.yaml.*.bak
+/data/
+/raw/
+/state/
+/cache/

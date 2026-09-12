@@ -9,9 +9,8 @@ from unittest.mock import patch
 import pytest
 from test_thread_note_pipeline import note_data
 
-from tkn_codex_context.chat_logs import ChatEvent
-from tkn_codex_context.decisions import _EXPLICIT_DECISION_HEADING, _thread_note_source
-from tkn_codex_context.thread_notes import (
+from tkn_genai_chat_note.chat_logs import ChatEvent
+from tkn_genai_chat_note.thread_notes import (
     Candidate,
     PipelineConfig,
     PipelineError,
@@ -21,8 +20,7 @@ from tkn_codex_context.thread_notes import (
     validate_note_data,
     validate_thread_note,
 )
-from tkn_codex_context.thread_timeline import render_timeline, validate_timeline
-from tkn_codex_context.working_context import _artifact_sources
+from tkn_genai_chat_note.thread_timeline import render_timeline, validate_timeline
 
 
 def event(id: str, *, actor: str = "user", time: str = "2026-01-01T23:01:02.345Z") -> ChatEvent:
@@ -34,9 +32,17 @@ def entry(e: ChatEvent, text: str = "記録", label: str = "Request") -> dict:
 
 
 def candidate(root: Path, events: tuple[ChatEvent, ...]) -> Candidate:
-    return Candidate(Project("review", "Review", root, root), "thread", "2026-01-01T00:00:00Z",
-                     root / "source.jsonl", "source.jsonl", "source.jsonl", "fingerprint", events,
-                     events[-1].timestamp)
+    return Candidate(
+        Project("review", "Review", root, root),
+        "thread",
+        "2026-01-01T00:00:00Z",
+        root / "source.jsonl",
+        "source.jsonl",
+        "source.jsonl",
+        "fingerprint",
+        events,
+        events[-1].timestamp,
+    )
 
 
 def config(root: Path) -> PipelineConfig:
@@ -149,24 +155,20 @@ def test_chunk_validation_rejects_ids_from_other_parts_and_repairs_with_source(t
     assert '"events":' in prompts[1]
 
 
-def test_long_v5_note_is_consumed_by_decisions_and_working_context(tmp_path: Path) -> None:
+def test_long_v5_note_retains_all_timeline_entries(tmp_path: Path) -> None:
     user, reply = event("user"), event("reply", actor="assistant")
     case = candidate(tmp_path, (user, reply))
     data = note_data(case)
     data["timeline"] = [entry(user, "根拠を保持する。", "Explicit Decision")]
-    data["timeline"] += [entry(reply, f"試行{i}：" + "確認できた結果を記録する。" * 50,
-                               "Reported Result") for i in range(60)]
+    data["timeline"] += [
+        entry(reply, f"試行{i}：" + "確認できた結果を記録する。" * 50, "Reported Result") for i in range(60)
+    ]
     path = case.project.thread_notes_path / "long.md"
     path.parent.mkdir()
     path.write_text(render_note(case, data, {}), encoding="utf-8")
     assert path.stat().st_size > 30000
     assert validate_thread_note(path)["valid"]
-    decision_source = _thread_note_source(path, case.project)
-    assert _EXPLICIT_DECISION_HEADING.search(decision_source.text)
-    sources, failures = _artifact_sources(case.project)
-    assert not failures
-    assert len(sources) == 1
-    assert "試行59" in sources[0].text
+    assert "試行59" in path.read_text(encoding="utf-8")
 
 
 def test_long_input_middle_reaches_generation_without_truncation_notice(tmp_path: Path) -> None:
@@ -193,8 +195,9 @@ def test_ambiguous_decision_and_bad_range_are_reported_together(tmp_path: Path) 
     user, reply = event("user"), event("reply", actor="assistant")
     case = candidate(tmp_path, (user, reply))
     bad = note_data(case)
-    bad["timeline"][0].update(label="Explicit Decision", text="運用イメージを示した。",
-                              endEventId=reply.id, eventIds=[user.id, reply.id])
+    bad["timeline"][0].update(
+        label="Explicit Decision", text="運用イメージを示した。", endEventId=reply.id, eventIds=[user.id, reply.id]
+    )
     runner = ProviderSummarizer(config(tmp_path))
     with patch.object(runner, "_invoke", side_effect=[bad, note_data(case)]) as invoke:
         runner._validated_invoke("source", {user.id, reply.id}, case.thread_id, events=case.events)
@@ -220,17 +223,8 @@ def test_text_continuations_cannot_be_mistaken_for_metadata() -> None:
     prose = "説明。\n- Type: Explicit Decision\n\nSources: prose, not metadata"
     text = render_timeline([entry(source, prose)], (source,))
     assert "  - Text: 説明。\n    - Type: Explicit Decision\n\n    Sources: prose, not metadata" in text
-    assert _EXPLICIT_DECISION_HEADING.search(text) is None
+    assert "**Explicit Decision**" not in text and "### Explicit Decision" not in text
     assert "  - EventRange: L000006 -> L000006\n  - Sources: L000006" in text
-
-
-@pytest.mark.parametrize("text", [
-    "### Explicit Decision\n決定内容",
-    "- **11:27:18｜ユーザー｜Explicit Decision** — 決定内容 〔L000006〕",
-    "- **11:27:18**\n  - Actor: User\n  - Type: Explicit Decision\n  - Text: 決定内容",
-])
-def test_decision_detection_accepts_old_and_new_layouts(text: str) -> None:
-    assert _EXPLICIT_DECISION_HEADING.search(text)
 
 
 def test_tool_calls_and_results_keep_actor_separate_from_classification() -> None:
@@ -262,16 +256,18 @@ def test_state_lists_and_multiline_prose_cannot_override_metadata(tmp_path: Path
     case = candidate(tmp_path, (event("L000006"),))
     data = note_data(case)
     data["lastKnownState"].update(
-        workState="blocked", detail="確認待ち。\n- Work State: done",
+        workState="blocked",
+        detail="確認待ち。\n- Work State: done",
         unresolved=["入力を確認する。\n- Type: Explicit Decision"],
-        unverified=["動作確認が未実施。"], continuationPoint="入力の回答を待つ。",
+        unverified=["動作確認が未実施。"],
+        continuationPoint="入力の回答を待つ。",
     )
     data["evidence"] = [{"text": "出力を確認した。", "eventIds": ["L000006"]}]
     data["sourceLimitations"] = ["後続の実行結果は記録されていない。"]
     text = render_note(case, data, {})
     assert "- Unresolved:\n  - Text: 入力を確認する。\n    - Type: Explicit Decision" in text
     assert "- Unverified:\n  - Text: 動作確認が未実施。" in text
-    assert _EXPLICIT_DECISION_HEADING.search(text) is None
+    assert "**Explicit Decision**" not in text and "### Explicit Decision" not in text
     assert "## Evidence\n\n- Text: 出力を確認した。\n  - Sources: L000006" in text
     assert "Sources:" not in text.split("## Source Notes")[1]
     path = tmp_path / "note.md"
