@@ -74,8 +74,8 @@ DEFAULT_IDLE_MINUTES = 30
 DEFAULT_RUNTIME_MINUTES = 230
 DEFAULT_MODEL_TIMEOUT_SECONDS = 1800
 DEFAULT_CHUNK_CHARACTERS = 120_000
-GENERATOR_PROMPT_VERSION = 6
-RENDERER_VERSION = 12
+GENERATOR_PROMPT_VERSION = 7
+RENDERER_VERSION = 13
 REBUILD_WORK_SCHEMA_VERSION = 1
 IN_FLIGHT_GRACE_MINUTES = 9
 AVOIDABLE_ENGLISH_PHRASES = {
@@ -169,6 +169,9 @@ class Candidate:
     source_capture_ref: str = ""
     source_capture_sha256: str = ""
     artifact_id: str | None = None
+    source_captures: tuple[RawSourceInput, ...] = ()
+    history_branches: tuple[dict[str, Any], ...] = ()
+    source_set_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -181,6 +184,8 @@ class PreparedEvent:
     timestamp: str
     turn_id: str
 
+    branch_id: str = ""
+    raw_ref: str = ""
     text_part: int = 1
     text_part_count: int = 1
     text_start: int = 0
@@ -197,6 +202,8 @@ class PreparedEvent:
             "timestamp": self.timestamp,
             "turnId": self.turn_id,
         }
+        if self.branch_id:
+            value.update(branchId=self.branch_id, rawRef=self.raw_ref)
         if self.text_part_count > 1:
             value["textPart"] = {
                 "index": self.text_part, "count": self.text_part_count,
@@ -868,6 +875,8 @@ def prepare_events(events: Sequence[ChatEvent]) -> list[PreparedEvent]:
             text=redact_secret_like_content(event.text),
             timestamp=event.timestamp,
             turn_id=event.turn_id,
+            branch_id=event.branch_id,
+            raw_ref=event.raw_ref,
         )
         for event in events
     ]
@@ -1195,7 +1204,7 @@ def generator_fingerprint(config: PipelineConfig) -> str:
 def generation_fingerprint(config: PipelineConfig, candidate: Candidate) -> str:
     return sha256(
         (
-            f"{candidate.fingerprint}:{candidate.source_capture_sha256}:"
+            f"{candidate.fingerprint}:{candidate.source_capture_sha256}:{candidate.source_set_sha256}:"
             f"{generator_fingerprint(config)}"
         ).encode()
     ).hexdigest()
@@ -1333,12 +1342,32 @@ def render_note(
         fields.append(("sourceCaptureRef", candidate.source_capture_ref))
     if candidate.source_capture_sha256:
         fields.append(("sourceCaptureSha256", candidate.source_capture_sha256))
+    if candidate.source_captures:
+        fields.extend([
+            ("sourceCaptureRefs", [item.capture_ref for item in candidate.source_captures]),
+            ("sourceCaptureSha256s", [item.capture_sha256 for item in candidate.source_captures]),
+            ("sourceSetSha256", candidate.source_set_sha256),
+        ])
     if candidate.project.source_project_id:
         fields.append(("sourceProjectId", candidate.project.source_project_id))
     summary_lines = [_source_record(item) for item in data.get("summaryItems", [])]
     timeline_text = render_timeline(data["timeline"], candidate.events, language=profile.language)
     evidence = [item for item in data.get("evidence", []) if str(item.get("text") or "").strip()]
     limitations = [str(value).strip() for value in data.get("sourceLimitations", []) if str(value).strip()]
+    if candidate.history_branches:
+        limitations.append(
+            "Multiple divergent histories share this conversation ID. Each history retains its own record order. "
+            "No winning branch or cross-history cancellation is inferred."
+            if profile.language == "en" else
+            "同じ会話IDに複数の履歴・分岐があります。各履歴内の記録順を保持し、"
+            "採用された分岐や別履歴による取り消しを推定していません。"
+        )
+        for branch in candidate.history_branches:
+            limitations.append(
+                f"History {branch['branchId']}: {branch['captureRef']}; "
+                f"SHA-256: {branch['captureSha256']}; startedAt: {branch['startedAt']}; "
+                f"history_base: {json.dumps(branch['historyBase'], ensure_ascii=False, sort_keys=True)}"
+            )
     return render_summary_template(
         template,
         {
@@ -1359,6 +1388,16 @@ def render_note(
 
 
 def revalidate_candidate(candidate: Candidate, config: PipelineConfig) -> None:
+    if candidate.source_captures:
+        # Every merged event is bound to these exact bytes, including non-primary branches.
+        for capture in candidate.source_captures:
+            try:
+                digest = sha256(capture.source_path.read_bytes()).hexdigest()
+            except OSError as exc:
+                raise PipelineError(f"raw capture disappeared: {capture.capture_ref}") from exc
+            if digest != capture.capture_sha256:
+                raise PipelineError(f"raw capture changed after ingestion: {capture.capture_ref}")
+        return
     if candidate.source_capture_sha256:
         try:
             current_capture_sha256 = sha256(candidate.source_path.read_bytes()).hexdigest()
@@ -1855,6 +1894,22 @@ def validate_session_note(path: Path) -> dict[str, Any]:
             not capture_ref.startswith("raw:/") or not re.fullmatch(r"[0-9a-f]{64}", capture_sha256)
         ):
             raise PipelineError(f"session note has invalid raw capture provenance: {path}")
+    lines, _ = split_frontmatter_lines(path.read_text(encoding="utf-8-sig"))
+    capture_refs = frontmatter_list_value(lines, "sourceCaptureRefs")
+    capture_hashes = frontmatter_list_value(lines, "sourceCaptureSha256s")
+    source_set_hash = metadata.get("sourceSetSha256")
+    if capture_refs or capture_hashes or source_set_hash:
+        expected = sha256(json.dumps(sorted(capture_hashes), separators=(",", ":")).encode()).hexdigest()
+        if (
+            len(capture_refs) < 2 or len(capture_refs) != len(capture_hashes)
+            or len(set(capture_hashes)) != len(capture_hashes)
+            or any(not ref.startswith("raw:/") for ref in capture_refs)
+            or any(not re.fullmatch(r"[0-9a-f]{64}", digest) for digest in capture_hashes)
+            or source_set_hash != expected
+            or metadata.get("sourceCaptureRef") != capture_refs[0]
+            or metadata.get("sourceCaptureSha256") != capture_hashes[0]
+        ):
+            raise PipelineError(f"session note has invalid history capture provenance: {path}")
     try:
         uuid.UUID(metadata.get("promptId") or "")
     except ValueError as exc:

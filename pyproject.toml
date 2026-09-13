@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tkn-codex-chat-note-pipeline"
-version = "0.15.0"
+version = "0.16.0"
 description = "Preserve local Codex chat evidence and generate reusable Session Notes."
 readme = "README.md"
 requires-python = ">=3.11"

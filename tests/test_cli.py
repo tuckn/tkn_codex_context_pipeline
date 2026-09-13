@@ -204,7 +204,7 @@ def test_config_show_reports_application_owned_summary_profile(
     assert profile["name"] == "default-jp"
     assert profile["source"].endswith("profiles/default-jp")
     assert len(profile["sha256"]) == 64
-    assert profile["prompt"]["version"] == "3.4"
+    assert profile["prompt"]["version"] == "3.5"
     assert profile["prompt"]["source"].endswith("profiles/default-jp/prompt.md")
     assert profile["schema"]["source"].endswith("profiles/default-jp/output.schema.json")
     assert len(profile["schema"]["sha256"]) == 64

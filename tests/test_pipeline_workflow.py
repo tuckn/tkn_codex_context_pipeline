@@ -176,15 +176,34 @@ def test_reassignment_keeps_identity_and_whole_thread(tmp_path: Path) -> None:
     assert second["threads"][0]["membership"]["sourceProjectId"] == "b"
 
 
-def test_conflicting_logs_are_retained_and_reported(tmp_path: Path) -> None:
+def test_divergent_logs_generate_one_note_with_every_history(tmp_path: Path) -> None:
     config = config_for(tmp_path)
     write_chat(config.sessions_root / "a.jsonl", thread_id="same", cwd=tmp_path, request="first")
     write_chat(config.sessions_root / "b.jsonl", thread_id="same", cwd=tmp_path, request="second")
-    summary = Summary()
+    summary = HistorySummary()
     report = execute(config, summarizer=summary)
-    assert report["threads"][0]["reason"] == "conflicting-thread-versions"
+    assert report["complete"], report
     assert report["rawIngest"]["availableCaptureCount"] == 2
-    assert not summary.calls and not report["complete"]
+    assert summary.calls == ["same"]
+    entry = report["threads"][0]
+    assert len(entry["historyBranches"]) == 2
+    note = config.data_root / entry["noteRef"].removeprefix("data:/")
+    text = note.read_text(encoding="utf-8")
+    assert "sourceSetSha256:" in text
+    assert text.count("### History H") == 2
+    assert all(branch["captureRef"] in text for branch in entry["historyBranches"])
+    canonical = json.loads((config.data_root / entry["canonicalRef"].removeprefix("data:/")).read_text())
+    assert len({event["localId"] for event in canonical["events"]}) == len(canonical["events"])
+    assert {event["text"] for event in canonical["events"] if event["actor"] == "user"} == {"first", "second"}
+    for event in canonical["events"]:
+        assert event["rawRef"].split("#")[1].startswith("L")
+        assert event["localId"].startswith(event["branchId"])
+    assert validate_provenance(config.data_root)["ok"]
+    summary.calls.clear()
+    again = execute(config, "pull", summarizer=summary)
+    assert again["complete"] and not summary.calls
+    assert again["threads"][0]["noteId"] == entry["noteId"]
+    assert len(list(config.data_root.rglob("*.md"))) == 1
 
 
 def test_archiving_identical_log_does_not_regenerate_and_raw_survives_removal(tmp_path: Path) -> None:
@@ -463,3 +482,95 @@ def test_unavailable_chat_source_stops_before_any_writes(tmp_path: Path, mode: s
         run_pipeline(config, mode=mode, dry_run=dry_run)
     after = {str(path): path.read_bytes() if path.is_file() else None for path in tmp_path.rglob("*")}
     assert after == before
+
+
+class HistorySummary(Summary):
+    def generate(self, candidate: Candidate) -> dict[str, Any]:
+        value = super().generate(candidate)
+        value["timeline"] = [
+            {"label": "Request" if event.actor == "user" else "Reported Result", "text": event.text,
+             "startEventId": event.id, "endEventId": event.id, "eventIds": [event.id]}
+            for event in candidate.events
+        ]
+        return value
+
+
+@pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])
+def test_unicode_separators_are_not_jsonl_record_boundaries(tmp_path: Path, separator: str) -> None:
+    config = config_for(tmp_path)
+    original = config.sessions_root / "one.jsonl"
+    write_chat(original, thread_id="one", cwd=tmp_path, request="before" + separator + "after")
+    before = original.read_bytes()
+    report = execute(config)
+    assert report["complete"], report
+    assert report["threads"][0]["diagnostics"]["invalidLines"] == []
+    assert (config.raw_root / "sessions/one.jsonl").read_bytes() == before
+
+
+def test_legacy_logs_generate_with_unknown_event_times(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    original = config.sessions_root / "legacy.jsonl"
+    original.parent.mkdir(parents=True)
+    original.write_bytes((Path(__file__).parent / "fixtures/chat-legacy-thread.jsonl").read_bytes())
+    report = execute(config)
+    assert report["complete"], report
+    entry = report["threads"][0]
+    note = config.data_root / entry["noteRef"].removeprefix("data:/")
+    assert "Unknown date" in note.read_text(encoding="utf-8")
+    assert entry["lastEventAt"] == "2025-08-24T10:45:58.916Z"
+    assert not entry["diagnostics"]["unknownRecordTypes"]
+
+
+def test_invalid_json_is_still_rejected_inside_a_branch(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    for name in ["a", "b"]:
+        write_chat(config.sessions_root / f"{name}.jsonl", thread_id="same", cwd=tmp_path, request=name)
+    with (config.sessions_root / "b.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write('{"broken":\n')
+    summary = HistorySummary()
+    report = execute(config, summarizer=summary)
+    assert report["threads"][0]["reason"] == "invalid-jsonl"
+    assert report["rawIngest"]["availableCaptureCount"] == 2
+    assert not summary.calls
+
+
+def test_changing_a_nonprimary_history_during_generation_prevents_note_write(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    for name in ["a", "b"]:
+        write_chat(config.sessions_root / f"{name}.jsonl", thread_id="same", cwd=tmp_path, request=name)
+
+    class MutatingHistory(HistorySummary):
+        def generate(self, candidate: Candidate) -> dict[str, Any]:
+            value = super().generate(candidate)
+            with candidate.source_captures[-1].source_path.open("ab") as handle:
+                handle.write(b"\n")
+            return value
+
+    report = execute(config, summarizer=MutatingHistory())
+    assert not report["ok"]
+    assert "raw capture changed" in report["threads"][0]["error"]
+    assert not list(config.data_root.rglob("*.md"))
+
+
+def test_branch_append_updates_same_note_and_archived_alias_does_not_regenerate(tmp_path: Path) -> None:
+    config = config_for(tmp_path)
+    for name in ["a", "b"]:
+        write_chat(config.sessions_root / f"{name}.jsonl", thread_id="same", cwd=tmp_path, request=name)
+    summary = HistorySummary()
+    first = execute(config, summarizer=summary)
+    archived = config.codex_home / "archived_sessions/b.jsonl"
+    archived.parent.mkdir()
+    archived.write_bytes((config.sessions_root / "b.jsonl").read_bytes())
+    summary.calls.clear()
+    alias = execute(config, "pull", summarizer=summary)
+    assert alias["complete"] and not summary.calls
+    with (config.sessions_root / "b.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"timestamp": "2026-07-02T00:00:00Z", "type": "event_msg",
+                                 "payload": {"type": "user_message", "message": "additional request"}}) + "\n")
+    second = execute(config, "pull", summarizer=summary)
+    assert second["complete"], second
+    assert summary.calls == ["same"]
+    assert second["threads"][0]["noteId"] == first["threads"][0]["noteId"]
+    assert second["threads"][0]["sourceSetSha256"] != first["threads"][0]["sourceSetSha256"]
+    assert len(second["threads"][0]["historyBranches"]) == 2
+    assert validate_provenance(config.data_root)["ok"]

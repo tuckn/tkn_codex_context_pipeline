@@ -1,7 +1,7 @@
 ---
 type: prompt
 id: f5dfc679-13d3-4fcc-9736-b7d4e6bb5c11
-version: "3.4"
+version: "3.5"
 ---
 
 # Default Session Note instructions
@@ -15,6 +15,13 @@ Keep a short overview and the final observable state, but preserve the path take
 The application supplies a `MODE`; apply only its matching procedure below.
 
 ## Source fidelity
+
+- When events have `branchId`, they belong to distinct histories of the same
+  conversation ID. Preserve every history and its internal order. Identify the
+  relevant History ID in summaries, evidence, and the last known state when
+  histories differ. Do not select a winning branch, treat a later timestamp as
+  cancellation of another history, or silently merge incompatible outcomes.
+  Preserve these distinctions when reducing partial summaries as well.
 
 - Use only the supplied events or partial records. Cite event IDs for every fact.
 - Record requests, questions, tentative ideas, unaccepted proposals, failed trials,

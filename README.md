@@ -68,6 +68,23 @@ Open the note and report paths shown in the result. `status` reads the last-run
 record, not live source state. Completion now depends only on eligible Session
 Notes; no Scope, Decision, or Working Context build is required.
 
+### Weekly updates with Windows Task Scheduler
+
+After the initial `clone`, register a weekly `pull` using the same Windows user
+that normally signs in to the inference CLI. Set the program to the absolute
+path of the installed `tkn-codex-chat-note.exe` and the arguments to
+`--config "C:\path\to\config.yaml" pull`. Config options precede `pull`.
+A `.tkn/config.yaml` in the starting directory joins the configuration layers;
+use a starting directory consistent with your normal resolved configuration.
+Enabled WSL sources must be readable through their configured UNC paths by that user.
+
+Unfinished notes resume on the next `pull`. A limited verification run or a run
+with notes deferred by activity or the runtime limit returns exit code `2`.
+For exit code `1`, inspect the failure reasons in the report. `runtime_minutes`
+is the deadline for starting generation; in-flight generation has up to nine
+additional minutes. Raw capture and normalization are not interrupted by this
+generation deadline. Allow sufficient time before Task Scheduler stops the process.
+
 ## Commands
 
 Global options, including `--config` and inference options, precede the command.
@@ -441,7 +458,17 @@ Local `sessions` and, by default, `archived_sessions` are scanned. Projectless,
 unmatched, and ambiguous conversations remain eligible. Internal/approval
 conversations and sources without a clean user message are retained and
 normalized but excluded from notes. Cloud-only ChatGPT/Work history is not
-fetched. Unsupported records and divergent versions remain visible in reports.
+fetched. Unsupported records and invalid JSONL remain visible in reports.
+Legacy logs are supported; missing event timestamps remain unknown in notes.
+Unicode string separators are not mistaken for JSONL record boundaries.
+
+When multiple files share a conversation ID, identical captures and provable
+byte-prefix versions are coalesced. Other histories and branches are retained
+in one Session Note, with a timeline and source locators for each History ID.
+The pipeline does not infer a winning branch or cancellation across histories.
+It records `history_base` as observed source metadata. All files remain in Raw
+and participate in normalization and note-generation provenance. Branch changes
+regenerate the same note ID; unchanged `pull` runs do not regenerate it.
 
 See [output data and CLI integration contract](reference/data-contract.md),
 [Session Note format](docs/session-note-format.md), and
@@ -461,9 +488,9 @@ uv tool install . --reinstall
 
 ~~~console
 uv sync --locked
-uv run pytest
-uv run ruff check .
-uv run mypy src
+uv run python -m pytest
+uv run python -m ruff check .
+uv run python -m mypy src
 uv build
 ~~~
 

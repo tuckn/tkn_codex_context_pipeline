@@ -68,6 +68,19 @@ tkn-codex-chat-note provenance validate
 `status`は前回実行時の記録であり、現在の入力を再走査しません。
 完了判定は対象Session Noteだけで行い、Scope・Decision・Working Contextの生成を待ちません。
 
+### Windows Task Schedulerでの週次更新
+
+初回の`clone`後、普段CLIにログインしている同じWindowsユーザーで、週1回の`pull`を登録します。
+プログラムにはインストール済み`tkn-codex-chat-note.exe`の絶対パス、引数には
+`--config "C:\path\to\config.yaml" pull`を指定します。設定オプションは`pull`の前に置きます。
+開始フォルダに`.tkn/config.yaml`があると設定階層に加わるため、通常実行で使う設定と一致させてください。
+WSLの取得元を有効にした場合、そのユーザーから設定したUNCパスを読める必要があります。
+
+未生成のノートは次の`pull`で再開します。`--limit`を付けた検証や、活動中の会話・実行時間上限による
+延期が残る実行は終了コード`2`になります。終了コード`1`はreportの失敗理由を確認します。
+`runtime_minutes`は新しい生成を開始する期限で、実行中の生成には最大9分の猶予があります。
+Raw取得・正規化はこの生成期限によって中断されません。Task Scheduler側の停止時間には余裕を持たせます。
+
 ## コマンド一覧
 
 `--config`や推論設定などの共通オプションは、コマンドの前に置きます。
@@ -417,7 +430,14 @@ Session Noteは派生した記録であり、元の根拠を置き換えませ�
 Project未所属・対応先不明・所属が曖昧な会話も対象です。
 内部処理・承認レビューの会話や通常のユーザー発言を持たないログは、
 保存・正規化しても要約からは除外します。クラウドだけにあるChatGPT/Work履歴は取得しません。
-未対応のレコードや分岐して矛盾する履歴はreportに残します。
+未対応のレコードや不正なJSONLはreportに残します。旧形式のログも対象にし、イベント日時がない場合は
+ノート上で不明と表示します。Unicodeの区切り文字をJSONLの改行と誤認しません。
+
+同じ会話IDに複数ファイルがある場合、完全一致・バイト列の追記関係は重複をまとめます。
+それ以外は各履歴・分岐を保持し、1つのSession Note内でHistory IDごとに時系列と出典を表示します。
+採用された分岐や別履歴による取り消しは推定しません。`history_base`は取得元のメタデータとして記録します。
+全ファイルをRawに保存し、正規化・ノート生成の来歴にも各入力を残します。
+分岐の変更では同じノートIDを維持して再生成し、変更のない`pull`では再生成しません。
 
 ID、hash、schema、引用、保存構造、入力準備の詳細は
 [出力データと他CLIとの連携仕様](reference/data-contract.md)、
@@ -437,9 +457,9 @@ uv tool install . --reinstall
 
 ~~~console
 uv sync --locked
-uv run pytest
-uv run ruff check .
-uv run mypy src
+uv run python -m pytest
+uv run python -m ruff check .
+uv run python -m mypy src
 uv build
 ~~~
 

@@ -57,7 +57,7 @@ republish derived evidence; take backups of Raw/data/state together.
 | Raw manifest | Namespaced reader supports 1/2/3, current writes use 3; source refs, hashes, byte counts and capture metadata |
 | `store.json` | `1.0.0`; storageVersion 5, source identity, Raw prefix, legacy aliases |
 | `catalog/threads.json` | `1.0.0`; `asOf` and `threads` |
-| Canonical event export | `1.0.0`; parser 1, event locators, source metadata and diagnostics |
+| Canonical event export | `1.0.0`; parser 2, event locators, source metadata and diagnostics |
 | Session Note Markdown | Generated Session Note 6; reader also supports historical Thread Note 3, 4, 5 |
 | Provenance entities, activities, index | `1.0.0` |
 | Pipeline report | Source-local integer 2; multi-source response integer 3; no downstream scope completion fields |
@@ -74,10 +74,34 @@ projectKind, and candidate IDs preserve uncertainty. `membershipHistory` records
 when the pipeline observed a change, not when the user made it. Prefer this
 catalog over a note's older sourceProjectId when selecting current membership.
 
-Unknown records, conflicting source versions, active conversations and
+Unknown records, divergent histories, active conversations and
 protected/failed notes remain visible. Excluded internal conversations are not
 eligible summary inputs. A note is advertised as current only for the inputs
 observed by that run. No complete cloud-history coverage is claimed.
+
+### Multiple histories (0.16.0)
+
+Each thread ID still produces one Session Note. Exact duplicate captures and
+provable byte-prefix versions are coalesced; other histories are all included,
+ordered by history start time with source order retained within each history.
+The pipeline does not infer an active branch or replay `history_base` to discard
+other records. It preserves that metadata as evidence.
+
+Catalog entries and canonical exports add optional `historyBranches` and
+`sourceSetSha256`. Each branch includes its History ID, source/capture ref,
+capture hash, start/last timestamps, and the observed `historyBase`. Canonical
+exports also include per-file `sourceDiagnostics`. Events in a branched thread
+have a history-qualified `localId` and `branchId`; `rawRef` still points to the
+original capture and physical `Lnnnnnn` line. Every captured input participates
+in provenance, including duplicate or prefix copies.
+
+For compatibility, singular `sourceCaptureRef`/`sourceCaptureSha256` identify
+the first retained history, not the entire merged input. Branched notes add
+parallel `sourceCaptureRefs`/`sourceCaptureSha256s` lists and `sourceSetSha256`.
+The latter hashes the sorted retained-capture hashes as compact UTF-8 JSON.
+Consumers must use the plural fields and canonical event locators for complete
+coverage of branched notes. These are additive fields within the existing schemas.
+All retained captures are checked for changes before publishing the note.
 
 ## Provenance
 

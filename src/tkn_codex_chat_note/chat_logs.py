@@ -38,6 +38,8 @@ class ChatEvent:
     timestamp: str
     turn_id: str
     cwd: str
+    branch_id: str = ""
+    raw_ref: str = ""
 
 
 @dataclass(frozen=True)
@@ -173,6 +175,7 @@ def read_thread_source(path: Path) -> ThreadSource:
     turn_cwd = ""
     turn_id = ""
     last_event_at = ""
+    legacy_format = False
 
     def append_message(role: str, source: str, text: str, timestamp: str) -> None:
         if role == "user":
@@ -242,7 +245,8 @@ def read_thread_source(path: Path) -> ThreadSource:
         payload_value = obj.get("payload")
         payload: dict[str, Any] = payload_value if isinstance(payload_value, dict) else {}
         timestamp = str(obj.get("timestamp") or "")
-        last_event_at = timestamp
+        if timestamp or not legacy_format:
+            last_event_at = timestamp
 
         if event_type == "session_meta":
             meta = payload
@@ -254,6 +258,7 @@ def read_thread_source(path: Path) -> ThreadSource:
             turn_cwd = str(payload.get("cwd") or thread_cwd)
             continue
         if not event_type and obj.get("id") and "instructions" in obj:
+            legacy_format = True
             if meta is None:
                 meta = obj
             thread_cwd = str(obj.get("cwd") or thread_cwd)
@@ -427,6 +432,7 @@ def fingerprint_events(
                 "turnId": event.turn_id,
                 "cwd": normalize_path_text(event.cwd),
                 "timestamp": event.timestamp,
+                **({"branchId": event.branch_id} if event.branch_id else {}),
             }
             for event in events
         ],

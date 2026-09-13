@@ -177,7 +177,7 @@ def _notes(
             ledger["threads"][key] = {**prior, "status": "running", "attemptedAt": started}
             _save_ledger(config, ledger, False)
             if summarizer is None:
-                summarizer = ProviderSummarizer(pipeline_config)
+                summarizer = ProviderSummarizer(pipeline_config, observer=progress)
             if hasattr(summarizer, "set_deadline"):
                 summarizer.set_deadline(deadline + timedelta(minutes=9))
             if progress:

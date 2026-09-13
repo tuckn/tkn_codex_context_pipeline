@@ -21,6 +21,7 @@ from .chat_logs import (
     read_thread_source,
 )
 from .config import AppConfig
+from .histories import combine_histories
 from .provenance import ProvenanceStore, immutable_bytes, json_bytes
 from .raw_capture import RawCaptureError, RawSourceInput, _stable_source_bytes, ingest_raw_sources
 from .session_notes import (
@@ -38,7 +39,7 @@ from .storage import read_json
 
 CATALOG_SCHEMA_VERSION = "1.0.0"
 EVENT_SCHEMA_VERSION = "1.0.0"
-PARSER_VERSION = "1"
+PARSER_VERSION = "2"
 
 
 def thread_key(thread_id: str) -> str:
@@ -129,7 +130,8 @@ def _diagnostics(path: Path) -> dict[str, Any]:
     invalid: list[int] = []
     unknown: set[str] = set()
     metadata_ids: set[str] = set()
-    for number, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
+    # JSONL uses physical newlines, not Unicode string separators.
+    for number, line in enumerate(path.read_text(encoding="utf-8-sig").split("\n"), 1):
         if not line.strip():
             continue
         try:
@@ -141,26 +143,19 @@ def _diagnostics(path: Path) -> dict[str, Any]:
             invalid.append(number)
             continue
         kind = str(value.get("type") or "")
-        if kind not in {"session_meta", "turn_context", "response_item", "event_msg", "compacted"}:
+        legacy_meta = not kind and value.get("id") and "instructions" in value
+        if kind not in {
+            "session_meta", "turn_context", "response_item", "event_msg", "compacted",
+            "world_state", "token_usage_record", "message", "reasoning", "function_call", "function_call_output",
+        } and not legacy_meta and not (not kind and value.get("record_type")):
             unknown.add(kind)
         if kind == "session_meta" and isinstance(value.get("payload"), dict):
-            identity = value["payload"].get("id")
+            identity = value["payload"].get("id") or value["payload"].get("session_id")
             if identity:
                 metadata_ids.add(str(identity))
+        elif legacy_meta:
+            metadata_ids.add(str(value["id"]))
     return {"invalidLines": invalid, "unknownRecordTypes": sorted(unknown), "metadataThreadIds": sorted(metadata_ids)}
-
-
-def _select_version(
-    versions: list[tuple[RawSourceInput, ThreadSource]],
-) -> tuple[RawSourceInput, ThreadSource] | None:
-    """Only coalesce identical logs or provable append extensions; never guess a winner."""
-    unique = {item.capture_sha256: (item, source) for item, source in versions}
-    ordered = sorted(unique.values(), key=lambda pair: pair[0].byte_count, reverse=True)
-    selected = ordered[0]
-    content = selected[0].source_path.read_bytes()
-    if all(content.startswith(item.source_path.read_bytes()) for item, _source in ordered[1:]):
-        return selected
-    return None
 
 
 def capture_sources(
@@ -229,12 +224,8 @@ def discover(config: AppConfig, provenance: ProvenanceStore, *, run_id: str) -> 
             "reason": None,
         }
         entries.append(entry)
-        selected = _select_version(versions)
-        if selected is None:
-            entry.update(status="failed", reason="conflicting-thread-versions")
-            failures.append({"stage": "normalize", "threadId": thread_id, "reason": entry["reason"]})
-            continue
-        item, source = selected
+        combined = combine_histories(versions)
+        item, source = combined.captures[0], combined.source
         log = source.thread_log
         assert log is not None
         observed = membership(source, app_state)
@@ -256,8 +247,19 @@ def discover(config: AppConfig, provenance: ProvenanceStore, *, run_id: str) -> 
             startedAt=log.timestamp,
             title=(log.user_messages[0].text[:100] if log.user_messages else "Codex conversation"),
         )
-        diagnostics = _diagnostics(item.source_path)
+        source_diagnostics = [{"sourceRef": raw.source_ref, **_diagnostics(raw.source_path)} for raw, _ in versions]
+        diagnostics = {
+            "invalidLines": sorted({line for value in source_diagnostics for line in value["invalidLines"]}),
+            "unknownRecordTypes": sorted({
+                kind for value in source_diagnostics for kind in value["unknownRecordTypes"]
+            }),
+            "metadataThreadIds": sorted({id for value in source_diagnostics for id in value["metadataThreadIds"]}),
+        }
         entry["diagnostics"] = diagnostics
+        branch_fields = {
+            "historyBranches": list(combined.branches), "sourceSetSha256": combined.source_set_sha256,
+        } if combined.branches else {}
+        entry.update(branch_fields)
         canonical = {
             "schemaVersion": EVENT_SCHEMA_VERSION,
             "parserVersion": PARSER_VERSION,
@@ -269,6 +271,8 @@ def discover(config: AppConfig, provenance: ProvenanceStore, *, run_id: str) -> 
             "startedAt": log.timestamp,
             "lastEventAt": source.last_event_at,
             "diagnostics": diagnostics,
+            "sourceDiagnostics": source_diagnostics,
+            **branch_fields,
             "events": [
                 {
                     "kind": event.kind,
@@ -280,7 +284,8 @@ def discover(config: AppConfig, provenance: ProvenanceStore, *, run_id: str) -> 
                     "cwd": event.cwd,
                     "id": f"{key}:{item.capture_sha256}:{event.id}",
                     "localId": event.id,
-                    "rawRef": f"{item.capture_ref}#{event.id}",
+                    "rawRef": event.raw_ref or f"{item.capture_ref}#{event.id}",
+                    **({"branchId": event.branch_id} if event.branch_id else {}),
                 }
                 for event in source.events
             ],
@@ -290,20 +295,20 @@ def discover(config: AppConfig, provenance: ProvenanceStore, *, run_id: str) -> 
         canonical_path = config.source_data_root / "source-aligned" / key / f"{canonical_hash}.json"
         if not provenance.dry_run:
             immutable_bytes(canonical_path, encoded)
-        raw_entity = provenance.entity(
-            item.source_path.read_bytes(),
-            identity=f"codex-raw:{key}:{item.capture_sha256}",
-            ref=item.capture_ref,
+        raw_entities = [provenance.entity(
+            raw.source_path.read_bytes(),
+            identity=f"codex-raw:{key}:{raw.capture_sha256}",
+            ref=raw.capture_ref,
             kind="raw",
             media_type="application/x-ndjson",
-        )
+        ) for raw, _ in versions]
         normalized_entity = provenance.entity(
             encoded,
             identity=f"codex-events:{key}",
             ref="data:/" + canonical_path.relative_to(config.data_root).as_posix(),
             kind="canonicalEvents",
         )
-        evidence[key] = [raw_entity, normalized_entity]
+        evidence[key] = [*raw_entities, normalized_entity]
         entry.update(canonicalRef=normalized_entity["ref"], canonicalSha256=canonical_hash)
         # Deterministic normalization needs no inference and retains its own input lineage.
         activity_marker = config.source_state_root / "normalization" / f"{canonical_hash}.json"
@@ -313,12 +318,14 @@ def discover(config: AppConfig, provenance: ProvenanceStore, *, run_id: str) -> 
                 stage="normalize",
                 subject=key,
                 started_at=started,
-                used=[raw_entity],
+                used=raw_entities,
                 generated=[normalized_entity],
                 agent={"software": "tkn-codex-chat-note-pipeline", "parserVersion": PARSER_VERSION},
             )
             atomic_write_json(activity_marker, {"activityId": activity})
-        if diagnostics["invalidLines"] or len(diagnostics["metadataThreadIds"]) != 1:
+        if diagnostics["invalidLines"] or any(
+            value["metadataThreadIds"] != [thread_id] for value in source_diagnostics
+        ):
             entry.update(status="failed", reason="invalid-jsonl")
             failures.append({"stage": "normalize", "threadId": thread_id, "reason": entry["reason"]})
             continue
@@ -326,7 +333,8 @@ def discover(config: AppConfig, provenance: ProvenanceStore, *, run_id: str) -> 
             warnings.append(
                 f"Thread {thread_id}: unknown record types retained in Raw: {diagnostics['unknownRecordTypes']}"
             )
-        if is_approval_review(log) or is_known_internal_thread(log):
+        if any(is_approval_review(s.thread_log) or is_known_internal_thread(s.thread_log)
+               for _, s in versions if s.thread_log):
             entry.update(status="excluded", reason="approval-or-internal")
             continue
         if not has_clean_user_message(log):
@@ -364,5 +372,8 @@ def discover(config: AppConfig, provenance: ProvenanceStore, *, run_id: str) -> 
             source_last_event_at=source.last_event_at,
             source_capture_ref=item.capture_ref,
             source_capture_sha256=item.capture_sha256,
+            source_captures=combined.captures if combined.branches else (),
+            history_branches=combined.branches,
+            source_set_sha256=combined.source_set_sha256,
         )
     return Discovery(entries, candidates, evidence, raw_report, projects, warnings, failures, metadata_entity)

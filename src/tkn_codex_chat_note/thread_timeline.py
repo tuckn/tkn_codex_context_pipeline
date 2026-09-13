@@ -49,6 +49,7 @@ def validate_timeline(items: list[dict[str, Any]], events: Sequence[ChatEvent]) 
             first_time, last_time = event_time(start.timestamp), event_time(end.timestamp)
             if (
                 start.actor != end.actor or start.kind != end.kind or start.turn_id != end.turn_id
+                or start.branch_id != end.branch_id
                 or start.kind in {"user_message", "assistant_message"}
                 or first_time is None or last_time is None
                 or first_time.date() != last_time.date() or first_time > last_time
@@ -79,12 +80,17 @@ def render_timeline(
     )
     lines: list[str] = [notice, ""]
     previous_day = ""
+    previous_branch = ""
     for item in ordered_timeline(items, events):
         start, end = by_id[item["startEventId"]], by_id[item["endEventId"]]
+        if start.branch_id and start.branch_id != previous_branch:
+            lines.extend([f"### History {start.branch_id}", ""])
+            previous_branch, previous_day = start.branch_id, ""
         first_time, last_time = event_time(start.timestamp), event_time(end.timestamp)
         day = first_time.strftime("%Y-%m-%d") if first_time else "Unknown date"
         if day != previous_day:
-            lines.extend([f"### {day}", ""])
+            heading = "####" if start.branch_id else "###"
+            lines.extend([f"{heading} {day}", ""])
             previous_day = day
         timestamp = first_time.strftime("%H:%M:%S") if first_time else "Unknown"
         if end.id != start.id and last_time:
