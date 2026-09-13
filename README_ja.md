@@ -248,40 +248,20 @@ Rawと来歴のスナップショットには元の内容がローカルに残�
 生成プロファイル、出力検証、再試行上限はアプリケーションが管理します。
 モデル、プロバイダー、推論設定、生成プロファイルを変更すると、関連する段階が再生成対象になります。
 
-### 旧設定からの移行
+### 既存データを引き継がず再構築する場合
 
-通常実行は設定schema `"7.0.0"`を使います。リポジトリ名は`tkn_codex_chat_note_pipeline`、
-Python packageは`tkn_codex_chat_note`、CLIは`tkn-codex-chat-note`になりました。
-新CLIは`uv tool install .`でインストールします。
+新しい設定ファイルを作り、空の`raw_root`・`data_root`・`state_root`を指定して
+「最初の保存・生成」の手順を実行します。再構築できる範囲は取得元に残る会話ログです。
+別の保存領域に作り直すため、旧ノートのID・手編集・レビュー状態は引き継ぎません。
 
-設定6からは次の手順で移行します。
+~~~console
+tkn-codex-chat-note --config "C:\path\to\rebuild.yaml" config init
+~~~
 
-1. 元設定を残し、`~/.tkn/codex_chat_note_pipeline/config.yaml`へコピーするか、
-   新設定を`--config`で明示します。
-2. `chat.providers.codex.sources`のマップ全体をトップレベルの`sources`へ移します。
-   他アプリの取得設定を含め、`chat`全体を削除します。
-3. `schema_version: "7.0.0"`にします。取得元ID、`source_root`、有効・無効、archive、
-   generation、時間制限などの設定は維持します。
-4. 既存取得元の`raw_root`・`data_root`・`state_root`には、**解決済みの最終保存先**を明記します。
-   旧既定値は`~/.tkn/genai_chat_note_pipeline/<kind>/codex/<source_id>`ですが、
-   新既定値は`~/.tkn/codex_chat_note_pipeline`以下です。途中生成を再利用する場合は
-   `cache_root`も維持します。設定ファイルを移す場合、相対パスは元の場所を基準に解決してください。
-5. 新CLIで`config show`・`status`・`pull --dry-run`を実行し、保存先と処理予定を確認します。
-
-**IDと最終保存先を維持すれば、storage 5のデータ移行は不要です。**
-名称変更だけでノートを再生成しません。所有権markerの名前・application IDはstorage 5の値を
-維持するため、改名しないでください。ノートUUID・出典参照・レビュー保護・後続CLIの入力パスも維持します。
-
-設定5では、さらにCodex設定を既存の`source_id`でキー付けし、値の中の`source_id`を削除し、
-`home`を`source_root`へ変更します。通常実行は設定5/6を移行案内付きで拒否し、ファイルを自動変換しません。
-新ユーザー設定も明示的に選んだ設定もなく、旧ユーザー設定だけが見つかった場合は、
-新しい既定値で開始せず移行案内を表示します。既定の`config init`も旧設定がある場合は
-移行案内で停止します。別の新規設定が必要なら`--config <new-path>`で保存先を明示します。
-
-旧設定2〜4はコピー移行の単独の`--from-config`入力としてのみ読み取ります。
-新しい保存先を指定した設定7を用意し、後述の移行を実行してください。
-読み込まれるユーザー設定・プロジェクト設定も設定7に揃えます。`--config`だけでは下位の
-不正な設定を無視しません。他アプリの取得処理は別リポジトリとし、共通の公開成果物で後続ツールへ接続できます。
+作成した設定を編集し、その後の`config show`・`clone`にも同じ`--config`を指定します。
+旧ユーザー設定の検出で既定の`config init`が停止する場合も、上記のように新規設定の
+保存先を明示できます。ただし、読み込まれる現行のユーザー設定や`.tkn/config.yaml`も
+設定schema 7である必要があります。`--config`は下位の設定の検証を省略しません。
 
 ## 保存構造と責務の境界
 
@@ -400,43 +380,33 @@ sequenceDiagram
 現在の実装は、保存した正規化JSONを再読込せず、メモリー上のイベントを要約処理へ渡します。
 この段階の要約単位は会話であり、作業scopeによる統合とは独立しています。
 
-### 旧保存領域の移行
+### 保存先の変更
 
-v0.15.0では設定`"7.0.0"`・storage `5`を使います。コピー移行は、単独で保存先を
-特定できる旧設定（`2.0.x〜2.2.x`・整数`2`・`3.0.x`・`4.0.x〜4.1.x`）と、
-移動元となる移行済みstorage 5の設定5/6/7に対応します。旧設定は他の設定階層に依存せず、
-既存領域のrootとsource_idを示す必要があります。新しい設定7のファイルを作り、
-同じprovider・source_idと、旧領域に重ならない新規の最終保存先を指定します。
-旧cache領域が所有権検証に通らない場合は、新しいcache基点を指定します。
-コピー中は移行元へ書き込む処理を停止してください。
+現行形式の保存領域を別フォルダへ移す場合は、`storage migrate`を使います。
+Raw・Session Note・正規化データ・来歴・再開状態をコピーし、ノートのIDと内容、
+レビュー状態を保持します。推論は行わず、保存先の変更だけでは再生成しません。
+
+1. 移動元の最終保存先と取得元IDを単独で解決できる設定ファイルを用意します。
+   `--from-config`の設定には、他の設定階層の値は統合されません。
+2. 同じ取得元IDを持つ設定を別ファイルに用意し、`raw_root`・`data_root`・`state_root`を
+   移動元と重ならない新しい最終保存先にします。複数の取得元が有効なら`--source`で1つ選びます。
+3. コピー中は移動元への書き込みを停止し、以下の順に確認・実行します。
 
 ~~~console
-tkn-codex-chat-note --config "C:\path\to\new.yaml" config show
-tkn-codex-chat-note --config "C:\path\to\new.yaml" storage migrate --from-config "C:\path\to\old.yaml" --dry-run
-tkn-codex-chat-note --config "C:\path\to\new.yaml" storage migrate --from-config "C:\path\to\old.yaml"
-tkn-codex-chat-note --config "C:\path\to\new.yaml" provenance validate
-tkn-codex-chat-note --config "C:\path\to\new.yaml" pull --dry-run
+tkn-codex-chat-note --config "C:\path\to\destination.yaml" config show
+tkn-codex-chat-note --config "C:\path\to\destination.yaml" --source my-windows-pc storage migrate --from-config "C:\path\to\source.yaml" --dry-run
+tkn-codex-chat-note --config "C:\path\to\destination.yaml" --source my-windows-pc storage migrate --from-config "C:\path\to\source.yaml"
+tkn-codex-chat-note --config "C:\path\to\destination.yaml" --source my-windows-pc provenance validate
 ~~~
 
-`--dry-run`はファイル・フォルダ・ロックを作らず、コピー元とコピー先、サイズ、hashを表示します。
-通常実行ではRaw・ノート・Canonical Events・対象取得元の証跡・再開状態をコピーし、
-内容とprovenanceを検証して完了を記録します。元データと元設定は変更・削除しません。
-移行先の競合では停止します。通常の書き込み失敗ではコピー変更を戻し、強制中断後は
-同じ移行元・移行先の設定で再開できます。途中で移行元が変わった場合は新しい移行先を使います。
+移動元のデータと設定は変更・削除しません。cacheはコピーせず、移動先で再作成できます。
+コピー先の競合では停止し、中断後は同じ設定で再開できます。完了済みの再実行は書き込みません。
+Rawだけを保存した領域では、最初のノート生成後に`provenance validate`を実行します。
+移動後の通常実行には移動先の設定を使い、下流CLIの`notes_roots`は入力名を保って
+パスを更新します。参照の解決方法とコピー時の保証は
+[出力データと他CLIとの連携仕様](reference/data-contract.md#storage-layout-5)を参照してください。
 
-共有領域からは指定取得元のcatalog・provenanceと必要なsnapshotを取り出します。
-ノートのバイト列・ID・review状態・不変のentity/activity/blobは保持し、
-可変のindex・catalog・checkpointの参照だけを更新します。`store.json`に旧参照の
-対応を保存するため、コピー先だけで過去の証跡を解決できます。cacheはコピーしません。
-完了済み移行の再実行は書き込みを行いません。
-
-新規Session Noteはschema 6で、旧Thread Note 3〜5も読み取れます。
-移行自体は推論を行いません。その後の`pull`では旧形式の未reviewノートが再生成対象に
-なりますが、review済み・手編集保護は維持します。storage 5の場所だけの変更では、
-生成済みノートを再生成しません。Rawのみの領域は初回生成後にprovenanceを検証します。
-pipeline情報もRaw manifestもない旧Project専用領域は別途移行計画が必要です。
-分類・洞察CLIのv0.2.0はSession Note 6と複数の名前付き入力に対応します。
-保存先の移動後は、入力名を保ったまま後続CLIの入力パスを変更します。
+### 対応範囲と制限
 
 Projectへの所属が変わっても会話のIDは変わりません。所属の観測は上流に残し、
 意味に基づくScopeや承認済みの関連は下流で扱います。
@@ -450,7 +420,7 @@ Project未所属・対応先不明・所属が曖昧な会話も対象です。
 未対応のレコードや分岐して矛盾する履歴はreportに残します。
 
 ID、hash、schema、引用、保存構造、入力準備の詳細は
-[データ契約](reference/data-contract.md)、
+[出力データと他CLIとの連携仕様](reference/data-contract.md)、
 [Session Noteの内容](docs/session-note-format_ja.md)、
 [処理のシーケンス](#processing-flow)を参照してください。
 
@@ -472,3 +442,21 @@ uv run ruff check .
 uv run mypy src
 uv build
 ~~~
+
+自動テストは匿名の会話データと推論の代替実装を使い、設定・保存・再開・編集保護・
+生成結果の検証を確認します。実サービスの認証や実モデルの要約品質を保証するものではありません。
+代表的な元ログとノートを照合する品質評価は別に行います。
+
+配布物の変更時は、一時的な環境へビルドしたwheelをインストールし、チェックアウト外から
+`--version`・`--help`・`config init`・`config show`と同梱言語プロファイルを確認します。
+連携仕様の変更時は、匿名の出力を使い、下流CLIでID・hash・入力参照を検証してください。
+一時データにはテストフレームワークまたはOSの一時フォルダを使います。
+最低対応はPython 3.11ですが、記録済みの実行環境はWindows / Python 3.12.10です。
+他のPythonバージョンやWSLを含む非Windows環境での実行は未検証です。
+
+## 関連ドキュメント
+
+| 文書 | 読む目的 |
+| --- | --- |
+| [出力データと他CLIとの連携仕様](reference/data-contract.md) | 出力を読み取るツールの実装。ID・schema・hash・来歴・整合性確認の取り決め |
+| [Session Noteの内容](docs/session-note-format_ja.md) | 生成ノートの構成と各項目の意味 |

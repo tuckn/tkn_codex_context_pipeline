@@ -1,209 +1,212 @@
-# Data contract: conversation evidence and derived context
+# Data contract: chat evidence and Session Notes
 
-Version: 1.0.0 · CLI: 0.5.0 · Storage: 2
+CLI 0.15.0 · config 7.0.0 · storage 5 · catalog/provenance 1.0.0 · Session Note 6
 
-This is the downstream contract for the conversation-based pipeline. Consumers
-should read the catalog and provenance index, not infer identity from filenames
-or depend on private checkpoint files. This document specifies the JSON fields;
-`provenance validate` provides structural, hash, and relationship checks for the
-published evidence. Markdown validators check the individual artifact schemas.
+This is the file-based interface specification for tools that consume this CLI's
+output, including context curation and insight. It defines stable identities,
+published schemas, content verification, reference resolution, and safe reads
+during concurrent updates. Consumers use these published files rather than
+depending on the producer's Python package or private checkpoints.
 
-## Responsibility boundary
+For installation and normal operation, see the [README](../README.md).
+For the contents of a generated note, see [Session Note format](../docs/session-note-format.md).
+Supported historical formats below describe reader compatibility; new stores
+use the current versions listed above.
 
-This repository captures local Codex evidence, normalizes supported events,
-builds artifacts, and records versioned inputs, outputs, and processing
-activities. It does not fetch cloud ChatGPT history or resolve semantic identity
-across unrelated conversations.
+## Ownership
 
-The downstream repository owns global IRIs, RDF/JSON-LD serialization, OWL
-vocabulary, PROV-O mapping, entity resolution, reasoning, and graph publication.
-It can map the records below without parsing human prose to discover all
-artifact-level generation dependencies. Sentence-level factual claims still
-require the note's citations and a downstream interpretation policy.
+This application owns Codex chat capture, Canonical Events, source-near Session Notes,
+observed Project membership, and their evidence. Semantic membership and Working
+Context belong to context curation. Insight/Decision generation belongs to insight.
+RDF/JSON-LD or other graph representations can be layered on these contracts;
+they are not required to run any of the three CLIs.
 
-## Roots and references
+## Identity, versions, and references
 
-| Reference | Resolution |
+- `threadId` is the original conversation ID. For Codex, `threadKey` is UUIDv5
+  in the URL namespace using `codex-thread:<threadId>`. It is independent of
+  Project membership and file location.
+- Session Note `id` is UUIDv4 and survives regeneration. `sessionNoteId` and
+  filenames are display/legacy locators, not global IDs.
+- `sourceProvider` is fixed to `codex`. `sourceId` identifies the acquisition
+  input directory (PC/environment/storage root), configured under
+  the map key `sources.<source_id>`; neither selects the inference provider.
+  Existing source IDs, Raw references, and artifact IDs survive config migration.
+  Storage namespaces use `(sourceProvider, sourceId)`, with an independent catalog and provenance for each source.
+  Acquisition of other applications is outside this repository. Catalog rows use
+  `(sourceProvider, sourceId, threadKey)`; identical threadKeys across environments are allowed.
+  Each environment has its own note UUID and checkpoint.
+- `data:/` resolves under this source's final data_root. `raw:/<provider>/<source_id>/`
+  is a virtual source prefix: remove that prefix and resolve the remainder under
+  this source's final raw_root. Never append the provider/source_id twice.
+  References are locators, not identity; historical bytes use snapshotRef.
+- Canonical IDs include threadKey, capture SHA-256, and a local event/line ID.
+  They identify one version, not a stable event across arbitrary log rewrites.
+- Entity versions are `sha256:<hex>` over exact bytes. Join evidence by
+  `(id, version)`, not names or paths.
+
+Raw schema-3 paths are latest source copies and can change. Historical evidence
+must use the retained provenance `snapshotRef` and hash, not a mutable Raw path.
+Legacy schema-1 hash captures remain readable after explicit layout migration. Raw-only acquisition does not
+republish derived evidence; take backups of Raw/data/state together.
+
+## Published artifacts
+
+| Artifact | Version / content |
 | --- | --- |
-| `raw:/<relative-path>` | Relative to the configured `raw_root` |
-| `data:/<relative-path>` | Relative to the configured `data_root` |
-| `repo:/<root-index>/<filename>` | Repository snapshot location in the scope's ordered `repositoryRoots`; use the retained evidence blob for historical bytes |
-| `codex/<threadId>` | Logical conversation source reference in Thread Note metadata; not a filesystem path |
-| `#L000123` | One-based line locator within the referenced immutable Raw capture |
-| `#inference-input` | The prepared input for a source; resolve its entity's `snapshotRef` for bytes |
+| Raw manifest | Namespaced reader supports 1/2/3, current writes use 3; source refs, hashes, byte counts and capture metadata |
+| `store.json` | `1.0.0`; storageVersion 5, source identity, Raw prefix, legacy aliases |
+| `catalog/threads.json` | `1.0.0`; `asOf` and `threads` |
+| Canonical event export | `1.0.0`; parser 1, event locators, source metadata and diagnostics |
+| Session Note Markdown | Generated Session Note 6; reader also supports historical Thread Note 3, 4, 5 |
+| Provenance entities, activities, index | `1.0.0` |
+| Pipeline report | Source-local integer 2; multi-source response integer 3; no downstream scope completion fields |
 
-References are locators, not global identity. Resolve only supported prefixes
-under their declared roots. Reject traversal outside those roots. Catalog
-fragments such as `data:/catalog/scopes.json#work:example` identify catalog
-objects; they are not filenames. Absolute repository paths are observations of
-one machine and are not portable IDs.
+A thread entry includes `threadId`, `threadKey`, source provider/store/ref,
+capture and canonical refs/hashes, status/reason, dates, membership history,
+and, when a note exists, `noteId`, `noteRef` and `noteSha256`.
+The last field is an additive 0.8 export field. Consumers of older catalogs can
+obtain the published note hash from the matching provenance-index artifact.
 
-## Identity and version
+`membership` preserves the source observation: explicit, projectless, inferred
+from roots, ambiguous, unmatched, or unavailable. Nullable sourceProjectId,
+projectKind, and candidate IDs preserve uncertainty. `membershipHistory` records
+when the pipeline observed a change, not when the user made it. Prefer this
+catalog over a note's older sourceProjectId when selecting current membership.
 
-- `sourceProvider` is `codex`. `sourceId` names the acquisition store, such as
-  `windows`; it is separate from the inference provider.
-- `threadId` is the original Codex conversation ID.
-- `threadKey` is UUIDv5 using the URL namespace and `codex-thread:<threadId>`.
-  It is independent of Project membership and source-file location. Logs with
-  the same ID merge only when identical or provable append extensions; divergent
-  versions fail visibly. The original captures remain available.
-- Artifact `id` is UUIDv4 and identifies a Thread Note, Decision Record, or
-  Working Context across regeneration. Existing IDs and creation dates are
-  preserved. `decisionId` such as `DR-0001` is local to its scope, not a global ID.
-- Scope IDs are `project:<original-id>`, `work:<configuration-key>`, or
-  `unassigned`. Their storage key is UUIDv5 using `codex-scope:<scope-id>`.
-  Configuration keys are durable identity: renaming one creates a different
-  scope. Changing only its title does not.
-- Entity `version` is `sha256:<hex>` over exact snapshot bytes. Identify an
-  entity version with the pair `(id, version)`. Text normalization can change
-  the version even when displayed text looks identical.
-- A canonical event ID is `<threadKey>:<captureSha256>:<localId>`, where
-  `localId` is `L` plus a minimum of six digits. It identifies a line in one
-  capture. It is not a promise of stable event identity across rewritten logs.
+Unknown records, conflicting source versions, active conversations and
+protected/failed notes remain visible. Excluded internal conversations are not
+eligible summary inputs. A note is advertised as current only for the inputs
+observed by that run. No complete cloud-history coverage is claimed.
 
-## Published documents
+## Provenance
 
-| Document | Schema version | Principal fields |
-| --- | --- | --- |
-| Raw `manifest.jsonl` | integer `1` | `sourceId`, `sourceRef`, `captureRef`, `sha256`, `byteCount`, capture timestamps and source metadata |
-| `catalog/threads.json` | `1.0.0` | `asOf`, `threads` |
-| `catalog/scopes.json` | `1.0.0` | `asOf`, `scopes` |
-| Canonical event JSON | `1.0.0`, parser `1` | `threadKey`, `threadId`, capture reference/hash, source times, `diagnostics`, `events` |
-| Provenance entity/activity/index JSON | `1.0.0` | See below |
-| Thread Note Markdown | integer `4` | UUID `id`, `sourceThreadIds`, capture references/hashes, generation metadata and event-backed work items |
-| Decision Record Markdown | integer `5` | UUID `id`, scope-local `decisionId`, `scopeId`, applicability `scope`, source-note refs/hash, review and implementation status |
-| Working Context Markdown | integer `5` | UUID `id`, `scopeId`, `scopeStatus`, source hashes, generation and review metadata |
+Entity records contain schemaVersion, id, version, sha256, ref, kind, mediaType,
+byteCount, and snapshotRef. Exact snapshots live under
+`data:/provenance/blobs/<hash-prefix>/<hash>`. The entity filename hashes
+`id + NUL + sha256`. A relocated entity can retain its first stored locator;
+use snapshotRef for historical bytes.
 
-Readers should check versions and reject incompatible schema changes. Private
-state/ledger schema numbers do not define the downstream format. Some internal
-builder report fields still use `projectId` for the selected scope; consumers
-should use the published scope catalog and artifact `scopeId`.
+Activities contain UUID id/runId, stage/subject, start/end times, status, agent,
+used/generated entity versions, and derivedFrom edges. Agent metadata records
+software version, inference provider/model/effort, and profile/prompt/schema/
+template fingerprints. Current upstream stages are normalization and Session Note
+generation. Relations express stage dependencies; they do not prove every
+sentence follows from every source.
 
-### Conversation catalog and canonical events
+The index contains schemaVersion, runId, asOf, pipelineComplete, artifacts, and
+activityRefs. Artifacts include status and threadKey. Old downstream artifacts
+from a reused shared store are retained as inactive; this application does not
+refresh or delete them.
 
-Each thread entry contains original IDs, observed source/capture refs, its
-current selected capture, canonical reference/hash, eligibility/processing
-status, and note reference/ID when available. `membership` includes:
+## Consumer procedure
 
-- `status`: `explicit`, `projectless`, `inferred`, `ambiguous`, `unmatched`, or
-  `state-unavailable`.
-- Nullable `sourceProjectId` and `projectKind`.
-- `candidateProjectIds` for ambiguity without selecting a winner.
+1. Read the catalog and index, preserving their bytes/run information.
+2. Select current notes, and verify UUID, supported schema, content hash and
+   source identity. Reject traversal outside declared roots.
+3. Read historical bytes from snapshotRef; validate hash and byte count.
+4. Preserve note identities and evidence versions in the consumer's output.
+5. Recheck the input catalog and selected note hashes before committing.
 
-`membershipHistory` records changed observations with `observedAt`, the
-membership object, and the captured `metadataRef` if available. Observation
-history is not the effective time of a change inside Codex.
+The files are atomically replaced individually, not committed as one database
+transaction. During a concurrent run a reader can observe different generations
+and should reject inconsistent input and retry. The downstream CLIs implement
+this conservative validation; they do not mutate upstream checkpoints.
 
-Canonical events contain `id`, `localId`, `rawRef`, `kind`, `actor`, `name`,
-`text`, `timestamp`, `turnId`, and `cwd`. Raw locators allow verification against
-the original line. Canonical text uses the application's parser and may normalize
-or redact content; it is not an exact copy of every field in the source record.
-`diagnostics` lists invalid lines, unknown top-level record types, and metadata
-thread IDs. Raw preserves fields the parser does not understand.
+`clone`/`pull` and a full Session Note build can be complete when all eligible
+notes are current, independently of downstream execution. Read report coverage
+and exclusions as well as pipelineComplete. `raw ingest` does not change the
+previous derived-data index, so its timestamp can differ.
 
-### Scope catalog
+`provenance validate` checks structural compatibility, identities, snapshot
+hashes/lengths, activity IDs/relations and current mutable artifacts. It does not
+prove semantic accuracy, completeness of reasoning, or that a reported event
+was independently verified. No automatic garbage collection or source deletion
+is performed.
 
-A scope entry contains `id`, `title`, `kind` (`project`, `work`, `collection`),
-`threadKeys`, `dataRef`, `repositoryRoots`, processing `status`, and stage reports
-when run. Threads can belong to several scopes without duplicated notes.
-An unassigned collection does not assert a common purpose. Old scopes no longer
-selected are omitted from the current scope catalog; retained artifacts appear
-as `inactive` in the provenance index. Historical scope definitions remain in
-evidence snapshots used by activities.
+## Storage layout 5
 
-### Entity records
+`sources.<source_id>.raw_root/data_root/state_root` are optional final paths.
+An omitted root is `~/.tkn/codex_chat_note_pipeline/<kind>/codex/<source_id>`.
+The shared cache_root is a base; actual cache is `<cache_root>/codex/<source_id>`.
+Source roots may share a parent but cannot overlap one another or input source_root directories.
+Ownership markers bind each root to provider/source_id; locks are per actual root.
 
-Entities have the following required fields:
+Raw contains sessions/, archived_sessions/, manifest.jsonl and metadata/.
+Data contains source-aligned/, session-notes/, catalog/, provenance/ and store.json.
+State contains pipeline.json, ledger.json, threads/, normalization/ and reports/.
+Keep raw/data/state together for backup and relocation. State is required for
+faithful restart and edited-note protection; public provenance is not a substitute
+for private operational checkpoints. Cache can be regenerated.
 
-| Field | Meaning |
-| --- | --- |
-| `schemaVersion` | `1.0.0` |
-| `id` | Stable logical identity string; artifact entities use their UUID |
-| `version` | `sha256:` followed by the exact content hash |
-| `sha256` | Lowercase 64-character SHA-256 digest |
-| `ref` | Observed locator for this version |
-| `kind` | For example `raw`, `sourceMetadata`, `canonicalEvents`, `scope`, `threadNote`, `decision`, `repositoryFile`, `gitSnapshot`, `inferenceInput`, `workingContext` |
-| `mediaType` | JSON, Markdown, plain text or newline-delimited JSON |
-| `byteCount` | Snapshot length in bytes |
-| `snapshotRef` | `data:/provenance/blobs/<prefix>/<hash>` |
+`store.json` contains rawRefPrefix, rawRefAliases (old full prefixes), and
+ dataRefAliases (old relative prefixes mapped to current relative prefixes).
+Resolve aliases longest-prefix first, once, rejecting traversal before and after
+translation. Python readers can use references.resolve_store_ref. Canonical data:/
+locators resolve locally; Raw locators are source-qualified. Historical snapshots
+and note bodies retain their exact bytes during migration.
 
-Entity records are stored in `provenance/entities/` under a SHA-256 key over
-`id + NUL + sha256`. The same identity/version can have several observed
-locations; the first entity record keeps its locator, while activities and the
-current index can show newer locators. Historical bytes are always resolved
-using `snapshotRef`.
+`storage migrate --from-config <old-config> --dry-run` plans a copy into the fresh
+roots in the destination config. The source configuration is standalone, never
+combined with destination layers. Supported source configs are integer 2,
+2.0.x–2.2.x, 3.0.x, 4.0.x–4.1.x, 5.0.x, 6.0.x and 7.0.x. Source stores 2/3/4 and completed 5
+are supported; future formats and pending source migrations are rejected.
+Keep the same source identity. Concurrent source writers must be stopped.
 
-### Generation activities
+Apply copies source payloads, selected catalog/provenance, all required immutable
+snapshots, and checkpoint state. Mutable locators are translated, but immutable
+activities/entities/blobs and note bytes/UUIDs remain unchanged. Source config and
+data are never modified. State/migration.json records a deterministic file plan;
+conflicts/source changes fail closed, write errors roll back destination changes,
+and interrupted copies resume using the same plan. Completion verifies the copied
+provenance. A completed migration is a no-write operation on repetition.
 
-An activity in `provenance/activities/<uuid>.json` contains:
+After a storage-5 relocation, generation fingerprints remain valid. Old Thread
+Notes can be regenerated by a later pull when their generation format differs,
+subject to ordinary reviewed/edited protections. The migrator never calls a model.
+Downstream curation/insight v0.2.0 accept named data roots and Session Note 6.
+Keep input names stable while changing their paths.
 
-- UUID `id`, UUID `runId`, `stage`, and `subject` (thread key or scope ID).
-- `startedAt`, `endedAt`, and `status` (`completed` or `partial`).
-- `agent`: application/software version and, for inference, provider, model,
-  reasoning effort, profile/prompt/schema/template hashes and prompt version.
-- `used` and `generated`: inline entity-version records.
-- `relations`: `derivedFrom` edges with `from` (generated) and `to` (used), each
-  containing an `id` and `version` pair.
+## Multiple Codex sources (config 7)
 
-Stages include `normalize`, `thread-note`, `decisions`, `prepare-input`, and
-`working-context`. Working Context preparation preserves exact source bytes
-and a distinct JSON input containing the normalized/bounded text passed to the
-model. Git evidence is a captured textual observation, not a complete Git
-repository snapshot.
+The top-level `sources` map use stable source_id keys. Source values use source_root
+instead of home and must not repeat source_id. ASCII letters/digits/._- are allowed,
+starting with a letter or digit; lowercase kebab-case is recommended. Reject spaces,
+Unicode, trailing dots, Windows device names, duplicate YAML keys, and case-only
+IDs across the source map. Preserve exact IDs in storage identity and provenance.
+Map layers merge by ID; an explicit map suppresses implicit source defaults and
+an empty map clears all sources. Per-source output paths remain final directories.
 
-Edges describe stage-level dependencies. In a synthesis batch every generated
-artifact is linked conservatively to the batch's retained input set; this does
-not mean every sentence depends on every input. A Decision activity can generate
-zero records and still complete successfully. Partial decision batches can
-publish successful outputs, with the scope remaining incomplete. Failures with
-no generated output can be represented only in the run report. This is not a
-complete model-request or token-level audit log.
+Processing iterates enabled sources in map order with a shared generation-attempt
+limit and deadline. All selected stores are preflighted before mutation; per-source
+locks, catalogs, evidence, notes, and checkpoints stay independent. Reject overlapping
+outputs and overlapping enabled input directories. Disabled inputs are not scanned.
+`--source <source_id>` selects one enabled source; targeted thread builds and storage
+migration require a single selection. Migration selects the same source ID in a
+standalone schema-6/7 source config. Account-based filtering is outside this contract.
 
-## Completion and consumer procedure
+Single-source reports retain schema 2 and add sourceProvider/sourceId plus
+attemptedSessionNoteCount. Multiple-source responses use schema 3 with sourceResults,
+aggregate threadCounts, generatedSessionNoteCount, attemptedSessionNoteCount, failed,
+warnings, and reportPaths. Source-local run reports remain schema 2 in each state_root;
+there is no shared persisted batch report. Compact CLI output removes threads/rawIngest
+inside sourceResults; --full-output retains them. Status/provenance inspect selected
+stores without scanning live chat inputs. Source failures make the overall result fail.
 
-`provenance/index.json` contains `schemaVersion`, `runId`, `asOf`,
-`pipelineComplete`, `artifacts`, and `activityRefs`. Artifacts include their
-entity fields plus `status` and a `threadKey` or `scopeId`. `current` means
-current for the inputs observed by that published run, not a live guarantee.
-Other statuses include `pending`, `deferred`, `blocked`, `failed`, `stale`,
-`not-run`, and `inactive`.
+Schema 5/6 to 7 is an explicit configuration-only update when IDs and final roots
+are retained. Move chat.providers.codex.sources to top-level sources (schema 5
+also needs the ID-keyed map and home renamed to source_root); remove chat.
+The new default app root is ~/.tkn/codex_chat_note_pipeline. Old omitted roots
+must be made explicit using their old resolved paths before using schema 7;
+relative paths must keep their original meaning if the config file moves.
+Legacy migration readers resolve omitted source roots against the old application
+root, never the renamed default. Generation provider settings are independent.
 
-1. Read the index and retain its run ID. To require a completed full pipeline,
-   require `pipelineComplete: true`; inspect the matching run report for
-   source coverage, warnings, failures, and excluded conversations.
-2. Select appropriate artifact statuses and review/implementation metadata.
-   Successful automated validation is not human review or independent proof
-   that a decision was implemented.
-3. Read historical content from `snapshotRef` and verify SHA-256/byte count.
-   Use mutable Markdown paths only when their hash still matches the index.
-4. Traverse activities using `(id, version)` pairs. Do not join on titles,
-   filenames, Project paths, or scope-local decision numbers.
-5. Re-read the index run ID before committing an import, and retry if it
-   changed. Immutable snapshots allow a consumer to keep reading a previously
-   published run while a new run updates mutable notes.
-
-`raw ingest` publishes a capture report but does not republish derived data or
-its index. The previous index remains an as-of snapshot. Use `status`/the latest
-run report when comparing it with more recent acquisition. Individual builds
-publish their selected stages but always set full `pipelineComplete` to false.
-A new or interrupted run can leave the previous index intact: inspect the latest
-run record when live operational freshness matters. The index and catalog are
-separate atomic files, not a multi-file database transaction; the provenance
-index's retained snapshots are the stable export boundary.
-
-`provenance validate` checks schema/structure, indexed identity uniqueness,
-snapshot hashes and lengths, activity IDs, relationship endpoints, and mutable
-files advertised as current. It does not assess semantic correctness, assert
-that every cloud chat was captured, or perform RDF/OWL reasoning.
-
-## Retention
-
-Raw captures, canonical snapshots, provenance blobs, and activities are retained
-without automatic garbage collection. Failed and deferred work never causes
-source deletion. Original logs can disappear after capture and still be
-processed from retained Raw. Checkpoints and note hashes allow repeated
-`clone`/`pull` to resume without repeating completed unchanged inference.
-
-Back up Raw, data, and state together to retain evidence, logical identities,
-and resumability. Treat these as private stores: original conversation content,
-source metadata, and local repository paths can be present in snapshots.
+Storage 5, Raw manifests, catalogs, provenance and Session Note schemas are unchanged;
+existing consumers continue to read each data_root without package changes.
+The storage ownership filename .tkn-genai-chat-note-root.json and applicationId
+tkn-genai-chat-note-pipeline are stable storage-5 identifiers retained across the
+rename. Existing immutable provenance and profile hashes remain intact. Newly
+published software metadata uses tkn-codex-chat-note-pipeline and the current version.
+Config show uses config.sources and storage.sourceRoots.<source_id>; the top-level
+sources object in its JSON response still describes configuration value provenance.

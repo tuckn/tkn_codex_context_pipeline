@@ -261,47 +261,22 @@ choose storage appropriate for private conversation data. Generation profiles,
 output validation, and retry limits are application-owned. Changing a model,
 provider, reasoning setting, or generation profile invalidates affected stages.
 
-### Migrating older configuration
+### Rebuilding without retaining an existing store
 
-Normal execution uses config schema `"7.0.0"`. This release renames the repository
-and Python package to `tkn_codex_chat_note_pipeline` and `tkn_codex_chat_note`,
-and the CLI to `tkn-codex-chat-note`. Install the new CLI with `uv tool install .`.
+Create a separate configuration, select empty `raw_root`, `data_root`, and
+`state_root` directories, then follow "First capture and generation".
+Rebuilding covers conversation logs still available in the source. The new
+store does not inherit old note IDs, manual edits, or review status.
 
-For an existing schema-6 configuration:
+~~~console
+tkn-codex-chat-note --config "C:\path\to\rebuild.yaml" config init
+~~~
 
-1. Keep the original configuration. Copy it to
-   `~/.tkn/codex_chat_note_pipeline/config.yaml`, or use an explicit `--config`.
-2. Move the whole `chat.providers.codex.sources` map to top-level `sources` and
-   remove `chat`, including the retired non-Codex acquisition placeholders.
-3. Set `schema_version: "7.0.0"`. Preserve source IDs, `source_root`, archive and
-   enabled settings, generation settings, and timing settings.
-4. Explicitly retain the **resolved final** `raw_root`, `data_root`, and `state_root`
-   for every existing source. Old omitted roots resolved under
-   `~/.tkn/genai_chat_note_pipeline/<kind>/codex/<source_id>`; new defaults use
-   `~/.tkn/codex_chat_note_pipeline`. Preserve `cache_root` too when reusing pending
-   work. If moving a config file, resolve its relative paths against its old location.
-5. Run the new CLI's `config show`, `status`, and `pull --dry-run` to check the
-   resolved paths and planned work before normal execution.
-
-**Storage 5 needs no data migration when IDs and final paths stay the same.**
-The rename alone does not regenerate notes. Ownership marker names/application IDs
-retain their storage-5 values; do not rename them. Note UUIDs, evidence references,
-review protection and downstream input paths stay valid.
-
-Schema 5 also requires keying the Codex entry by its existing `source_id`, removing
-that field from the value, and renaming `home` to `source_root`. Normal execution
-rejects schemas 5/6 with upgrade guidance; it does not silently convert files.
-The CLI detects an old global config when no new or explicitly selected config is
-available and stops with migration guidance instead of starting with new defaults.
-Default `config init` also stops when only the old global config exists, so its
-settings are not replaced by a new example. An explicit `--config <new-path>`
-can create a separate configuration.
-
-Old configs 2–4 are accepted only as standalone `--from-config` input to copy
-migration. Prepare schema 7 with fresh roots and follow storage migration below.
-All loaded user-global/project layers must use schema 7; `--config` does not
-bypass invalid lower layers. Other applications' acquisition belongs in separate
-repositories that can feed compatible published artifacts to downstream tools.
+Edit the generated configuration and pass the same `--config` to subsequent
+`config show` and `clone` commands. An explicit new configuration path also works
+when default `config init` stops after detecting an old user configuration.
+Any current user configuration or `.tkn/config.yaml` loaded by the CLI must
+still use schema 7; `--config` does not bypass validation of lower layers.
 
 ## Data and responsibility boundaries
 
@@ -424,47 +399,38 @@ parse. The current implementation passes in-memory events to the summarizer;
 it does not re-read the saved canonical JSON for that step. Summarization is
 per conversation, independent of work-scope grouping.
 
-### Migrating older storage
+### Changing storage directories
 
-Version 0.15.0 uses config `"7.0.0"` and storage `5`. The copy migration reads a
-standalone old configuration (`2.0.x–2.2.x`, integer `2`, `3.0.x`, `4.0.x–4.1.x`)
-or a completed storage-5/config-5/6/7 store for relocation. Its roots and source ID
-must describe the existing store without relying on other configuration layers.
-Prepare a new config-7 file with the same provider and source_id and fresh,
-disjoint final roots. Choose a fresh cache base if the old namespace is unowned. Stop writers to the source store during the copy.
+Use `storage migrate` to copy a current-format store to new directories.
+It preserves Raw, Session Notes, canonical data, provenance, restart state,
+note IDs, note content, and review status. It never invokes inference, and
+changing storage paths alone does not trigger regeneration.
+
+1. Prepare a standalone source configuration that resolves the source ID and
+   final roots. `--from-config` is not merged with other configuration layers.
+2. Prepare a separate destination configuration with the same source ID and
+   new final `raw_root`, `data_root`, and `state_root` paths disjoint from the source.
+   Select one source with `--source` when several are enabled.
+3. Stop writers to the source store, then check and execute the copy:
 
 ~~~console
-tkn-codex-chat-note --config "C:\path\to\new.yaml" config show
-tkn-codex-chat-note --config "C:\path\to\new.yaml" storage migrate --from-config "C:\path\to\old.yaml" --dry-run
-tkn-codex-chat-note --config "C:\path\to\new.yaml" storage migrate --from-config "C:\path\to\old.yaml"
-tkn-codex-chat-note --config "C:\path\to\new.yaml" provenance validate
-tkn-codex-chat-note --config "C:\path\to\new.yaml" pull --dry-run
+tkn-codex-chat-note --config "C:\path\to\destination.yaml" config show
+tkn-codex-chat-note --config "C:\path\to\destination.yaml" --source my-windows-pc storage migrate --from-config "C:\path\to\source.yaml" --dry-run
+tkn-codex-chat-note --config "C:\path\to\destination.yaml" --source my-windows-pc storage migrate --from-config "C:\path\to\source.yaml"
+tkn-codex-chat-note --config "C:\path\to\destination.yaml" --source my-windows-pc provenance validate
 ~~~
 
-`--dry-run` lists source/destination files, sizes, and hashes without creating
-files, directories, locks, or model calls. Apply copies Raw, notes, canonical
-data, selected source evidence, and restart state. It verifies copied bytes and
-provenance before marking completion. Source files and configuration are never
-modified or deleted. Conflicting destination files stop the operation. Ordinary
-write errors roll back copied changes; interrupted copies resume with the same
-source and destination configurations. A changed source requires fresh destinations.
+Source data and configuration are never modified or deleted. Cache is not copied
+and can be recreated at the destination. Conflicting destination files stop the
+operation; interrupted copies can resume with the same configurations.
+Repeating a completed copy performs no writes. For Raw-only stores, run
+`provenance validate` after the first note generation.
+Use the destination configuration for subsequent runs. Update downstream
+`notes_roots` paths while keeping input names stable. See the
+[output data and CLI integration contract](reference/data-contract.md#storage-layout-5)
+for reference resolution and copy guarantees.
 
-Each store has its own catalog/provenance; migration from shared storage selects
-the configured source and required evidence snapshots. Note bytes, IDs, review
-status, immutable entities, activities and blobs are preserved. Mutable index,
-catalog and checkpoint locators change. `store.json` records old reference
-aliases so historical evidence remains resolvable within the copied store.
-Cache is not migrated. A completed migration can be repeated without writes.
-
-New Session Notes use schema 6; historical Thread Note schemas 3–5 remain readable.
-Migration itself never invokes inference. A later `pull` may regenerate eligible
-old-format unreviewed notes; reviewed/edited protections remain active. A pure
-storage-5 relocation does not invalidate generation solely because paths changed.
-Raw-only stores publish provenance after their first generation; run provenance
-validation after that. Old Project-only stores without pipeline metadata or Raw
-manifest require a separate migration plan. Downstream curation/insight v0.2.0
-accept Session Note 6 and multiple named stores; update input paths while retaining
-input names after relocating a store.
+### Coverage and limitations
 
 Thread identity survives Project reassignment. Membership observations are
 retained upstream; semantic scopes and approved relationships belong downstream.
@@ -477,7 +443,7 @@ conversations and sources without a clean user message are retained and
 normalized but excluded from notes. Cloud-only ChatGPT/Work history is not
 fetched. Unsupported records and divergent versions remain visible in reports.
 
-See [data contract](reference/data-contract.md),
+See [output data and CLI integration contract](reference/data-contract.md),
 [Session Note format](docs/session-note-format.md), and
 [processing sequence](#processing-flow) for IDs, hashes, schemas,
 citations, storage details, and input preparation.
@@ -500,3 +466,23 @@ uv run ruff check .
 uv run mypy src
 uv build
 ~~~
+
+Automated tests use anonymous conversations and substitute inference implementations
+to check configuration, storage, restart, edit protection, and output validation.
+They do not establish service authentication or real-model summary quality.
+Evaluate quality separately by comparing representative source logs with notes.
+
+When changing distribution artifacts, install the built wheel into a temporary
+environment and check `--version`, `--help`, `config init`, `config show`, and
+bundled language profiles from outside the checkout. When changing integration
+contracts, use anonymous output to verify IDs, hashes, and input references in
+downstream CLIs. Use framework-managed or OS temporary directories for test data.
+Python 3.11 is the declared minimum; recorded execution used Windows / Python 3.12.10.
+Other Python versions and non-Windows execution, including WSL, remain unverified.
+
+## Related documentation
+
+| Document | When to read it |
+| --- | --- |
+| [Output data and CLI integration contract](reference/data-contract.md) | Implement a consumer: IDs, schemas, hashes, provenance, and consistency checks |
+| [Session Note format](docs/session-note-format.md) | Understand generated note structure and field meanings |
