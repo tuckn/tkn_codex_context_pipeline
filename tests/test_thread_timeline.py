@@ -9,8 +9,8 @@ from unittest.mock import patch
 import pytest
 from test_session_note_pipeline import note_data
 
-from tkn_genai_chat_note.chat_logs import ChatEvent
-from tkn_genai_chat_note.session_notes import (
+from tkn_codex_chat_note.chat_logs import ChatEvent
+from tkn_codex_chat_note.session_notes import (
     Candidate,
     PipelineConfig,
     PipelineError,
@@ -20,7 +20,7 @@ from tkn_genai_chat_note.session_notes import (
     validate_note_data,
     validate_session_note,
 )
-from tkn_genai_chat_note.thread_timeline import render_timeline, validate_timeline
+from tkn_codex_chat_note.thread_timeline import render_timeline, validate_timeline
 
 
 def event(id: str, *, actor: str = "user", time: str = "2026-01-01T23:01:02.345Z") -> ChatEvent:

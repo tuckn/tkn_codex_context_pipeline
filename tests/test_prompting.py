@@ -1,12 +1,12 @@
 import pytest
 
-from tkn_genai_chat_note.prompting import (
+from tkn_codex_chat_note.prompting import (
     parse_summary_prompt,
     render_chunk_prompt,
     render_reduction_prompt,
     render_repair_prompt,
 )
-from tkn_genai_chat_note.summary_resources import load_summary_profile
+from tkn_codex_chat_note.summary_resources import load_summary_profile
 
 
 def test_application_owned_prompt_is_versioned_and_rendered_with_managed_input() -> None:

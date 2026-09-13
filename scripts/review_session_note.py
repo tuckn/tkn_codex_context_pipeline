@@ -9,11 +9,11 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from tkn_genai_chat_note.chat_logs import fingerprint_events, read_thread_source
-from tkn_genai_chat_note.config import load_app_config
-from tkn_genai_chat_note.frontmatter import frontmatter_list_value, parse_simple_frontmatter, split_frontmatter_lines
-from tkn_genai_chat_note.inference import provider_name
-from tkn_genai_chat_note.session_notes import (
+from tkn_codex_chat_note.chat_logs import fingerprint_events, read_thread_source
+from tkn_codex_chat_note.config import load_app_config
+from tkn_codex_chat_note.frontmatter import frontmatter_list_value, parse_simple_frontmatter, split_frontmatter_lines
+from tkn_codex_chat_note.inference import provider_name
+from tkn_codex_chat_note.session_notes import (
     Candidate,
     Project,
     ProviderSummarizer,

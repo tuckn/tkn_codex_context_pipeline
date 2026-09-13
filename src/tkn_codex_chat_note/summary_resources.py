@@ -107,7 +107,7 @@ def _profile_resource_name(profile_name: str, filename: str) -> str:
 
 
 def _resource_bytes(resource_name: str, label: str) -> bytes:
-    resource = files("tkn_genai_chat_note").joinpath(resource_name)
+    resource = files("tkn_codex_chat_note").joinpath(resource_name)
     try:
         return resource.read_bytes()
     except (OSError, FileNotFoundError) as exc:
@@ -121,7 +121,7 @@ def load_summary_prompt(
 ) -> SummaryPrompt:
     resource_name = _profile_resource_name(profile_name, PROMPT_FILENAME)
     payload = _resource_bytes(resource_name, "summary profile prompt")
-    source = f"package:tkn_genai_chat_note/{resource_name}"
+    source = f"package:tkn_codex_chat_note/{resource_name}"
     return parse_summary_prompt(payload, source)
 
 
@@ -130,7 +130,7 @@ def load_summary_schema(
 ) -> SummarySchema:
     resource_name = _profile_resource_name(profile_name, SCHEMA_FILENAME)
     payload = _resource_bytes(resource_name, "summary profile schema")
-    source = f"package:tkn_genai_chat_note/{resource_name}"
+    source = f"package:tkn_codex_chat_note/{resource_name}"
     try:
         value = json.loads(payload.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -161,7 +161,7 @@ def load_summary_template(
 ) -> SummaryTemplate:
     resource_name = _profile_resource_name(profile_name, TEMPLATE_FILENAME)
     payload = _resource_bytes(resource_name, "summary profile template")
-    source = f"package:tkn_genai_chat_note/{resource_name}"
+    source = f"package:tkn_codex_chat_note/{resource_name}"
     try:
         text = payload.decode("utf-8-sig").replace("\r\n", "\n")
     except UnicodeDecodeError as exc:
@@ -206,7 +206,7 @@ def load_summary_profile(
     prompt = load_summary_prompt(profile_name)
     schema = load_summary_schema(profile_name)
     template = load_summary_template(profile_name)
-    source = f"package:tkn_genai_chat_note/{SUMMARY_PROFILES_ROOT}/{profile_name}"
+    source = f"package:tkn_codex_chat_note/{SUMMARY_PROFILES_ROOT}/{profile_name}"
     identity = json.dumps(
         {
             "name": profile_name,

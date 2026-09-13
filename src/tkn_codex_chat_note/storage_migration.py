@@ -7,6 +7,7 @@ Only mutable catalogs/state locators are rewritten; old notes keep their bytes.
 from __future__ import annotations
 
 import json
+import os
 import re
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from .config import AppConfig, _read_layer, _resolve_paths, default_app_root
+from .config import AppConfig, CodexSourceConfig, _read_layer, _resolve_paths, validate_source_id
 from .initialization import ROOT_KINDS, ROOT_OWNERSHIP_MARKER, _ownership_marker_document
 from .provenance import validate_provenance
 from .raw_capture import SOURCE_ID_PATTERN, _mirror_relative
@@ -87,6 +88,64 @@ def _source_store(path: Path, source_id: str | None = None) -> SourceStore:
         raise PipelineError(f"invalid migration source configuration: {exc}") from exc
 
 
+def _legacy_app_root() -> Path:
+    # Historical omitted roots must never resolve to the renamed application's defaults.
+    return Path.home() / ".tkn" / "genai_chat_note_pipeline"
+
+
+def _legacy_sources(document: dict[str, Any], major: int) -> dict[str, Any]:
+    """Read retired acquisition settings only for explicit copy migration."""
+    if "sources" in document:
+        raise ValueError("legacy config must not contain top-level sources")
+    chat = document.pop("chat", {})
+    if not isinstance(chat, dict) or set(chat) - {"providers"}:
+        raise ValueError("legacy chat must contain only providers")
+    providers = chat.get("providers", {})
+    if not isinstance(providers, dict) or set(providers) - {"codex", "claude-code", "github-copilot"}:
+        raise ValueError("unsupported legacy chat providers")
+    sources: dict[str, Any] = {"windows": {}}
+    for provider, group in providers.items():
+        if not isinstance(group, dict):
+            raise ValueError("legacy provider settings must be a mapping")
+        if major == 5:
+            settings = dict(group)
+            identity = settings.pop("source_id", "windows" if provider == "codex" else "windows-" + provider)
+            if "home" in settings:
+                settings["source_root"] = settings.pop("home")
+            entries = {identity: settings}
+        else:
+            if set(group) - {"sources"}:
+                raise ValueError("legacy provider settings must contain only sources")
+            entries = group.get("sources", {"windows": {}} if provider == "codex" else {})
+        if not isinstance(entries, dict):
+            raise ValueError("legacy sources must be a mapping")
+        if len({str(key).casefold() for key in entries}) != len(entries):
+            raise ValueError("source_id keys must be unique ignoring case")
+        for identity, settings in entries.items():
+            if not isinstance(identity, str):
+                raise ValueError("source_id must be a string")
+            validate_source_id(identity)
+            if not isinstance(settings, dict):
+                raise ValueError("legacy source settings must be a mapping")
+            if provider != "codex" and "include_archived" in settings:
+                raise ValueError("include_archived is Codex-specific")
+            validated = CodexSourceConfig.model_validate({"enabled": provider == "codex", **settings})
+            if provider != "codex" and validated.enabled:
+                raise ValueError("migration only supports Codex sources; disable other legacy sources")
+        if provider == "codex":
+            sources = entries
+    for identity, settings in sources.items():
+        for kind in ("raw", "data", "state"):
+            if settings.get(kind + "_root") is None:
+                settings[kind + "_root"] = _legacy_app_root() / kind / "codex" / identity
+    document["sources"] = sources
+    if "cache_root" not in document:
+        cache_home = os.getenv("XDG_CACHE_HOME")
+        base = Path(cache_home).expanduser() if cache_home else Path.home() / ".cache"
+        document["cache_root"] = base / "genai_chat_note_pipeline"
+    return document
+
+
 def _read_source_store(path: Path, selected_id: str | None = None) -> SourceStore:
     path = path.expanduser().resolve()
     document = _read_layer(path)
@@ -96,26 +155,20 @@ def _read_source_store(path: Path, selected_id: str | None = None) -> SourceStor
             raise ValueError(f"{field} must be a non-empty path string")
     if "source_id" in document and not isinstance(document["source_id"], str):
         raise ValueError("source_id must be a string")
-    if not re.fullmatch(r"(?:2|[2-6]\.[0-9]+\.[0-9]+)", version):
-        raise PipelineError("migration source requires a standalone schema-2/3/4/5/6 configuration")
+    if not re.fullmatch(r"(?:2|[2-7]\.[0-9]+\.[0-9]+)", version):
+        raise PipelineError("migration source requires a standalone schema-2/3/4/5/6/7 configuration")
     major, minor = (2, 0) if version == "2" else tuple(int(part) for part in version.split(".")[:2])
-    if minor > {2: 2, 3: 0, 4: 1, 5: 0, 6: 0}[major]:
+    if minor > {2: 2, 3: 0, 4: 1, 5: 0, 6: 0, 7: 0}[major]:
         raise PipelineError("unsupported migration source config version")
-    if major in {5, 6}:
-        if version.split(".")[1] != "0":
-            raise PipelineError("unsupported migration source config version")
-        if major == 5:
-            for provider, settings in document.get("chat", {}).get("providers", {}).items():
-                identity = settings.pop("source_id", "windows" if provider == "codex" else "windows-" + provider)
-                if "home" in settings:
-                    settings["source_root"] = settings.pop("home")
-                document["chat"]["providers"][provider] = {"sources": {identity: settings}}
+    if major in {5, 6, 7}:
+        if major in {5, 6}:
+            document = _legacy_sources(document, major)
         config = AppConfig.model_validate(_resolve_paths(document, path.parent))
         if selected_id is not None:
-            config = config.for_source("codex", selected_id)
+            config = config.for_source(selected_id)
         metadata = read_json(config.state_root / "pipeline.json")
         if metadata.get("storageVersion") != STORAGE_VERSION:
-            raise PipelineError("source config 5/6 requires a completed storage-5 store")
+            raise PipelineError("source config 5/6/7 requires a completed storage-5 store")
         receipt = read_json(config.state_root / "migration.json")
         if receipt and receipt.get("status") != "complete":
             raise PipelineError("source store migration is incomplete")
@@ -137,7 +190,7 @@ def _read_source_store(path: Path, selected_id: str | None = None) -> SourceStor
     source_id = str(chat.get("source_id") or resolved.get("source_id") or "windows")
     if not SOURCE_ID_PATTERN.fullmatch(source_id):
         raise PipelineError("unsafe source_id in migration source")
-    roots = {kind: Path(resolved.get(kind + "_root") or default_app_root() / kind) for kind in ("raw", "data", "state")}
+    roots = {kind: Path(resolved.get(kind + "_root") or _legacy_app_root() / kind) for kind in ("raw", "data", "state")}
     scoped_state = roots["state"] / "codex" / source_id
     metadata = read_json(scoped_state / "pipeline.json")
     if metadata:

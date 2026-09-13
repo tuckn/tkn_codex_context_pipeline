@@ -6,20 +6,20 @@ from pathlib import Path
 
 import pytest
 
-from tkn_genai_chat_note.app_state import (
+from tkn_codex_chat_note.app_state import (
     CodexAppProject,
     CodexAppState,
     ThreadAssignment,
     load_codex_app_state,
 )
-from tkn_genai_chat_note.config import AppConfig, ChatConfig
-from tkn_genai_chat_note.projects import (
+from tkn_codex_chat_note.config import AppConfig
+from tkn_codex_chat_note.projects import (
     fetch_projects,
     list_registered_projects,
     resolve_project_selector,
     runtime_projects,
 )
-from tkn_genai_chat_note.session_notes import PipelineError, Project
+from tkn_codex_chat_note.session_notes import PipelineError, Project
 
 
 def app_project(project_id: str, name: str, roots: list[Path]) -> CodexAppProject:
@@ -117,21 +117,13 @@ def test_fetch_binds_multi_root_and_preserves_unknown_fields(tmp_path: Path) -> 
     registry.parent.mkdir(parents=True, exist_ok=True)
     registry.write_text(json.dumps(existing) + "\n", encoding="utf-8")
     config = AppConfig(
-        chat=ChatConfig.model_validate(
-            {
-                "providers": {
-                    "codex": {
-                        "sources": {
-                            "windows": {
-                                "source_root": tmp_path / "codex",
-                                "data_root": (data_root) / "codex/windows",
-                                "state_root": (state_root) / "codex/windows",
-                            }
-                        }
-                    }
-                }
+        sources={
+            "windows": {
+                "source_root": tmp_path / "codex",
+                "data_root": (data_root) / "codex/windows",
+                "state_root": (state_root) / "codex/windows",
             }
-        ),
+        },
         cache_root=tmp_path / "cache",
     )
     source = app_project("source-1", "Project", [primary, secondary])
@@ -160,21 +152,13 @@ def test_same_name_and_root_remain_distinct_projects(tmp_path: Path) -> None:
     data_root = tmp_path / "pipeline" / "data"
     state_root = tmp_path / "pipeline" / "state"
     config = AppConfig(
-        chat=ChatConfig.model_validate(
-            {
-                "providers": {
-                    "codex": {
-                        "sources": {
-                            "windows": {
-                                "source_root": tmp_path / "codex",
-                                "data_root": (data_root) / "codex/windows",
-                                "state_root": (state_root) / "codex/windows",
-                            }
-                        }
-                    }
-                }
+        sources={
+            "windows": {
+                "source_root": tmp_path / "codex",
+                "data_root": (data_root) / "codex/windows",
+                "state_root": (state_root) / "codex/windows",
             }
-        ),
+        },
         cache_root=tmp_path / "cache",
     )
     shared = tmp_path / "shared"
@@ -213,21 +197,13 @@ def test_replaced_active_root_becomes_historical_alias(tmp_path: Path) -> None:
     registry.parent.mkdir(parents=True, exist_ok=True)
     registry.write_text(json.dumps(record) + "\n", encoding="utf-8")
     config = AppConfig(
-        chat=ChatConfig.model_validate(
-            {
-                "providers": {
-                    "codex": {
-                        "sources": {
-                            "windows": {
-                                "source_root": tmp_path / "codex",
-                                "data_root": (data_root) / "codex/windows",
-                                "state_root": (state_root) / "codex/windows",
-                            }
-                        }
-                    }
-                }
+        sources={
+            "windows": {
+                "source_root": tmp_path / "codex",
+                "data_root": (data_root) / "codex/windows",
+                "state_root": (state_root) / "codex/windows",
             }
-        ),
+        },
         cache_root=tmp_path / "cache",
     )
     state = CodexAppState(
@@ -250,21 +226,13 @@ def test_same_id_survives_drive_and_name_change(tmp_path: Path) -> None:
     old = Path(r"C:\path\to\project")
     new = Path(r"D:\path\to\project")
     config = AppConfig(
-        chat=ChatConfig.model_validate(
-            {
-                "providers": {
-                    "codex": {
-                        "sources": {
-                            "windows": {
-                                "source_root": tmp_path / "codex",
-                                "data_root": (tmp_path / "pipeline/data") / "codex/windows",
-                                "state_root": (tmp_path / "pipeline/state") / "codex/windows",
-                            }
-                        }
-                    }
-                }
+        sources={
+            "windows": {
+                "source_root": tmp_path / "codex",
+                "data_root": (tmp_path / "pipeline/data") / "codex/windows",
+                "state_root": (tmp_path / "pipeline/state") / "codex/windows",
             }
-        ),
+        },
         cache_root=tmp_path / "cache",
     )
     record = {
@@ -300,21 +268,13 @@ def test_same_id_survives_drive_and_name_change(tmp_path: Path) -> None:
 
 def test_missing_app_project_becomes_inactive_and_can_reactivate(tmp_path: Path) -> None:
     config = AppConfig(
-        chat=ChatConfig.model_validate(
-            {
-                "providers": {
-                    "codex": {
-                        "sources": {
-                            "windows": {
-                                "source_root": tmp_path / "codex",
-                                "data_root": (tmp_path / "pipeline/data") / "codex/windows",
-                                "state_root": (tmp_path / "pipeline/state") / "codex/windows",
-                            }
-                        }
-                    }
-                }
+        sources={
+            "windows": {
+                "source_root": tmp_path / "codex",
+                "data_root": (tmp_path / "pipeline/data") / "codex/windows",
+                "state_root": (tmp_path / "pipeline/state") / "codex/windows",
             }
-        ),
+        },
         cache_root=tmp_path / "cache",
     )
     record = {
@@ -348,21 +308,13 @@ def test_missing_app_project_becomes_inactive_and_can_reactivate(tmp_path: Path)
 
 def test_fetch_rejects_old_registry_schema(tmp_path: Path) -> None:
     config = AppConfig(
-        chat=ChatConfig.model_validate(
-            {
-                "providers": {
-                    "codex": {
-                        "sources": {
-                            "windows": {
-                                "source_root": tmp_path / "codex",
-                                "data_root": (tmp_path / "pipeline" / "data") / "codex/windows",
-                                "state_root": (tmp_path / "pipeline" / "state") / "codex/windows",
-                            }
-                        }
-                    }
-                }
+        sources={
+            "windows": {
+                "source_root": tmp_path / "codex",
+                "data_root": (tmp_path / "pipeline" / "data") / "codex/windows",
+                "state_root": (tmp_path / "pipeline" / "state") / "codex/windows",
             }
-        ),
+        },
         cache_root=tmp_path / "cache",
     )
     config.registry_path.parent.mkdir(parents=True)

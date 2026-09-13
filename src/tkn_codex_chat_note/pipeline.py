@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from . import __version__
 from .catalog import CATALOG_SCHEMA_VERSION, Discovery, capture_sources, discover
 from .config import AppConfig
 from .frontmatter import parse_simple_frontmatter
@@ -68,8 +69,8 @@ def _save_ledger(config: AppConfig, ledger: dict[str, Any], dry_run: bool) -> No
 def _agent(config: PipelineConfig, stage: str) -> dict[str, Any]:
     profile = config.summary_profile
     return {
-        "software": "tkn-genai-chat-note-pipeline",
-        "version": "0.14.0",
+        "software": "tkn-codex-chat-note-pipeline",
+        "version": __version__,
         "provider": config.provider,
         "model": config.model,
         "reasoningEffort": config.reasoning_effort,

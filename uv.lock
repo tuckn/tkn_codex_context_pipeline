@@ -417,8 +417,8 @@ wheels = [
 ]
 
 [[package]]
-name = "tkn-genai-chat-note-pipeline"
-version = "0.14.0"
+name = "tkn-codex-chat-note-pipeline"
+version = "0.15.0"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },

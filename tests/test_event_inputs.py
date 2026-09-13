@@ -10,8 +10,8 @@ import pytest
 from test_session_note_pipeline import note_data
 from test_thread_timeline import candidate, config, entry, event
 
-from tkn_genai_chat_note.safety import redact_secret_like_content
-from tkn_genai_chat_note.session_notes import PipelineError, ProviderSummarizer, chunk_events, prepare_events
+from tkn_codex_chat_note.safety import redact_secret_like_content
+from tkn_codex_chat_note.session_notes import PipelineError, ProviderSummarizer, chunk_events, prepare_events
 
 
 def payload(prompt: str) -> dict:

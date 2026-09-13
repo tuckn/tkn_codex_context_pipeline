@@ -1,0 +1,37 @@
+schema_version: "7.0.0"
+# One shared cache base; codex/source_id partitions are automatic.
+cache_root: ~/.cache/codex_chat_note_pipeline
+
+# Every source is a local Codex directory. Map keys are stable source_id values.
+# Recommended: lowercase ASCII kebab-case, e.g. laptop-windows or laptop-wsl-ubuntu.
+# Allowed: ASCII letters/digits/._-, starting with a letter/digit. No spaces or Unicode.
+# No trailing dot, Windows reserved names, or case-only duplicate IDs.
+sources:
+  my-windows-note-pc:
+    enabled: true
+    source_root: ~/.codex
+    include_archived: true
+    # Optional final directories; no codex/source_id suffix is added.
+    # Omit roots for ~/.tkn/codex_chat_note_pipeline/<kind>/codex/<source_id>.
+    # When upgrading, explicitly retain the old final raw/data/state paths.
+    # raw_root: C:/path/to/codex/raw
+    # data_root: C:/path/to/codex/data
+    # state_root: C:/path/to/codex/state
+  # my-wsl-ubuntu:
+  #   enabled: false
+  #   source_root: '//wsl$/Ubuntu/home/<user>/.codex'
+  #   include_archived: true
+
+generation:
+  # Inference is independent of the Codex acquisition sources.
+  # Built-in profiles only: default-jp (Japanese) or default-en (English).
+  session_note_profile: default-jp
+  active_provider: codex
+  providers:
+    codex:
+      model: gpt-5.6-sol
+      reasoning_effort: high
+      executable: codex
+idle_minutes: 30
+runtime_minutes: 230
+model_timeout_seconds: 1800

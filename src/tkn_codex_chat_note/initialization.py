@@ -13,6 +13,7 @@ from .config import AppConfig, config_document, initialization_config, write_con
 from .projects import create_fresh_projects
 from .session_notes import PipelineError, atomic_write_json
 
+# Stable storage ownership identifier; retained across the CLI/package rename.
 ROOT_OWNERSHIP_MARKER = ".tkn-genai-chat-note-root.json"
 ROOT_OWNERSHIP_SCHEMA_VERSION = 1
 ROOT_OWNER_APPLICATION_ID = "tkn-genai-chat-note-pipeline"
@@ -128,7 +129,7 @@ def _require_owned_reset_targets(ownership: list[dict[str, Any]]) -> None:
         raise PipelineError(
             "refusing to reset targets without valid ownership markers: "
             f"{_ownership_details(unsafe)}; inspect and explicitly adopt existing directories with "
-            "`tkn-genai-chat-note init --adopt-existing --dry-run` before using --force"
+            "`tkn-codex-chat-note init --adopt-existing --dry-run` before using --force"
         )
 
 
@@ -142,7 +143,7 @@ def _adopt_existing_targets(
         raise PipelineError(f"refusing to adopt targets with invalid ownership state: {_ownership_details(invalid)}")
     existing = [item for item in ownership if item["exists"]]
     if not existing:
-        raise PipelineError("no existing reset targets to adopt; run `tkn-genai-chat-note init` instead")
+        raise PipelineError("no existing reset targets to adopt; run `tkn-codex-chat-note init` instead")
     adoptable = [item for item in ownership if item["status"] in {"empty", "unowned"}]
     planned = [str(item["path"]) for item in adoptable]
     if dry_run:
@@ -240,10 +241,10 @@ def initialize_application(
             raise PipelineError(
                 "existing pipeline storage is not marked as application-owned: "
                 f"{_ownership_details(unsafe)}; inspect and explicitly adopt it with "
-                "`tkn-genai-chat-note init --adopt-existing --dry-run`"
+                "`tkn-codex-chat-note init --adopt-existing --dry-run`"
             )
         raise PipelineError(
-            "pipeline is already initialized; run `tkn-genai-chat-note init --force --dry-run` "
+            "pipeline is already initialized; run `tkn-codex-chat-note init --force --dry-run` "
             "to inspect a clean rebuild"
         )
     if force:

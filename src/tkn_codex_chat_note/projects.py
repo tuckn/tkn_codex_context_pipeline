@@ -110,7 +110,7 @@ def _validate_registry_schema(records: Iterable[dict[str, Any]]) -> None:
     ]
     if unsupported:
         raise PipelineError(
-            "unsupported Project registry detected; run `tkn-genai-chat-note init --force` "
+            "unsupported Project registry detected; run `tkn-codex-chat-note init --force` "
             f"to rebuild it: {', '.join(unsupported)}"
         )
 

@@ -9,7 +9,7 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 LIB_ROOT = PLUGIN_ROOT / "lib"
 sys.path.insert(0, str(LIB_ROOT))
 
-from tkn_genai_chat_note.chat_logs import (  # noqa: E402
+from tkn_codex_chat_note.chat_logs import (  # noqa: E402
     normalize_path_text,
     path_is_within,
     read_thread_log,

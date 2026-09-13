@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import pytest
 
-from tkn_genai_chat_note.summary_resources import (
+from tkn_codex_chat_note.summary_resources import (
     REQUIRED_TEMPLATE_FIELDS,
     load_summary_profile,
     load_summary_schema,

@@ -9,33 +9,25 @@ from typing import Any
 import pytest
 from test_session_note_pipeline import FakeSummarizer, note_data, write_chat
 
-from tkn_genai_chat_note.catalog import thread_key
-from tkn_genai_chat_note.config import AppConfig, ChatConfig
-from tkn_genai_chat_note.frontmatter import parse_simple_frontmatter
-from tkn_genai_chat_note.pipeline import pipeline_status, run_pipeline
-from tkn_genai_chat_note.provenance import validate_provenance
-from tkn_genai_chat_note.session_notes import Candidate, PipelineError
-from tkn_genai_chat_note.storage import pipeline_storage
+from tkn_codex_chat_note.catalog import thread_key
+from tkn_codex_chat_note.config import AppConfig
+from tkn_codex_chat_note.frontmatter import parse_simple_frontmatter
+from tkn_codex_chat_note.pipeline import pipeline_status, run_pipeline
+from tkn_codex_chat_note.provenance import validate_provenance
+from tkn_codex_chat_note.session_notes import Candidate, PipelineError
+from tkn_codex_chat_note.storage import pipeline_storage
 
 
 def config_for(tmp_path: Path) -> AppConfig:
     return AppConfig(
-        chat=ChatConfig.model_validate(
-            {
-                "providers": {
-                    "codex": {
-                        "sources": {
-                            "windows": {
-                                "source_root": tmp_path / "codex",
-                                "raw_root": tmp_path / "raw",
-                                "data_root": tmp_path / "data",
-                                "state_root": tmp_path / "state",
-                            }
-                        }
-                    }
-                }
+        sources={
+            "windows": {
+                "source_root": tmp_path / "codex",
+                "raw_root": tmp_path / "raw",
+                "data_root": tmp_path / "data",
+                "state_root": tmp_path / "state",
             }
-        ),
+        },
         cache_root=tmp_path / "cache",
         idle_minutes=0,
     )
@@ -356,8 +348,8 @@ def test_corrupted_raw_is_repaired_from_available_original(tmp_path: Path) -> No
 def test_changing_optional_app_metadata_does_not_stop_ingestion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import tkn_genai_chat_note.catalog as catalog
-    from tkn_genai_chat_note.raw_capture import RawCaptureError
+    import tkn_codex_chat_note.catalog as catalog
+    from tkn_codex_chat_note.raw_capture import RawCaptureError
 
     config = config_for(tmp_path)
     app_state(config, projects={}, assignments={}, projectless=[])
@@ -460,15 +452,12 @@ def test_explicit_legacy_store_requires_migration_without_modifying_files(tmp_pa
     assert before == {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
 
 
-@pytest.mark.parametrize("provider", ["claude-code", "github-copilot", "codex"])
 @pytest.mark.parametrize("mode", ["clone", "pull", "raw", "session-notes"])
 @pytest.mark.parametrize("dry_run", [False, True])
-def test_unavailable_chat_source_stops_before_any_writes(
-    tmp_path: Path, provider: str, mode: str, dry_run: bool
-) -> None:
+def test_unavailable_chat_source_stops_before_any_writes(tmp_path: Path, mode: str, dry_run: bool) -> None:
     config = config_for(tmp_path)
-    next(iter(config.chat.providers.entries()[provider].sources.values())).enabled = provider != "codex"
-    message = "no supported chat source" if provider == "codex" else "chat acquisition is not implemented"
+    config.sources["windows"].enabled = False
+    message = "no enabled Codex source"
     before = {str(path): path.read_bytes() if path.is_file() else None for path in tmp_path.rglob("*")}
     with pytest.raises(PipelineError, match=message):
         run_pipeline(config, mode=mode, dry_run=dry_run)

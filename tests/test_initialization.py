@@ -6,16 +6,16 @@ from pathlib import Path
 import pytest
 import yaml
 
-import tkn_genai_chat_note.initialization as initialization
-from tkn_genai_chat_note.config import CONFIG_SCHEMA_VERSION
-from tkn_genai_chat_note.initialization import (
+import tkn_codex_chat_note.initialization as initialization
+from tkn_codex_chat_note.config import CONFIG_SCHEMA_VERSION
+from tkn_codex_chat_note.initialization import (
     ROOT_KINDS,
     ROOT_OWNER_APPLICATION_ID,
     ROOT_OWNERSHIP_MARKER,
     ROOT_OWNERSHIP_SCHEMA_VERSION,
     initialize_application,
 )
-from tkn_genai_chat_note.session_notes import PipelineError
+from tkn_codex_chat_note.session_notes import PipelineError
 
 
 def write_app_state(codex_home: Path) -> None:
@@ -42,8 +42,7 @@ def write_app_state(codex_home: Path) -> None:
 def write_config(path: Path, value: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     document = {"schema_version": CONFIG_SCHEMA_VERSION, **value}
-    group = document.setdefault("chat", {}).setdefault("providers", {}).setdefault("codex", {})
-    codex = group.setdefault("sources", {}).setdefault(document.pop("source_id", "windows"), {})
+    codex = document.setdefault("sources", {}).setdefault(document.pop("source_id", "windows"), {})
     for old, new in (
         ("raw_root", "raw_root"),
         ("data_root", "data_root"),
@@ -165,7 +164,7 @@ def test_init_refuses_existing_storage_without_force(tmp_path: Path) -> None:
     write_config(
         config_path,
         {
-            "chat": {"providers": {"codex": {"sources": {"windows": {"source_root": str(codex_home)}}}}},
+            "sources": {"windows": {"source_root": str(codex_home)}},
             "data_root": str(data_root),
             "state_root": str(state_root),
             "cache_root": str(cache_root),
@@ -203,7 +202,7 @@ def test_force_rolls_back_storage_and_config_on_failure(
         config_path,
         {
             "installed_at": "2026-01-01T00:00:00+00:00",
-            "chat": {"providers": {"codex": {"sources": {"windows": {"source_root": str(codex_home)}}}}},
+            "sources": {"windows": {"source_root": str(codex_home)}},
             "data_root": str(data_root),
             "state_root": str(state_root),
             "cache_root": str(cache_root),
@@ -249,7 +248,7 @@ def test_force_does_not_delete_storage_when_staging_fails(
         config_path,
         {
             "installed_at": "2026-01-01T00:00:00+00:00",
-            "chat": {"providers": {"codex": {"sources": {"windows": {"source_root": str(codex_home)}}}}},
+            "sources": {"windows": {"source_root": str(codex_home)}},
             "data_root": str(data_root),
             "state_root": str(state_root),
             "cache_root": str(cache_root),
@@ -290,7 +289,7 @@ def test_force_rejects_unowned_nonempty_storage(
         config_path,
         {
             "installed_at": "2026-01-01T00:00:00+00:00",
-            "chat": {"providers": {"codex": {"sources": {"windows": {"source_root": str(codex_home)}}}}},
+            "sources": {"windows": {"source_root": str(codex_home)}},
             "data_root": str(roots[0]),
             "state_root": str(roots[1]),
             "cache_root": str(roots[2]),
@@ -321,7 +320,7 @@ def test_adopt_existing_previews_then_marks_roots_without_rebuilding(
         config_path,
         {
             "installed_at": "2026-01-01T00:00:00+00:00",
-            "chat": {"providers": {"codex": {"sources": {"windows": {"source_root": str(codex_home)}}}}},
+            "sources": {"windows": {"source_root": str(codex_home)}},
             "data_root": str(roots[0]),
             "state_root": str(roots[1]),
             "cache_root": str(roots[2]),
@@ -394,7 +393,7 @@ def test_adopt_existing_rejects_foreign_marker(tmp_path: Path) -> None:
     write_config(
         config_path,
         {
-            "chat": {"providers": {"codex": {"sources": {"windows": {"source_root": str(tmp_path / "codex")}}}}},
+            "sources": {"windows": {"source_root": str(tmp_path / "codex")}},
             "data_root": str(roots[0]),
             "state_root": str(roots[1]),
             "cache_root": str(roots[2]),
@@ -435,7 +434,7 @@ def test_force_rejects_unsafe_reset_target(tmp_path: Path, monkeypatch: pytest.M
     write_config(
         config_path,
         {
-            "chat": {"providers": {"codex": {"sources": {"windows": {"source_root": str(home / ".codex")}}}}},
+            "sources": {"windows": {"source_root": str(home / ".codex")}},
             "data_root": str(home),
             "state_root": str(home / "app/state"),
             "cache_root": str(home / "cache/codex/windows"),

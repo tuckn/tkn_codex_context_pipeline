@@ -12,11 +12,11 @@ from test_pipeline_workflow import Summary, config_for, execute
 from test_session_note_pipeline import note_data, write_chat
 from test_thread_timeline import candidate, config, event
 
-from tkn_genai_chat_note.cli import main
-from tkn_genai_chat_note.config import CONFIG_SCHEMA_VERSION, load_app_config, resolve_app_config
-from tkn_genai_chat_note.frontmatter import parse_simple_frontmatter
-from tkn_genai_chat_note.pipeline import _agent
-from tkn_genai_chat_note.session_notes import (
+from tkn_codex_chat_note.cli import main
+from tkn_codex_chat_note.config import CONFIG_SCHEMA_VERSION, load_app_config, resolve_app_config
+from tkn_codex_chat_note.frontmatter import parse_simple_frontmatter
+from tkn_codex_chat_note.pipeline import _agent
+from tkn_codex_chat_note.session_notes import (
     PipelineError,
     ProviderSummarizer,
     generator_fingerprint,
@@ -25,7 +25,7 @@ from tkn_genai_chat_note.session_notes import (
     validate_note_data,
     validate_session_note,
 )
-from tkn_genai_chat_note.summary_resources import load_summary_profile
+from tkn_codex_chat_note.summary_resources import load_summary_profile
 
 
 def test_profiles_share_the_fixed_structure_and_have_distinct_instructions() -> None:
@@ -50,7 +50,7 @@ def test_custom_and_unknown_profiles_are_rejected_before_loading(name: str, tmp_
 def test_profile_configuration_precedence_and_old_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home, work = tmp_path / "home", tmp_path / "work"
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    global_path = home / ".tkn/genai_chat_note_pipeline/config.yaml"
+    global_path = home / ".tkn/codex_chat_note_pipeline/config.yaml"
     write_yaml(global_path, {"schema_version": CONFIG_SCHEMA_VERSION, "idle_minutes": 30})
     old_bytes = global_path.read_bytes()
     old = resolve_app_config(cwd=work)
@@ -194,7 +194,7 @@ def test_language_switch_protects_existing_user_content(tmp_path: Path, reviewed
 def test_pending_work_from_other_language_is_not_reused(tmp_path: Path) -> None:
     settings = config_for(tmp_path)
     write_chat(settings.sessions_root / "one.jsonl", thread_id="one", cwd=tmp_path)
-    with patch("tkn_genai_chat_note.session_notes.update_refresh_state", side_effect=RuntimeError("interrupted")):
+    with patch("tkn_codex_chat_note.session_notes.update_refresh_state", side_effect=RuntimeError("interrupted")):
         first = execute(settings)
     assert not first["complete"]
     assert list(settings.cache_root.rglob("manifest.json"))
@@ -212,6 +212,6 @@ def test_pending_work_from_other_language_is_not_reused(tmp_path: Path) -> None:
 
 def test_refreshing_internal_config_preserves_language(tmp_path: Path) -> None:
     original = replace(config(tmp_path), session_note_profile="default-en")
-    with patch("tkn_genai_chat_note.session_notes.resolve_codex_bin", return_value="codex"):
+    with patch("tkn_codex_chat_note.session_notes.resolve_codex_bin", return_value="codex"):
         refreshed = make_config(existing=original)
     assert refreshed.summary_profile.name == "default-en"

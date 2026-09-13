@@ -11,10 +11,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import tkn_genai_chat_note.chat_logs as chat_logs
-from tkn_genai_chat_note.chat_logs import ChatEvent, read_thread_events, read_thread_source
-from tkn_genai_chat_note.frontmatter import parse_simple_frontmatter
-from tkn_genai_chat_note.session_notes import (
+import tkn_codex_chat_note.chat_logs as chat_logs
+from tkn_codex_chat_note.chat_logs import ChatEvent, read_thread_events, read_thread_source
+from tkn_codex_chat_note.frontmatter import parse_simple_frontmatter
+from tkn_codex_chat_note.session_notes import (
     Candidate,
     CodexSummarizer,
     PipelineConfig,
@@ -322,7 +322,7 @@ class SessionNotePipelineTests(unittest.TestCase):
         write_chat(self.sessions / "chat.jsonl", thread_id="thread-1", cwd=self.repo)
 
         with patch(
-            "tkn_genai_chat_note.session_notes.read_thread_source",
+            "tkn_codex_chat_note.session_notes.read_thread_source",
             wraps=read_thread_source,
         ) as read_source:
             candidates, _counts, _excluded = scan_candidates(self.config, [self.project])
@@ -669,7 +669,7 @@ class SessionNotePipelineTests(unittest.TestCase):
         os.utime(source, (old, old))
 
         with patch(
-            "tkn_genai_chat_note.session_notes.update_refresh_state",
+            "tkn_codex_chat_note.session_notes.update_refresh_state",
             side_effect=OSError("simulated state failure"),
         ):
             report, _path = execute_pipeline(
@@ -804,7 +804,7 @@ class SessionNotePipelineTests(unittest.TestCase):
             return SimpleNamespace(returncode=0, stderr="", stdout="")
 
         runner = CodexSummarizer(self.config, sleeper=lambda _seconds: None)
-        with patch("tkn_genai_chat_note.inference.subprocess.run", side_effect=fake_run):
+        with patch("tkn_codex_chat_note.inference.subprocess.run", side_effect=fake_run):
             result = runner.generate(candidate)
 
         self.assertEqual("Automated Session Note", result["title"])
@@ -914,7 +914,7 @@ class SessionNotePipelineTests(unittest.TestCase):
         historical.mkdir()
         write_chat(self.sessions / "chat.jsonl", thread_id="thread-1", cwd=historical)
         with patch(
-            "tkn_genai_chat_note.session_notes.verify_historical_root",
+            "tkn_codex_chat_note.session_notes.verify_historical_root",
             return_value=historical,
         ):
             report, _path = execute_rebuild(
@@ -955,7 +955,7 @@ class SessionNotePipelineTests(unittest.TestCase):
         )
         note = next(self.project.session_notes_path.glob("*.md"))
 
-        with patch("tkn_genai_chat_note.session_notes.SESSION_NOTE_SCHEMA_VERSION", 7):
+        with patch("tkn_codex_chat_note.session_notes.SESSION_NOTE_SCHEMA_VERSION", 7):
             report, _path = execute_rebuild(
                 self.config,
                 self.project,
@@ -1063,7 +1063,7 @@ class SessionNotePipelineTests(unittest.TestCase):
             "---\ntype: sessionNote\nschemaVersion: 2\n---\n\n# Legacy\n",
             encoding="utf-8",
         )
-        import tkn_genai_chat_note.session_notes as module
+        import tkn_codex_chat_note.session_notes as module
 
         original_write = module.atomic_write_json
 
@@ -1073,7 +1073,7 @@ class SessionNotePipelineTests(unittest.TestCase):
             return original_write(path, value)
 
         with patch(
-            "tkn_genai_chat_note.session_notes.atomic_write_json",
+            "tkn_codex_chat_note.session_notes.atomic_write_json",
             side_effect=fail_state,
         ):
             report, _path = execute_rebuild(
@@ -1172,7 +1172,7 @@ class SessionNotePipelineTests(unittest.TestCase):
             return original_rmtree(path, *args, **kwargs)
 
         with patch(
-            "tkn_genai_chat_note.session_notes.shutil.rmtree",
+            "tkn_codex_chat_note.session_notes.shutil.rmtree",
             side_effect=fail_backup_cleanup,
         ):
             report, _path = execute_rebuild(
@@ -1204,7 +1204,7 @@ class SessionNotePipelineTests(unittest.TestCase):
         self.assertIn('type: "sessionNote"', note)
         self.assertIn('promptId: "f5dfc679-13d3-4fcc-9736-b7d4e6bb5c11"', note)
         self.assertIn('promptVersion: "3.4"', note)
-        from tkn_genai_chat_note.summary_resources import load_summary_schema
+        from tkn_codex_chat_note.summary_resources import load_summary_schema
         self.assertIn(f'outputSchemaSha256: "{load_summary_schema().sha256}"', note)
         self.assertIn('templateId: "4d19c51c-0d02-43a5-b6ad-6d67f9739b75"', note)
         self.assertIn('templateVersion: "4.1"', note)

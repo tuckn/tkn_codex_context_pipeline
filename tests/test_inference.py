@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-import tkn_genai_chat_note.inference as inference
-from tkn_genai_chat_note.inference import (
+import tkn_codex_chat_note.inference as inference
+from tkn_codex_chat_note.inference import (
     InferenceExecutionError,
     invoke_structured,
     provider_name,
@@ -135,7 +135,7 @@ def test_claude_code_uses_structured_output_and_disables_tools(
             stderr="",
         )
 
-    monkeypatch.setattr("tkn_genai_chat_note.inference.subprocess.run", fake_run)
+    monkeypatch.setattr("tkn_codex_chat_note.inference.subprocess.run", fake_run)
     result = invoke_structured(
         inference_config("claude-code"),
         "prompt",
@@ -161,7 +161,7 @@ def test_github_copilot_uses_noninteractive_stdout_and_schema_prompt(
         captured["input"] = kwargs["input"]
         return subprocess.CompletedProcess(command, 0, stdout='{"answer":"copilot"}', stderr="")
 
-    monkeypatch.setattr("tkn_genai_chat_note.inference.subprocess.run", fake_run)
+    monkeypatch.setattr("tkn_codex_chat_note.inference.subprocess.run", fake_run)
     result = invoke_structured(
         inference_config("github-copilot"),
         "prompt",
@@ -201,7 +201,7 @@ def test_ollama_uses_local_chat_api_with_json_schema(
         captured["timeout"] = timeout
         return FakeResponse()
 
-    monkeypatch.setattr("tkn_genai_chat_note.inference.urlopen", fake_urlopen)
+    monkeypatch.setattr("tkn_codex_chat_note.inference.urlopen", fake_urlopen)
     result = invoke_structured(
         inference_config("ollama", model="qwen3.5:9b"),
         "prompt",

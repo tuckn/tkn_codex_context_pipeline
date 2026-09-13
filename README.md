@@ -1,8 +1,8 @@
-# Tkn GenAI Chat Note Pipeline
+# Tkn Codex Chat Note Pipeline
 
 Japanese: [README_ja.md](README_ja.md)
 
-Preserve local AI conversations as source evidence and turn each conversation into
+Preserve local Codex conversations as source evidence and turn each conversation into
 a reusable Session Note. Notes retain requests, corrections, failed attempts,
 unresolved questions, a source-backed timeline, and the last known state.
 They support later reconsideration from different viewpoints.
@@ -10,7 +10,7 @@ They support later reconsideration from different viewpoints.
 A **session** means one continuous sequence of conversation, listed chronologically
 in one Markdown note.
 
-Version 0.11.0 ends at Session Notes. Classification and Working Context belong to
+Processing ends at Session Notes. Classification and Working Context belong to
 [tkn_genai_context_curation_pipeline](https://github.com/tuckn/tkn_genai_context_curation_pipeline);
 Decision distillation belongs to
 [tkn_genai_insight_pipeline](https://github.com/tuckn/tkn_genai_insight_pipeline).
@@ -22,27 +22,27 @@ Each CLI installs independently and exchanges versioned files.
 
 Python 3.11+, uv, readable local Codex JSONL logs, and a configured inference
 provider for generation. Codex CLI is the default; Claude Code, GitHub Copilot
-CLI, and local Ollama are inference alternatives. **Only Codex chat acquisition
-is implemented.** Other inference providers do not add chat-source support.
+CLI, and local Ollama are inference alternatives. **Chat acquisition is Codex-only.** Inference provider selection is independent.
+Other applications' chat acquisition is outside this repository's scope.
 
 ~~~console
-cd "C:\path\to\tkn_genai_chat_note_pipeline"
+cd "C:\path\to\tkn_codex_chat_note_pipeline"
 uv tool install .
-tkn-genai-chat-note --help
-tkn-genai-chat-note config init
+tkn-codex-chat-note --help
+tkn-codex-chat-note config init
 ~~~
 
-Edit the displayed `~/.tkn/genai_chat_note_pipeline/config.yaml`. Select storage
+Edit the displayed `~/.tkn/codex_chat_note_pipeline/config.yaml`. Select storage
 roots and an available model. For Codex inference, check `codex --version` and
 `codex login status` in the terminal; the desktop app does not replace the CLI.
-See the packaged [configuration example](src/tkn_genai_chat_note/resources/config.example.yaml).
+See the packaged [configuration example](src/tkn_codex_chat_note/resources/config.example.yaml).
 
 ### First capture and generation
 
 ~~~console
-tkn-genai-chat-note config show
-tkn-genai-chat-note clone --dry-run
-tkn-genai-chat-note clone
+tkn-codex-chat-note config show
+tkn-codex-chat-note clone --dry-run
+tkn-codex-chat-note clone
 ~~~
 
 `clone` initializes missing owned storage, captures all locally available
@@ -54,9 +54,9 @@ network calls and creates no directories, locks, caches, or reports.
 ### Daily updates and results
 
 ~~~console
-tkn-genai-chat-note pull
-tkn-genai-chat-note status
-tkn-genai-chat-note provenance validate
+tkn-codex-chat-note pull
+tkn-codex-chat-note status
+tkn-codex-chat-note provenance validate
 ~~~
 
 `pull` captures changed or newly discovered logs, updates eligible notes, and
@@ -99,39 +99,36 @@ describes overall note coverage even when one thread was selected.
 
 Precedence: built-in → user-global → current directory `.tkn/config.yaml` →
 explicit `--config` → CLI options. Each supplied layer is validated before
-merging. Relative paths resolve against the file declaring them. Schema 6.0.0
+merging. Relative paths resolve against the file declaring them. Schema 7.0.0
 uses snake_case keys and quoted SemVer; unknown keys and newer unsupported
 versions fail visibly.
 
 ~~~console
-tkn-genai-chat-note --config "C:\path\to\config.yaml" clone
-tkn-genai-chat-note --idle-minutes 0 --runtime-minutes 60 pull --limit 20
+tkn-codex-chat-note --config "C:\path\to\config.yaml" clone
+tkn-codex-chat-note --idle-minutes 0 --runtime-minutes 60 pull --limit 20
 ~~~
 
 ### Storage directories
 
-By default, data is stored under `~/.tkn/genai_chat_note_pipeline/<kind>/<provider>/<source_id>`.
-To change the storage directories, set `raw_root`, `data_root`, and `state_root` under each `chat.providers.<provider>.sources.<source_id>` entry in `config.yaml`.
-`cache_root` is shared and cannot be configured separately for each `chat.providers.<provider>.sources.<source_id>` entry.
+By default, data is stored under `~/.tkn/codex_chat_note_pipeline/<kind>/codex/<source_id>`.
+To change the storage directories, set `raw_root`, `data_root`, and `state_root` under each `sources.<source_id>` entry in `config.yaml`.
+`cache_root` is shared and cannot be configured separately for each `sources.<source_id>` entry.
 
 ```yaml
-schema_version: "6.0.0"
-cache_root: ~/.cache/genai_chat_note_pipeline
-chat:
-  providers:
-    codex:
-      sources:
-        my-windows-pc:
-          enabled: true
-          source_root: ~/.codex
-          include_archived: true
-          raw_root: C:/path/to/my-chat-store/raw
-          data_root: C:/path/to/my-chat-store/data
-          state_root: C:/path/to/my-chat-store/state
-        my-wsl-ubuntu:
-          enabled: false
-          source_root: '//wsl$/Ubuntu/home/<user>/.codex'
-          include_archived: true
+schema_version: "7.0.0"
+cache_root: ~/.cache/codex_chat_note_pipeline
+sources:
+  my-windows-pc:
+    enabled: true
+    source_root: ~/.codex
+    include_archived: true
+    raw_root: C:/path/to/my-chat-store/raw
+    data_root: C:/path/to/my-chat-store/data
+    state_root: C:/path/to/my-chat-store/state
+  my-wsl-ubuntu:
+    enabled: false
+    source_root: '//wsl$/Ubuntu/home/<user>/.codex'
+    include_archived: true
 ```
 
 Keep all actual roots separate from one another, source roots, and configuration.
@@ -155,7 +152,7 @@ generation:
   session_note_profile: default-en
 ```
 
-For a single run, use `tkn-genai-chat-note --session-note-profile default-en pull`. The option precedes the command. `config show` reports the selected profile, its resources and hashes, and the configuration source.
+For a single run, use `tkn-codex-chat-note --session-note-profile default-en pull`. The option precedes the command. `config show` reports the selected profile, its resources and hashes, and the configuration source.
 
 Both built-in profiles preserve the same schema, headings, timeline, citations, and state rules. Only narrative language and explanatory notices change; times remain in Asia/Tokyo. Custom profile names, directories, and prompts are not supported. Bundles are packaged under `profiles/default-jp/` and `profiles/default-en/`.
 
@@ -163,22 +160,17 @@ Changing language makes an existing note eligible for regeneration on the next b
 
 ### Chat sources and generation AI
 
-`chat.providers` configures conversation acquisition; `generation.providers`
+`sources` configures local Codex conversation directories; `generation.providers`
 configures the AI used to generate notes. `--provider` changes only
-`generation.active_provider`, independently of chat acquisition.
+`generation.active_provider`, independently of acquisition. Claude Code, Copilot
+and Ollama remain inference options; their chat acquisition is outside this CLI.
 
-| Chat provider | Default source_root | enabled | Support |
-| --- | --- | --- | --- |
-| `codex` | `~/.codex` | `true` | Local log acquisition implemented |
-| `claude-code` | `~/.claude` | `false` | Configuration only; acquisition, normalization, and note integration are pending |
-| `github-copilot` | `~/.copilot` | `false` | Configuration only; acquisition, normalization, and note integration are pending |
-
-Each provider has a `sources` map. Its keys are the stable `source_id` values;
-do not repeat `source_id` inside entries. Each entry has `enabled`, `source_root`,
-and optional final `raw_root`, `data_root`, and `state_root`. `include_archived`
-is Codex-specific. `source_root` is the parent `.codex` directory, not `sessions/`;
-it supplies sessions, archives, and app metadata. It does not change Codex's own
-storage configuration, authentication, or the generation provider.
+Each top-level `sources` key is a stable `source_id`. Do not repeat `source_id`
+inside entries. Each source has `enabled` (default `true`), `source_root` (default
+`~/.codex`), `include_archived` (default `true`), and optional final `raw_root`,
+`data_root`, and `state_root`. `source_root` is the parent `.codex` directory,
+not `sessions/`; it supplies sessions, archives, and app metadata. It does not
+change Codex's own storage configuration, authentication, or inference provider.
 
 Choose an ID for a persistent input directory: for example `laptop-windows` or
 `laptop-wsl-ubuntu`. Lowercase ASCII **kebab-case** is recommended; an ID is a
@@ -188,10 +180,10 @@ variable. The exact rules are:
 - ASCII letters (`A-Z`, `a-z`), digits, `.`, `_`, and `-`; start with a letter or digit.
 - No spaces, Japanese/full-width characters, leading/trailing whitespace, or trailing dot.
 - Windows device names such as `CON`, `nul.txt`, and `COM1` are rejected.
-- IDs must be unique ignoring case within a provider. Exact spelling is retained;
+- IDs must be unique ignoring case across the sources map. Exact spelling is retained;
   IDs are never trimmed or automatically lowercased. Quote numeric-only YAML keys.
 
-Identity is `(provider, source_id)`, so different providers may share an ID.
+Published identity remains `(codex, source_id)` for compatibility with evidence and downstream readers.
 Keep it stable after ingestion; changing the key does not rename or migrate an
 existing store. Display-oriented folder names in `source_root` and output paths
 can still contain spaces and Unicode. Register each input directory once.
@@ -205,11 +197,11 @@ failure result while other sources can continue. `--full-output` includes per-so
 thread details; ordinary output includes per-source totals and report paths.
 
 ~~~console
-tkn-genai-chat-note clone --dry-run
-tkn-genai-chat-note --source my-windows-pc pull
-tkn-genai-chat-note --source my-windows-pc session-notes build --thread-id <thread-id>
-tkn-genai-chat-note status
-tkn-genai-chat-note provenance validate
+tkn-codex-chat-note clone --dry-run
+tkn-codex-chat-note --source my-windows-pc pull
+tkn-codex-chat-note --source my-windows-pc session-notes build --thread-id <thread-id>
+tkn-codex-chat-note status
+tkn-codex-chat-note provenance validate
 ~~~
 
 `--source` precedes the command. It selects one enabled source for processing,
@@ -220,14 +212,13 @@ fail visibly. `config show` always displays all configured sources and resolved 
 
 Source maps merge by ID across config layers; later fields override only the same
 source. An explicit map replaces the implicit built-in source, so adding your own
-IDs never silently enables an extra `windows` source. `sources: {}` clears that
-provider's map; `enabled: false` disables one inherited source. Duplicate YAML keys
+IDs never silently enables an extra `windows` source. `sources: {}` clears the
+entire acquisition map; `enabled: false` disables one inherited source. Duplicate YAML keys
 and case-only source IDs are rejected.
 
 Disabled sources are not scanned and their input directories need not exist.
-An enabled unimplemented adapter stops processing before writes; disabling every
-supported source also stops execution. `config show` remains available. Claude
-Code/Copilot acquisition adapters are still unimplemented.
+With no enabled source, processing stops before writes; `config show` remains
+available. Retired `chat` and acquisition-provider wrappers are rejected.
 
 Windows and WSL input directories need separate IDs. Windows can use the WSL UNC
 path shown above when the distribution is accessible. When running this CLI inside
@@ -239,7 +230,7 @@ WSL integration testing. Account-based filtering is not implemented.
 
 ### Inference providers
 
-The currently supported chat source is locally stored Codex conversation logs.
+This CLI acquires locally stored Codex conversation logs.
 You can change the generative AI model used for inference through
 `generation.active_provider` and the selected provider's `model` setting.
 Set the selected provider's model and transport; model
@@ -272,16 +263,45 @@ provider, reasoning setting, or generation profile invalidates affected stages.
 
 ### Migrating older configuration
 
-Normal execution uses schema `"6.0.0"`. For schema 5, preserve the old config,
-move each provider's settings under `sources.<its-existing-source_id>`, remove the
-nested `source_id`, rename `home` to `source_root`, and change `schema_version` to
-`"6.0.0"`. Keep the same IDs and final paths: **storage 5 requires no data migration**
-for this configuration-only change. Update/reinstall the CLI before using the file.
+Normal execution uses config schema `"7.0.0"`. This release renames the repository
+and Python package to `tkn_codex_chat_note_pipeline` and `tkn_codex_chat_note`,
+and the CLI to `tkn-codex-chat-note`. Install the new CLI with `uv tool install .`.
 
-Old config 2–4 is accepted only as standalone `--from-config` input to copy migration.
-Preserve that old file, create schema 6 with fresh roots, and follow the storage
-migration below. Every supplied user-global/project layer must use schema 6 for
-normal execution; `--config` does not bypass invalid lower layers.
+For an existing schema-6 configuration:
+
+1. Keep the original configuration. Copy it to
+   `~/.tkn/codex_chat_note_pipeline/config.yaml`, or use an explicit `--config`.
+2. Move the whole `chat.providers.codex.sources` map to top-level `sources` and
+   remove `chat`, including the retired non-Codex acquisition placeholders.
+3. Set `schema_version: "7.0.0"`. Preserve source IDs, `source_root`, archive and
+   enabled settings, generation settings, and timing settings.
+4. Explicitly retain the **resolved final** `raw_root`, `data_root`, and `state_root`
+   for every existing source. Old omitted roots resolved under
+   `~/.tkn/genai_chat_note_pipeline/<kind>/codex/<source_id>`; new defaults use
+   `~/.tkn/codex_chat_note_pipeline`. Preserve `cache_root` too when reusing pending
+   work. If moving a config file, resolve its relative paths against its old location.
+5. Run the new CLI's `config show`, `status`, and `pull --dry-run` to check the
+   resolved paths and planned work before normal execution.
+
+**Storage 5 needs no data migration when IDs and final paths stay the same.**
+The rename alone does not regenerate notes. Ownership marker names/application IDs
+retain their storage-5 values; do not rename them. Note UUIDs, evidence references,
+review protection and downstream input paths stay valid.
+
+Schema 5 also requires keying the Codex entry by its existing `source_id`, removing
+that field from the value, and renaming `home` to `source_root`. Normal execution
+rejects schemas 5/6 with upgrade guidance; it does not silently convert files.
+The CLI detects an old global config when no new or explicitly selected config is
+available and stops with migration guidance instead of starting with new defaults.
+Default `config init` also stops when only the old global config exists, so its
+settings are not replaced by a new example. An explicit `--config <new-path>`
+can create a separate configuration.
+
+Old configs 2–4 are accepted only as standalone `--from-config` input to copy
+migration. Prepare schema 7 with fresh roots and follow storage migration below.
+All loaded user-global/project layers must use schema 7; `--config` does not
+bypass invalid lower layers. Other applications' acquisition belongs in separate
+repositories that can feed compatible published artifacts to downstream tools.
 
 ## Data and responsibility boundaries
 
@@ -299,8 +319,8 @@ flowchart LR
     T --> P
 ~~~
 
-Default storage is ordered by role, acquisition application, source environment,
-then kind of data. Explicit roots start directly with the kind of data. `P` below is the acquisition provider, `I` the source_id, `T` the
+Default storage is ordered by role, the fixed acquisition application (`codex`), source environment,
+then kind of data. Explicit roots start directly with the kind of data. `P` below is the fixed acquisition provider (`codex`), `I` the source_id, `T` the
 threadKey, and `H` a content hash. Changing `generation.active_provider` does
 not change these paths.
 
@@ -323,10 +343,10 @@ not change these paths.
 | `<cache_root>/P/I/...` | Reusable generation work for one source |
 
 For provider `codex` and source_id `my-windows-pc`, Raw goes to
-`~/.tkn/genai_chat_note_pipeline/raw/codex/my-windows-pc/sessions/...`; notes go to
-`~/.tkn/genai_chat_note_pipeline/data/codex/my-windows-pc/session-notes/YYYY/MM/...md`.
-Other providers use separate folders even when they share a source_id.
-Inspect resolved paths in `config show` under `storage.sourceRoots`.
+`~/.tkn/codex_chat_note_pipeline/raw/codex/my-windows-pc/sessions/...`; notes go to
+`~/.tkn/codex_chat_note_pipeline/data/codex/my-windows-pc/session-notes/YYYY/MM/...md`.
+The storage namespace keeps the fixed `codex` component for compatibility.
+Inspect resolved paths under `storage.sourceRoots.<source_id>` in `config show`.
 
 Each root has a source-bound ownership marker and lock. Reusing it for another
 source identity is rejected. `status` and `provenance validate` cover the configured
@@ -345,15 +365,15 @@ eligible conversations. Use `--thread-id` to select one conversation. This comma
 does not generate Decisions or Working Context. The model receives event content
 and IDs, generation instructions, and the output schema.
 
-The following shows `tkn-genai-chat-note session-notes build`. The legend applies
+The following shows `tkn-codex-chat-note session-notes build`. The legend applies
 to the diagram immediately below it.
 
 | Diagram notation | Configuration key | Default location |
 | --- | --- | --- |
-| `C` | `chat.providers.codex.sources.<source_id>.source_root` | `~/.codex` |
-| `R` | `chat.providers.codex.sources.<source_id>.raw_root` | `~/.tkn/genai_chat_note_pipeline/raw/codex/windows` |
-| `D` | `chat.providers.codex.sources.<source_id>.data_root` | `~/.tkn/genai_chat_note_pipeline/data/codex/windows` |
-| `S` | `chat.providers.codex.sources.<source_id>.state_root` | `~/.tkn/genai_chat_note_pipeline/state/codex/windows` |
+| `C` | `sources.<source_id>.source_root` | `~/.codex` |
+| `R` | `sources.<source_id>.raw_root` | `~/.tkn/codex_chat_note_pipeline/raw/codex/windows` |
+| `D` | `sources.<source_id>.data_root` | `~/.tkn/codex_chat_note_pipeline/data/codex/windows` |
+| `S` | `sources.<source_id>.state_root` | `~/.tkn/codex_chat_note_pipeline/state/codex/windows` |
 
 `T` is a conversation's `threadKey` and `H` is a content hash.
 They are placeholders in the diagram.
@@ -406,19 +426,19 @@ per conversation, independent of work-scope grouping.
 
 ### Migrating older storage
 
-Version 0.14.0 uses config `"6.0.0"` and storage `5`. The copy migration reads a
+Version 0.15.0 uses config `"7.0.0"` and storage `5`. The copy migration reads a
 standalone old configuration (`2.0.x–2.2.x`, integer `2`, `3.0.x`, `4.0.x–4.1.x`)
-or a completed storage-5/config-5-or-6 store for relocation. Its roots and source ID
+or a completed storage-5/config-5/6/7 store for relocation. Its roots and source ID
 must describe the existing store without relying on other configuration layers.
-Prepare a new config-6 file with the same provider and source_id and fresh,
+Prepare a new config-7 file with the same provider and source_id and fresh,
 disjoint final roots. Choose a fresh cache base if the old namespace is unowned. Stop writers to the source store during the copy.
 
 ~~~console
-tkn-genai-chat-note --config "C:\path\to\new.yaml" config show
-tkn-genai-chat-note --config "C:\path\to\new.yaml" storage migrate --from-config "C:\path\to\old.yaml" --dry-run
-tkn-genai-chat-note --config "C:\path\to\new.yaml" storage migrate --from-config "C:\path\to\old.yaml"
-tkn-genai-chat-note --config "C:\path\to\new.yaml" provenance validate
-tkn-genai-chat-note --config "C:\path\to\new.yaml" pull --dry-run
+tkn-codex-chat-note --config "C:\path\to\new.yaml" config show
+tkn-codex-chat-note --config "C:\path\to\new.yaml" storage migrate --from-config "C:\path\to\old.yaml" --dry-run
+tkn-codex-chat-note --config "C:\path\to\new.yaml" storage migrate --from-config "C:\path\to\old.yaml"
+tkn-codex-chat-note --config "C:\path\to\new.yaml" provenance validate
+tkn-codex-chat-note --config "C:\path\to\new.yaml" pull --dry-run
 ~~~
 
 `--dry-run` lists source/destination files, sizes, and hashes without creating
@@ -467,7 +487,7 @@ citations, storage details, and input preparation.
 After source or resource changes:
 
 ~~~console
-cd "C:\path\to\tkn_genai_chat_note_pipeline"
+cd "C:\path\to\tkn_codex_chat_note_pipeline"
 uv tool install . --reinstall
 ~~~
 

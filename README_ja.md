@@ -1,14 +1,14 @@
-# Tkn GenAI Chat Note Pipeline
+# Tkn Codex Chat Note Pipeline
 
 English: [README.md](README.md)
 
-AIとの会話を源泉データとして保存し、会話ごとに再利用可能なSession Noteを生成する
+Codexとの会話を源泉データとして保存し、会話ごとに再利用可能なSession Noteを生成する
 ローカルCLIです。依頼、訂正、失敗した試行、未解決の問い、根拠付きの時系列、
 最後に確認できた状態を残し、後から異なる観点で考え直せるようにします。
 
 **session** は時系列で連続した一連の会話を意味し、そのまとまりを一つのMarkdownノートに記録します。
 
-v0.11.0の処理はSession Noteで完了します。分類とWorking Contextは
+処理はSession Noteで完了します。分類とWorking Contextは
 [tkn_genai_context_curation_pipeline](https://github.com/tuckn/tkn_genai_context_curation_pipeline)、
 Decision抽出は
 [tkn_genai_insight_pipeline](https://github.com/tuckn/tkn_genai_insight_pipeline)の責務です。
@@ -21,27 +21,27 @@ Decision抽出は
 Python 3.11以上、uv、読み取り可能なローカルCodex JSONLログを用意します。
 生成には設定済みの推論プロバイダーが必要です。既定はCodex CLIで、
 Claude Code、GitHub Copilot CLI、ローカルOllamaも推論に利用できます。
-**チャット取得元として実装済みなのはCodexだけです。**
-推論プロバイダーを変えても、取得元の対応範囲は増えません。
+**チャット取得はCodex専用です。**
+推論プロバイダーは独立して選択でき、他アプリのチャット取得は本リポジトリの対象外です。
 
 ~~~console
-cd "C:\path\to\tkn_genai_chat_note_pipeline"
+cd "C:\path\to\tkn_codex_chat_note_pipeline"
 uv tool install .
-tkn-genai-chat-note --help
-tkn-genai-chat-note config init
+tkn-codex-chat-note --help
+tkn-codex-chat-note config init
 ~~~
 
-表示された`~/.tkn/genai_chat_note_pipeline/config.yaml`を編集し、保存先と
+表示された`~/.tkn/codex_chat_note_pipeline/config.yaml`を編集し、保存先と
 利用可能なモデルを指定します。Codexを使う場合は、端末で`codex --version`と
 `codex login status`を確認します。デスクトップアプリだけではCLIの代わりになりません。
-[同梱設定例](src/tkn_genai_chat_note/resources/config.example.yaml)も参照してください。
+[同梱設定例](src/tkn_codex_chat_note/resources/config.example.yaml)も参照してください。
 
 ### 最初の保存・生成
 
 ~~~console
-tkn-genai-chat-note config show
-tkn-genai-chat-note clone --dry-run
-tkn-genai-chat-note clone
+tkn-codex-chat-note config show
+tkn-codex-chat-note clone --dry-run
+tkn-codex-chat-note clone
 ~~~
 
 `clone`は未作成の管理領域を初期化し、取得できる全履歴を保存・正規化して、
@@ -54,9 +54,9 @@ tkn-genai-chat-note clone
 ### 日常の更新と結果確認
 
 ~~~console
-tkn-genai-chat-note pull
-tkn-genai-chat-note status
-tkn-genai-chat-note provenance validate
+tkn-codex-chat-note pull
+tkn-codex-chat-note status
+tkn-codex-chat-note provenance validate
 ~~~
 
 `pull`は追加・変更されたログを取得し、対象ノートの更新と未完了処理の再開を行います。
@@ -99,38 +99,35 @@ Raw取得は`--dry-run`と`--full-output`に対応します。
 優先順位は、組み込み既定値 → ユーザー設定 → 現在のフォルダの`.tkn/config.yaml` →
 明示した`--config` → CLIオプションです。各設定ファイルを統合前に検証します。
 相対パスはその値を宣言した設定ファイルの場所から解決します。
-設定スキーマ6.0.0はsnake_caseのキーと引用したSemVerを使い、
+設定スキーマ7.0.0はsnake_caseのキーと引用したSemVerを使い、
 未知のキーや未対応の新しいバージョンはエラーにします。
 
 ~~~console
-tkn-genai-chat-note --config "C:\path\to\config.yaml" clone
-tkn-genai-chat-note --idle-minutes 0 --runtime-minutes 60 pull --limit 20
+tkn-codex-chat-note --config "C:\path\to\config.yaml" clone
+tkn-codex-chat-note --idle-minutes 0 --runtime-minutes 60 pull --limit 20
 ~~~
 
 ### 保存先フォルダ
 
-未指定の場合、各種データは `~/.tkn/genai_chat_note_pipeline/<kind>/<provider>/<source_id>`に保存されます。
-保存先フォルダを変更する場合、config.yaml の 各`chat.providers.<provider>.sources.<source_id>`の中で`raw_root`・`data_root`・`state_root`は設定します。
-なお、`cache_root`は共通で使用され、各`chat.providers`ごとに設定できません。
+未指定の場合、各種データは `~/.tkn/codex_chat_note_pipeline/<kind>/codex/<source_id>`に保存されます。
+保存先フォルダを変更する場合、`config.yaml`の各`sources.<source_id>`で`raw_root`・`data_root`・`state_root`を設定します。
+なお、`cache_root`は共通で使用され、取得元ごとには設定できません。
 
 ```yaml
-schema_version: "6.0.0"
-cache_root: ~/.cache/genai_chat_note_pipeline
-chat:
-  providers:
-    codex:
-      sources:
-        my-windows-pc:
-          enabled: true
-          source_root: ~/.codex
-          include_archived: true
-          raw_root: C:/path/to/my-chat-store/raw
-          data_root: C:/path/to/my-chat-store/data
-          state_root: C:/path/to/my-chat-store/state
-        my-wsl-ubuntu:
-          enabled: false
-          source_root: '//wsl$/Ubuntu/home/<user>/.codex'
-          include_archived: true
+schema_version: "7.0.0"
+cache_root: ~/.cache/codex_chat_note_pipeline
+sources:
+  my-windows-pc:
+    enabled: true
+    source_root: ~/.codex
+    include_archived: true
+    raw_root: C:/path/to/my-chat-store/raw
+    data_root: C:/path/to/my-chat-store/data
+    state_root: C:/path/to/my-chat-store/state
+  my-wsl-ubuntu:
+    enabled: false
+    source_root: '//wsl$/Ubuntu/home/<user>/.codex'
+    include_archived: true
 ```
 
 実際の各rootは互いに分離し、取得元source_rootや設定ファイルとも重ならない場所にします。
@@ -153,7 +150,7 @@ generation:
   session_note_profile: default-jp
 ```
 
-1回だけ切り替える場合は、`tkn-genai-chat-note --session-note-profile default-en pull`を使います。オプションはコマンドの前に指定します。`config show`に選択したprofile、リソースとhash、設定元を表示します。
+1回だけ切り替える場合は、`tkn-codex-chat-note --session-note-profile default-en pull`を使います。オプションはコマンドの前に指定します。`config show`に選択したprofile、リソースとhash、設定元を表示します。
 
 両profileのschema・見出し・時系列・引用・状態判定は共通です。本文の言語と説明文だけを切り替え、時刻はAsia/Tokyoを維持します。カスタムprofile名・フォルダ・promptの指定には対応しません。組み込みリソースは`profiles/default-jp/`と`profiles/default-en/`に配置しています。
 
@@ -161,19 +158,15 @@ generation:
 
 ### Chat取得元と生成AI
 
-`chat.providers`は会話の取得元、`generation.providers`はノート生成に使うAIの設定です。
+`sources`はローカルCodexの取得元、`generation.providers`はノート生成に使うAIの設定です。
 `--provider`は`generation.active_provider`だけを切り替え、取得元を変更しません。
+Claude Code・Copilot・Ollamaは推論の選択肢として維持し、それらのチャット取得は対象外です。
 
-| Chat provider | 既定のsource_root | enabled | 対応状況 |
-| --- | --- | --- | --- |
-| `codex` | `~/.codex` | `true` | ローカルログの取得に対応 |
-| `claude-code` | `~/.claude` | `false` | 設定のみ。取得・正規化・ノート生成への接続は未実装 |
-| `github-copilot` | `~/.copilot` | `false` | 設定のみ。取得・正規化・ノート生成への接続は未実装 |
-
-各providerの`sources`マップのキーが`source_id`です。値の中に`source_id`は重複して書きません。
-各取得元に`enabled`・`source_root`と、任意の最終保存先`raw_root`・`data_root`・`state_root`を指定します。
-`include_archived`はCodex専用です。`source_root`は`sessions/`ではなく親の`.codex`を指し、
-sessions・archives・アプリの補助情報を読み取ります。Codex自身の保存先・認証や生成AIの設定は変更しません。
+トップレベルの`sources`マップのキーが`source_id`です。値の中に`source_id`は重複して書きません。
+各取得元に`enabled`（既定`true`）・`source_root`（既定`~/.codex`）・
+`include_archived`（既定`true`）と、任意の最終保存先`raw_root`・`data_root`・`state_root`を指定します。
+`source_root`は`sessions/`ではなく親の`.codex`を指し、sessions・archives・アプリの補助情報を読み取ります。
+Codex自身の保存先・認証や生成AIの設定は変更しません。
 
 IDは、継続して取得する入力フォルダを識別できる名前にします。例は`laptop-windows`、
 `laptop-wsl-ubuntu`です。**半角英小文字のkebab-caseを推奨**します。Pythonの変数名ではなく、
@@ -182,10 +175,10 @@ IDは、継続して取得する入力フォルダを識別できる名前にし
 - 半角英字（大文字も可）・数字・`.`・`_`・`-`を使用し、先頭は英数字にします。
 - 空白、日本語・全角文字、前後の空白、末尾のドットは使えません。
 - `CON`・`nul.txt`・`COM1`など、Windowsの予約名は使えません。
-- 同じprovider内では大文字・小文字だけが異なるIDも重複として拒否します。
+- sources全体で大文字・小文字だけが異なるIDも重複として拒否します。
   大文字小文字や空白の自動変換はしません。数字だけのYAMLキーは引用符で囲みます。
 
-識別単位は`(provider, source_id)`なので、異なるproviderには同じIDを使えます。
+出典・後続ツールとの互換性のため、公開データの識別単位は`(codex, source_id)`を維持します。
 取り込み開始後は固定してください。キーを変更しても既存データの改名・移行は行われません。
 `source_root`や保存先フォルダのパスには、従来どおり空白・日本語を使えます。
 同じ入力フォルダを複数IDで登録しないでください。
@@ -197,11 +190,11 @@ IDは、継続して取得する入力フォルダを識別できる名前にし
 通常の出力は取得元ごとの集計とレポートのパス、`--full-output`は各会話の詳細も含みます。
 
 ~~~console
-tkn-genai-chat-note clone --dry-run
-tkn-genai-chat-note --source my-windows-pc pull
-tkn-genai-chat-note --source my-windows-pc session-notes build --thread-id <thread-id>
-tkn-genai-chat-note status
-tkn-genai-chat-note provenance validate
+tkn-codex-chat-note clone --dry-run
+tkn-codex-chat-note --source my-windows-pc pull
+tkn-codex-chat-note --source my-windows-pc session-notes build --thread-id <thread-id>
+tkn-codex-chat-note status
+tkn-codex-chat-note provenance validate
 ~~~
 
 `--source`はコマンドの前に指定し、処理・status・provenance検証・storage移行の取得元を選びます。
@@ -211,12 +204,12 @@ tkn-genai-chat-note provenance validate
 
 設定の階層間ではマップのIDごとに統合し、同じIDの指定フィールドだけを上書きします。
 明示したマップが組み込みの取得元に置き換わるため、独自のIDを追加しても既定の`windows`が
-余分に有効になることはありません。`sources: {}`でそのproviderのマップを空にでき、
+余分に有効になることはありません。`sources: {}`で取得元マップ全体を空にでき、
 `enabled: false`で継承した1取得元を無効にできます。YAMLキーの重複も拒否します。
 
-無効な取得元は走査せず、その入力フォルダは存在しなくても構いません。未実装のadapterを
-有効にした場合と、対応する取得元がすべて無効な場合は実行を止めます。`config show`は使用できます。
-Claude Code・Copilotの取得adapterは引き続き未実装です。
+無効な取得元は走査せず、その入力フォルダは存在しなくても構いません。
+有効な取得元がない場合は書き込み前に実行を止めます。`config show`は使用できます。
+廃止した`chat`や取得providerの階層を含む設定は拒否します。
 
 WindowsとWSLの入力フォルダには別のIDを付けます。Windows側では、ディストリビューションへ
 アクセスできる状態で上記のWSL UNCパスを利用できます。WSL内で本CLIを実行する場合は、
@@ -227,7 +220,7 @@ WSLの例は設定方法を示したもので、WSLとの実動作確認は未�
 
 ### 推論プロバイダー
 
-現時点では、対応しているチャットソースは、ローカルに保存されたCodexの会話ログです。
+取得対象は、ローカルに保存されたCodexの会話ログです。
 推論に使用する生成AIモデルは、`generation.active_provider` と各プロバイダーの `model` で変更できます。
 選択するプロバイダーのモデルと接続先を指定してください。モデルの利用可否と認証は各サービス側で管理します。
 
@@ -257,16 +250,38 @@ Rawと来歴のスナップショットには元の内容がローカルに残�
 
 ### 旧設定からの移行
 
-通常実行は設定schema `"6.0.0"`を使います。設定5からは、元設定を保存したうえで
-各providerの内容を`sources.<既存のsource_id>`へ移し、値の中の`source_id`を削除し、
-`home`を`source_root`へ改名して`schema_version`を`"6.0.0"`にします。
-IDと最終保存先を維持すれば、**設定だけの変更でstorage 5のデータ移行は不要**です。
-利用前にCLIも更新・再インストールしてください。
+通常実行は設定schema `"7.0.0"`を使います。リポジトリ名は`tkn_codex_chat_note_pipeline`、
+Python packageは`tkn_codex_chat_note`、CLIは`tkn-codex-chat-note`になりました。
+新CLIは`uv tool install .`でインストールします。
 
-旧設定2〜4は、コピー移行の単独の`--from-config`入力としてのみ読み取ります。
-元設定を保存し、新しい保存先を指定した設定6を用意して後述の移行を実行してください。
-読み込まれるユーザー設定・プロジェクト設定も設定6に揃えます。`--config`だけでは下位の
-不正な設定を無視しません。
+設定6からは次の手順で移行します。
+
+1. 元設定を残し、`~/.tkn/codex_chat_note_pipeline/config.yaml`へコピーするか、
+   新設定を`--config`で明示します。
+2. `chat.providers.codex.sources`のマップ全体をトップレベルの`sources`へ移します。
+   他アプリの取得設定を含め、`chat`全体を削除します。
+3. `schema_version: "7.0.0"`にします。取得元ID、`source_root`、有効・無効、archive、
+   generation、時間制限などの設定は維持します。
+4. 既存取得元の`raw_root`・`data_root`・`state_root`には、**解決済みの最終保存先**を明記します。
+   旧既定値は`~/.tkn/genai_chat_note_pipeline/<kind>/codex/<source_id>`ですが、
+   新既定値は`~/.tkn/codex_chat_note_pipeline`以下です。途中生成を再利用する場合は
+   `cache_root`も維持します。設定ファイルを移す場合、相対パスは元の場所を基準に解決してください。
+5. 新CLIで`config show`・`status`・`pull --dry-run`を実行し、保存先と処理予定を確認します。
+
+**IDと最終保存先を維持すれば、storage 5のデータ移行は不要です。**
+名称変更だけでノートを再生成しません。所有権markerの名前・application IDはstorage 5の値を
+維持するため、改名しないでください。ノートUUID・出典参照・レビュー保護・後続CLIの入力パスも維持します。
+
+設定5では、さらにCodex設定を既存の`source_id`でキー付けし、値の中の`source_id`を削除し、
+`home`を`source_root`へ変更します。通常実行は設定5/6を移行案内付きで拒否し、ファイルを自動変換しません。
+新ユーザー設定も明示的に選んだ設定もなく、旧ユーザー設定だけが見つかった場合は、
+新しい既定値で開始せず移行案内を表示します。既定の`config init`も旧設定がある場合は
+移行案内で停止します。別の新規設定が必要なら`--config <new-path>`で保存先を明示します。
+
+旧設定2〜4はコピー移行の単独の`--from-config`入力としてのみ読み取ります。
+新しい保存先を指定した設定7を用意し、後述の移行を実行してください。
+読み込まれるユーザー設定・プロジェクト設定も設定7に揃えます。`--config`だけでは下位の
+不正な設定を無視しません。他アプリの取得処理は別リポジトリとし、共通の公開成果物で後続ツールへ接続できます。
 
 ## 保存構造と責務の境界
 
@@ -286,7 +301,7 @@ flowchart LR
 
 省略時の保存先は「領域の役割 → 取得元アプリ → 取得環境 → データの種類」の順です。
 明示したrootでは、その直下からデータの種類を配置します。
-以下の`P`は取得provider、`I`はsource_id、`T`はthreadKey、`H`は内容hashです。
+以下の`P`は取得provider（`codex`固定）、`I`はsource_id、`T`はthreadKey、`H`は内容hashです。
 `generation.active_provider`を変更しても保存先は変わりません。
 
 | 保存パス | 内容 |
@@ -308,10 +323,10 @@ flowchart LR
 | `<cache_root>/P/I/...` | 取得元ごとの再利用可能な生成作業cache |
 
 例えば、providerが`codex`、source_idが`my-windows-pc`なら、Rawは
-`~/.tkn/genai_chat_note_pipeline/raw/codex/my-windows-pc/sessions/...`、
-ノートは`~/.tkn/genai_chat_note_pipeline/data/codex/my-windows-pc/session-notes/YYYY/MM/...md`です。
-同じsource_idでも`claude-code`や`github-copilot`とは別のフォルダになります。
-`config show`の`storage.sourceRoots`で各providerの実際の保存先を確認できます。
+`~/.tkn/codex_chat_note_pipeline/raw/codex/my-windows-pc/sessions/...`、
+ノートは`~/.tkn/codex_chat_note_pipeline/data/codex/my-windows-pc/session-notes/YYYY/MM/...md`です。
+互換性のため、保存先の`codex`という区分は維持します。
+`config show`の`storage.sourceRoots.<source_id>`で各取得元の最終保存先を確認できます。
 
 各rootに取得元IDを含む所有権markerとロックを置き、異なる取得元への流用を拒否します。
 `status`と`provenance validate`は設定した1取得元を対象にします。同じ会話のthreadKeyが
@@ -328,14 +343,14 @@ flowchart LR
 `--thread-id` で1会話を選べます。DecisionとWorking Contextは、このコマンドでは生成しません。
 AIにはイベント内容・ID、生成指示、出力スキーマを渡します。
 
-以下は `tkn-genai-chat-note session-notes build` の処理です。表の略記は直後の図で使います。
+以下は `tkn-codex-chat-note session-notes build` の処理です。表の略記は直後の図で使います。
 
 | 図中の表記 | 設定項目 | 既定の保存先 |
 | --- | --- | --- |
-| `C` | `chat.providers.codex.sources.<source_id>.source_root` | `~/.codex` |
-| `R` | `chat.providers.codex.sources.<source_id>.raw_root` | `~/.tkn/genai_chat_note_pipeline/raw/codex/windows` |
-| `D` | `chat.providers.codex.sources.<source_id>.data_root` | `~/.tkn/genai_chat_note_pipeline/data/codex/windows` |
-| `S` | `chat.providers.codex.sources.<source_id>.state_root` | `~/.tkn/genai_chat_note_pipeline/state/codex/windows` |
+| `C` | `sources.<source_id>.source_root` | `~/.codex` |
+| `R` | `sources.<source_id>.raw_root` | `~/.tkn/codex_chat_note_pipeline/raw/codex/windows` |
+| `D` | `sources.<source_id>.data_root` | `~/.tkn/codex_chat_note_pipeline/data/codex/windows` |
+| `S` | `sources.<source_id>.state_root` | `~/.tkn/codex_chat_note_pipeline/state/codex/windows` |
 
 `T` は会話の `threadKey`、`H` は内容のハッシュです。
 図のパスでは、それぞれの実際の値を表すプレースホルダーとして使います。
@@ -387,20 +402,20 @@ sequenceDiagram
 
 ### 旧保存領域の移行
 
-v0.14.0では設定`"6.0.0"`・storage `5`を使います。コピー移行は、単独で保存先を
+v0.15.0では設定`"7.0.0"`・storage `5`を使います。コピー移行は、単独で保存先を
 特定できる旧設定（`2.0.x〜2.2.x`・整数`2`・`3.0.x`・`4.0.x〜4.1.x`）と、
-移動元となる移行済みstorage 5の設定に対応します。旧設定は他の設定階層に依存せず、
-既存領域のrootとsource_idを示す必要があります。新しい設定6のファイルを作り、
+移動元となる移行済みstorage 5の設定5/6/7に対応します。旧設定は他の設定階層に依存せず、
+既存領域のrootとsource_idを示す必要があります。新しい設定7のファイルを作り、
 同じprovider・source_idと、旧領域に重ならない新規の最終保存先を指定します。
 旧cache領域が所有権検証に通らない場合は、新しいcache基点を指定します。
 コピー中は移行元へ書き込む処理を停止してください。
 
 ~~~console
-tkn-genai-chat-note --config "C:\path\to\new.yaml" config show
-tkn-genai-chat-note --config "C:\path\to\new.yaml" storage migrate --from-config "C:\path\to\old.yaml" --dry-run
-tkn-genai-chat-note --config "C:\path\to\new.yaml" storage migrate --from-config "C:\path\to\old.yaml"
-tkn-genai-chat-note --config "C:\path\to\new.yaml" provenance validate
-tkn-genai-chat-note --config "C:\path\to\new.yaml" pull --dry-run
+tkn-codex-chat-note --config "C:\path\to\new.yaml" config show
+tkn-codex-chat-note --config "C:\path\to\new.yaml" storage migrate --from-config "C:\path\to\old.yaml" --dry-run
+tkn-codex-chat-note --config "C:\path\to\new.yaml" storage migrate --from-config "C:\path\to\old.yaml"
+tkn-codex-chat-note --config "C:\path\to\new.yaml" provenance validate
+tkn-codex-chat-note --config "C:\path\to\new.yaml" pull --dry-run
 ~~~
 
 `--dry-run`はファイル・フォルダ・ロックを作らず、コピー元とコピー先、サイズ、hashを表示します。
@@ -444,7 +459,7 @@ ID、hash、schema、引用、保存構造、入力準備の詳細は
 コードやresourceを更新した後は再インストールします。
 
 ~~~console
-cd "C:\path\to\tkn_genai_chat_note_pipeline"
+cd "C:\path\to\tkn_codex_chat_note_pipeline"
 uv tool install . --reinstall
 ~~~
 

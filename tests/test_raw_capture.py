@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-import tkn_genai_chat_note.raw_capture as raw_capture
-from tkn_genai_chat_note.raw_capture import RawCaptureError, ingest_raw_sources
+import tkn_codex_chat_note.raw_capture as raw_capture
+from tkn_codex_chat_note.raw_capture import RawCaptureError, ingest_raw_sources
 
 
 def write_source(path: Path, text: str = '{"type":"event_msg","payload":{}}\n') -> bytes:

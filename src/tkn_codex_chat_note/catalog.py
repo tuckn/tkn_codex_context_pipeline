@@ -315,7 +315,7 @@ def discover(config: AppConfig, provenance: ProvenanceStore, *, run_id: str) -> 
                 started_at=started,
                 used=[raw_entity],
                 generated=[normalized_entity],
-                agent={"software": "tkn-genai-chat-note-pipeline", "parserVersion": PARSER_VERSION},
+                agent={"software": "tkn-codex-chat-note-pipeline", "parserVersion": PARSER_VERSION},
             )
             atomic_write_json(activity_marker, {"activityId": activity})
         if diagnostics["invalidLines"] or len(diagnostics["metadataThreadIds"]) != 1:

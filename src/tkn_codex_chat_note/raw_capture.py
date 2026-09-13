@@ -15,6 +15,7 @@ from uuid import uuid4
 from .chat_logs import read_thread_source, source_ref
 
 RAW_MANIFEST_SCHEMA_VERSION = 3
+# Stable storage ownership identifier; retained across the CLI/package rename.
 RAW_OWNERSHIP_MARKER = ".tkn-genai-chat-note-root.json"
 RAW_OWNER_APPLICATION_ID = "tkn-genai-chat-note-pipeline"
 RAW_OWNER_SCHEMA_VERSION = 1

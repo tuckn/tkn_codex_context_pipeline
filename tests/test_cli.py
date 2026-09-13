@@ -7,10 +7,10 @@ from pathlib import Path
 import pytest
 from pytest import CaptureFixture
 
-from tkn_genai_chat_note.chat_logs import read_thread_source
-from tkn_genai_chat_note.cli import LOGGER, _configure_logging, _progress, build_parser, main
-from tkn_genai_chat_note.config import CONFIG_SCHEMA_VERSION
-from tkn_genai_chat_note.console_logging import SUCCESS, ColorFormatter
+from tkn_codex_chat_note.chat_logs import read_thread_source
+from tkn_codex_chat_note.cli import LOGGER, _configure_logging, _progress, build_parser, main
+from tkn_codex_chat_note.config import CONFIG_SCHEMA_VERSION
+from tkn_codex_chat_note.console_logging import SUCCESS, ColorFormatter
 
 
 @pytest.mark.parametrize(
@@ -40,7 +40,7 @@ def test_clone_dry_run_and_pull_initialization_boundary(tmp_path: Path, capsys: 
     from test_pipeline_workflow import config_for
     from test_session_note_pipeline import write_chat
 
-    from tkn_genai_chat_note.config import write_config
+    from tkn_codex_chat_note.config import write_config
 
     config = config_for(tmp_path)
     target = tmp_path / "config.yaml"
@@ -62,7 +62,7 @@ def test_pipeline_exit_codes_and_compact_output(
     failed: bool,
     expected: int,
 ) -> None:
-    import tkn_genai_chat_note.pipeline as pipeline
+    import tkn_codex_chat_note.pipeline as pipeline
 
     def fake_run(*args, **kwargs):
         return {
@@ -227,7 +227,7 @@ def test_config_init_cli_creates_then_keeps_the_user_config(
     capsys: CaptureFixture[str],
 ) -> None:
     home = tmp_path / "home"
-    target = home / ".tkn/genai_chat_note_pipeline/config.yaml"
+    target = home / ".tkn/codex_chat_note_pipeline/config.yaml"
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
 
@@ -334,7 +334,7 @@ sourceFingerprint: abc123
 
 
 @pytest.mark.parametrize("provider", ["claude-code", "github-copilot"])
-def test_future_chat_provider_can_be_inspected_but_not_processed(
+def test_other_acquisition_providers_are_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: CaptureFixture[str], provider: str
 ) -> None:
     from test_config import write_yaml
@@ -345,12 +345,10 @@ def test_future_chat_provider_can_be_inspected_but_not_processed(
         target,
         {"chat": {"providers": {provider: {"sources": {"windows": {"enabled": True, "source_root": "~/source"}}}}}},
     )
-    assert main(["--config", str(target), "config", "show"]) == 0
-    output = json.loads(capsys.readouterr().out)
-    assert output["config"]["chat"]["providers"][provider]["sources"]["windows"]["enabled"] is True
-    assert output["sources"][f"chat.providers.{provider}.sources.windows.enabled"].startswith("explicit:")
+    assert main(["--config", str(target), "config", "show"]) == 1
+    assert "unknown configuration key: chat" in json.loads(capsys.readouterr().out)["error"]
     assert main(["--config", str(target), "raw", "ingest", "--dry-run"]) == 1
-    assert "chat acquisition is not implemented" in json.loads(capsys.readouterr().out)["error"]
+    assert "unknown configuration key: chat" in json.loads(capsys.readouterr().out)["error"]
     assert not (tmp_path / "user").exists()
 
 
@@ -361,3 +359,15 @@ def test_session_note_command_and_legacy_reader(capsys: CaptureFixture[str]) -> 
     assert json.loads(capsys.readouterr().out)["schemaVersion"] == 5
     with pytest.raises(SystemExit):
         main(["thread-notes", "build"])
+
+
+def test_cli_name_and_version_match_package(capsys: CaptureFixture[str]) -> None:
+    from tkn_codex_chat_note import __version__
+
+    with pytest.raises(SystemExit) as exit_info:
+        build_parser().parse_args(["--version"])
+    assert exit_info.value.code == 0
+    assert capsys.readouterr().out.strip() == f"tkn-codex-chat-note {__version__}"
+    help_text = build_parser().format_help()
+    assert "chat.providers" not in help_text
+    assert "Codex inputs use sources" in help_text

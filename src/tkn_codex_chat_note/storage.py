@@ -45,15 +45,13 @@ def legacy_storage_pending(config: AppConfig) -> bool:
 def validate_source_layout(config: AppConfig) -> None:
     """Check all configured outputs and enabled inputs before any source writes."""
     output_roots = [
-        (provider, source_id, kind, path.resolve())
-        for provider, group in config.chat.providers.entries().items()
-        for source_id in group.sources
-        for kind, path in config.source_storage_paths(provider, source_id).items()
+        ("codex", source_id, kind, path.resolve())
+        for source_id in config.sources
+        for kind, path in config.source_storage_paths(source_id).items()
     ]
     input_roots = [
-        (provider, source_id, source.source_root.expanduser().resolve())
-        for provider, group in config.chat.providers.entries().items()
-        for source_id, source in group.sources.items()
+        ("codex", source_id, source.source_root.expanduser().resolve())
+        for source_id, source in config.sources.items()
         if source.enabled
     ]
     for index, (provider, source_id, root) in enumerate(input_roots):
@@ -89,7 +87,7 @@ def validate_storage(
     for ownership in inspect_reset_target_ownership(roots):
         if ownership["status"] not in {"missing", "empty", "owned"}:
             raise PipelineError(f"refusing unowned or invalid pipeline root: {ownership['path']}; choose fresh roots")
-    for kind, namespace in config.source_storage_paths(config.source_provider, config.source_id).items():
+    for kind, namespace in config.source_storage_paths().items():
         for directory in (namespace,):
             if directory.is_symlink() or getattr(directory, "is_junction", lambda: False)():
                 raise PipelineError(f"{kind} source namespace must not be a link: {directory}")
@@ -176,7 +174,7 @@ def pipeline_storage(
     if metadata and metadata.get("storageVersion") != STORAGE_VERSION:
         raise PipelineError("unsupported pipeline storage version; choose fresh configured roots")
     if not metadata and not initialize:
-        raise PipelineError("pipeline is not initialized; run `tkn-genai-chat-note clone` first")
+        raise PipelineError("pipeline is not initialized; run `tkn-codex-chat-note clone` first")
     if metadata and (
         metadata.get("sourceId") != config.source_id or metadata.get("sourceProvider") != config.source_provider
     ):

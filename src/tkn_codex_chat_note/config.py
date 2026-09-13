@@ -28,10 +28,10 @@ from .session_notes import (
     atomic_write_text,
 )
 
-CONFIG_SCHEMA_VERSION: Literal["6.0.0"] = "6.0.0"
-_CONFIG_SCHEMA_VERSION_PARTS = (6, 0, 0)
+CONFIG_SCHEMA_VERSION: Literal["7.0.0"] = "7.0.0"
+_CONFIG_SCHEMA_VERSION_PARTS = (7, 0, 0)
 _CONFIG_SCHEMA_VERSION_PATTERN = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
-APP_DIRECTORY_NAME = "genai_chat_note_pipeline"
+APP_DIRECTORY_NAME = "codex_chat_note_pipeline"
 CONFIG_EXAMPLE_RESOURCE = "resources/config.example.yaml"
 ReasoningEffort = Literal["low", "medium", "high", "xhigh", "max", "ultra"]
 LEGACY_GENERATION_KEYS = frozenset(
@@ -154,13 +154,14 @@ def validate_source_id(value: str) -> str:
 SourceId = Annotated[str, AfterValidator(validate_source_id)]
 
 
-class ChatSourceConfig(BaseModel):
-    """One read-only source directory, identified by its enclosing map key."""
+class CodexSourceConfig(BaseModel):
+    """One local Codex input and its owned output roots; the map key is its ID."""
 
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool = False
-    source_root: Path
+    enabled: bool = True
+    source_root: Path = Field(default_factory=lambda: Path.home() / ".codex")
+    include_archived: bool = True
     raw_root: Path | None = None
     data_root: Path | None = None
     state_root: Path | None = None
@@ -173,129 +174,59 @@ class ChatSourceConfig(BaseModel):
         return value
 
 
-class CodexChatSourceConfig(ChatSourceConfig):
-    enabled: bool = True
-    source_root: Path = Field(default_factory=lambda: Path.home() / ".codex")
-    include_archived: bool = True
-
-
-class ChatProviderConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    sources: dict[SourceId, ChatSourceConfig] = Field(default_factory=dict)
-
-
-class CodexChatProviderConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    sources: dict[SourceId, CodexChatSourceConfig] = Field(
-        default_factory=lambda: {DEFAULT_SOURCE_ID: CodexChatSourceConfig()}
-    )
-
-
-class ChatProvidersConfig(BaseModel):
-    """Provider adapters contain independently configured source stores."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    codex: CodexChatProviderConfig = Field(default_factory=CodexChatProviderConfig)
-    claude_code: ChatProviderConfig = Field(
-        alias="claude-code",
-        default_factory=lambda: ChatProviderConfig(
-            sources={"windows-claude-code": ChatSourceConfig(source_root=Path.home() / ".claude")}
-        ),
-    )
-    github_copilot: ChatProviderConfig = Field(
-        alias="github-copilot",
-        default_factory=lambda: ChatProviderConfig(
-            sources={"windows-github-copilot": ChatSourceConfig(source_root=Path.home() / ".copilot")}
-        ),
-    )
-
-    def entries(self) -> dict[str, ChatProviderConfig | CodexChatProviderConfig]:
-        return {"codex": self.codex, "claude-code": self.claude_code, "github-copilot": self.github_copilot}
-
-    @model_validator(mode="after")
-    def unique_source_ids(self) -> Self:
-        for provider, settings in self.entries().items():
-            names = list(settings.sources)
-            if len({name.casefold() for name in names}) != len(names):
-                raise ValueError(f"source_id keys must be unique ignoring case within {provider}")
-        return self
-
-
-class ChatConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    providers: ChatProvidersConfig = Field(default_factory=ChatProvidersConfig)
-
-
 class AppConfig(BaseModel):
-    """Resolved application configuration and inference backend selection."""
+    """Codex acquisition sources and independent inference backend selection."""
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["6.0.0"] = CONFIG_SCHEMA_VERSION
+    schema_version: Literal["7.0.0"] = CONFIG_SCHEMA_VERSION
     installed_at: datetime | None = None
-    chat: ChatConfig = Field(default_factory=ChatConfig)
+    sources: dict[SourceId, CodexSourceConfig] = Field(default_factory=lambda: {DEFAULT_SOURCE_ID: CodexSourceConfig()})
     cache_root: Path = Field(default_factory=default_user_cache_root)
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
     idle_minutes: int = Field(default=DEFAULT_IDLE_MINUTES, ge=0)
     runtime_minutes: int = Field(default=DEFAULT_RUNTIME_MINUTES, gt=0)
     model_timeout_seconds: int = Field(default=DEFAULT_MODEL_TIMEOUT_SECONDS, gt=0)
 
-    _selected_source: tuple[str, str] | None = PrivateAttr(default=None)
+    _selected_source: str | None = PrivateAttr(default=None)
 
-    def for_source(self, provider: str, source_id: str) -> Self:
-        if source_id not in self.chat.providers.entries()[provider].sources:
-            raise PipelineError(f"unknown source_id: {provider}/{source_id}")
+    @model_validator(mode="after")
+    def unique_source_ids(self) -> Self:
+        if len({name.casefold() for name in self.sources}) != len(self.sources):
+            raise ValueError("source_id keys must be unique ignoring case")
+        return self
+
+    def for_source(self, source_id: str) -> Self:
+        if source_id not in self.sources:
+            raise PipelineError(f"unknown source_id: {source_id}")
         selected = self.model_copy()
-        selected._selected_source = (provider, source_id)
+        selected._selected_source = source_id
         return selected
 
     def enabled_source_configs(self, source_id: str | None = None) -> list[Self]:
         if self._selected_source is not None:
-            provider, selected_id = self._selected_source
-            if source_id is not None and source_id != selected_id:
+            if source_id is not None and source_id != self._selected_source:
                 raise PipelineError(f"unknown source_id: {source_id}")
-            entries = [(provider, selected_id, self.source_settings)]
-        else:
-            entries = [
-                (provider, name, source)
-                for provider, settings in self.chat.providers.entries().items()
-                for name, source in settings.sources.items()
-                if source_id is None or name == source_id
-            ]
-        if source_id is not None and not entries:
+            source_id = self._selected_source
+        if source_id is not None and source_id not in self.sources:
             raise PipelineError(f"unknown source_id: {source_id}")
-        enabled = [(provider, name) for provider, name, source in entries if source.enabled]
-        if source_id is not None and len(enabled) > 1:
-            raise PipelineError(f"ambiguous source_id across providers: {source_id}")
-        unsupported = [f"{provider}/{name}" for provider, name in enabled if provider != "codex"]
-        if unsupported:
-            raise PipelineError(
-                "chat acquisition is not implemented for "
-                + ", ".join(unsupported)
-                + "; set chat.providers.<provider>.sources.<source_id>.enabled to false; "
-                "generation providers are independent"
-            )
+        enabled = [
+            self.for_source(name)
+            for name, source in self.sources.items()
+            if source.enabled and (source_id is None or name == source_id)
+        ]
         if not enabled:
-            raise PipelineError(
-                "no supported chat source is enabled; set chat.providers.codex.sources.<source_id>.enabled to true"
-            )
-        return [self.for_source(provider, name) for provider, name in enabled]
+            raise PipelineError("no enabled Codex source selected; set sources.<source_id>.enabled to true")
+        return enabled
 
     @property
     def source_identity(self) -> tuple[str, str]:
-        if self._selected_source is not None:
-            return self._selected_source
-        sources = [("codex", name) for name, source in self.chat.providers.codex.sources.items() if source.enabled]
-        if len(sources) != 1:
-            raise PipelineError("select exactly one enabled source with --source <source_id>")
-        return sources[0]
+        # Published storage/evidence identities retain the acquisition application.
+        return ("codex", self.source_id)
 
     @property
-    def source_settings(self) -> ChatSourceConfig:
-        provider, source_id = self.source_identity
-        return self.chat.providers.entries()[provider].sources[source_id]
+    def source_settings(self) -> CodexSourceConfig:
+        return self.sources[self.source_id]
 
     @property
     def source_root(self) -> Path:
@@ -308,63 +239,60 @@ class AppConfig(BaseModel):
 
     @property
     def source_id(self) -> str:
-        return self.source_identity[1]
+        if self._selected_source is not None:
+            return self._selected_source
+        names = [name for name, source in self.sources.items() if source.enabled]
+        if len(names) != 1:
+            raise PipelineError("select exactly one enabled source with --source <source_id>")
+        return names[0]
 
     @property
     def source_provider(self) -> str:
-        return self.source_identity[0]
+        return "codex"
 
-    def source_storage_paths(self, provider: str, source_id: str | None = None) -> dict[str, Path]:
-        if source_id is None:
-            if self._selected_source is not None and self._selected_source[0] == provider:
-                source_id = self._selected_source[1]
-            else:
-                names = list(self.chat.providers.entries()[provider].sources)
-                if len(names) != 1:
-                    raise PipelineError(f"select a source_id for {provider}")
-                source_id = names[0]
-        settings = self.chat.providers.entries()[provider].sources[source_id]
+    def source_storage_paths(self, source_id: str | None = None) -> dict[str, Path]:
+        source_id = source_id if source_id is not None else self.source_id
+        settings = self.sources[source_id]
         paths = {
-            kind: (getattr(settings, kind + "_root") or default_app_root() / kind / provider / source_id)
+            kind: (getattr(settings, kind + "_root") or default_app_root() / kind / "codex" / source_id)
             .expanduser()
             .absolute()
             for kind in ("raw", "data", "state")
         }
-        paths["cache"] = self.cache_root.expanduser().absolute() / provider / source_id
+        paths["cache"] = self.cache_root.expanduser().absolute() / "codex" / source_id
         return paths
 
     @property
     def raw_root(self) -> Path:
-        return self.source_storage_paths(self.source_provider, self.source_id)["raw"]
+        return self.source_storage_paths()["raw"]
 
     @property
     def data_root(self) -> Path:
-        return self.source_storage_paths(self.source_provider, self.source_id)["data"]
+        return self.source_storage_paths()["data"]
 
     @property
     def state_root(self) -> Path:
-        return self.source_storage_paths(self.source_provider, self.source_id)["state"]
+        return self.source_storage_paths()["state"]
 
     @property
     def source_raw_root(self) -> Path:
-        return self.source_storage_paths(self.source_provider, self.source_id)["raw"]
+        return self.raw_root
 
     @property
     def source_data_root(self) -> Path:
-        return self.source_storage_paths(self.source_provider, self.source_id)["data"]
+        return self.data_root
 
     @property
     def source_state_root(self) -> Path:
-        return self.source_storage_paths(self.source_provider, self.source_id)["state"]
+        return self.state_root
 
     @property
     def source_cache_root(self) -> Path:
-        return self.source_storage_paths(self.source_provider, self.source_id)["cache"]
+        return self.source_storage_paths()["cache"]
 
     @property
     def include_archived(self) -> bool:
-        settings = self.source_settings
-        return isinstance(settings, CodexChatSourceConfig) and settings.include_archived
+        return self.source_settings.include_archived
 
     def require_supported_chat_sources(self) -> None:
         self.enabled_source_configs()
@@ -436,7 +364,7 @@ class AppConfig(BaseModel):
         installed_at = self.installed_at
         if installed_at is None:
             if not allow_missing_watermark:
-                raise PipelineError("installed_at is missing; run `tkn-genai-chat-note init` first")
+                raise PipelineError("installed_at is missing; run `tkn-codex-chat-note init` first")
             installed_at = datetime.now().astimezone()
         return PipelineConfig(
             installed_at=installed_at.astimezone().isoformat(timespec="seconds"),
@@ -538,8 +466,7 @@ def _default_config_document() -> dict[str, Any]:
     document = _without_null_provider_settings(AppConfig().model_dump(mode="python", by_alias=True))
     # Defer source defaults until validation: an explicit map must not acquire a
     # hidden built-in source. Later layers merge declared sources by stable ID.
-    for provider in document["chat"]["providers"].values():
-        provider.pop("sources")
+    document.pop("sources")
     return document
 
 
@@ -564,17 +491,19 @@ def _inspect_config_schema(value: dict[str, Any], path: Path) -> dict[str, Any]:
     raw_version = value["schema_version"]
     if raw_version == 2 or isinstance(raw_version, str) and re.fullmatch(r"[234]\.[0-9]+\.[0-9]+", raw_version):
         raise PipelineError(
-            "legacy configuration requires a new schema-6 config with source-local roots; "
+            "legacy configuration requires a new schema-7 config with source-local roots; "
             "use `storage migrate --from-config <old-config> --dry-run` with the new --config; "
             "the old configuration and data are not modified"
         )
 
-    if isinstance(raw_version, str) and re.fullmatch(r"5\.[0-9]+\.[0-9]+", raw_version):
+    if isinstance(raw_version, str) and re.fullmatch(r"[56]\.[0-9]+\.[0-9]+", raw_version):
         raise PipelineError(
-            "configuration schema 5 requires an explicit config-only update: "
-            "move each provider entry under sources.<source_id>, remove the source_id field, "
-            'rename home to source_root, and set schema_version to "6.0.0"; '
-            "retain IDs and roots; storage 5 needs no data migration"
+            "configuration schema 5/6 requires an explicit config-only update: "
+            "move chat.providers.codex.sources to top-level sources (for schema 5, "
+            "key the Codex entry by its source_id and rename home to source_root); "
+            'remove chat and set schema_version to "7.0.0"; retain IDs and final raw/data/state roots, '
+            "including old default paths; storage 5 needs no data migration. "
+            "Generation providers remain under generation.providers"
         )
     if not isinstance(raw_version, str) or not _CONFIG_SCHEMA_VERSION_PATTERN.fullmatch(raw_version):
         raise PipelineError(
@@ -587,7 +516,7 @@ def _inspect_config_schema(value: dict[str, Any], path: Path) -> dict[str, Any]:
     if major != current_major:
         direction = "newer" if major > current_major else "older"
         action = (
-            "upgrade tkn-genai-chat-note"
+            "upgrade tkn-codex-chat-note"
             if major > current_major
             else "migrate the configuration explicitly; no migration path is available"
         )
@@ -600,7 +529,7 @@ def _inspect_config_schema(value: dict[str, Any], path: Path) -> dict[str, Any]:
         raise PipelineError(
             f"unsupported newer configuration schema_version {raw_version!r}: {path}; "
             f"this application supports schema versions through {CONFIG_SCHEMA_VERSION}; "
-            "upgrade tkn-genai-chat-note"
+            "upgrade tkn-codex-chat-note"
         )
     migration: dict[str, Any] | None = None
     if minor < current_minor:
@@ -639,6 +568,17 @@ def _resolve_paths(value: dict[str, Any], base: Path) -> dict[str, Any]:
     for key in ("raw_root", "data_root", "state_root", "cache_root"):
         if result.get(key) is not None:
             result[key] = resolve(result[key])
+    source_map = result.get("sources")
+    if isinstance(source_map, dict):
+        if len({str(key).casefold() for key in source_map}) != len(source_map):
+            raise PipelineError("source_id keys must be unique ignoring case")
+        for settings in source_map.values():
+            if isinstance(settings, dict):
+                for key in ("source_root", "raw_root", "data_root", "state_root"):
+                    if settings.get(key) is not None:
+                        if isinstance(settings[key], str) and not settings[key].strip():
+                            raise PipelineError("source paths must not be empty")
+                        settings[key] = resolve(settings[key])
     chat = result.get("chat")
     providers = chat.get("providers") if isinstance(chat, dict) else None
     if isinstance(providers, dict):
@@ -776,6 +716,18 @@ def resolve_app_config(
     """Load defaults, global, project, explicit, then CLI overrides."""
 
     working = (cwd or Path.cwd()).absolute()
+    legacy_global = Path.home() / ".tkn" / "genai_chat_note_pipeline" / "config.yaml"
+    if (
+        not global_config_path().exists()
+        and legacy_global.is_file()
+        and explicit_path is None
+        and not project_config_path(working).exists()
+    ):
+        raise PipelineError(
+            f"legacy user configuration found: {legacy_global}; copy it to {global_config_path()} "
+            "and update to schema 7, preserving source IDs and final storage paths, "
+            "or pass an explicit schema-7 --config; no legacy config or data is modified"
+        )
     merged = _default_config_document()
     sources: dict[str, str] = {}
     _mark_sources(sources, _config_properties(merged), "built-in defaults")
@@ -872,7 +824,7 @@ def config_example_text() -> str:
     """Read the application-owned example distributed in the package."""
 
     try:
-        return files("tkn_genai_chat_note").joinpath(CONFIG_EXAMPLE_RESOURCE).read_text(encoding="utf-8")
+        return files("tkn_codex_chat_note").joinpath(CONFIG_EXAMPLE_RESOURCE).read_text(encoding="utf-8")
     except (FileNotFoundError, OSError) as exc:
         raise PipelineError(f"packaged config example is unavailable: {exc}") from exc
 
@@ -885,6 +837,13 @@ def initialize_user_config(
     """Create the user config safely from the packaged example."""
 
     target = (path or global_config_path()).expanduser().absolute()
+    legacy_global = Path.home() / ".tkn" / "genai_chat_note_pipeline" / "config.yaml"
+    if path is None and not target.exists() and legacy_global.is_file():
+        raise PipelineError(
+            f"legacy user configuration found: {legacy_global}; copy it to {target} "
+            "and update to schema 7 with top-level sources and existing final storage paths; "
+            "use --config <new-path> config init only to create a separate configuration"
+        )
     example = config_example_text()
     expected = example.encode("utf-8")
     backup_path: Path | None = None
@@ -927,11 +886,10 @@ def initialize_user_config(
 
 def config_document(config: AppConfig) -> dict[str, Any]:
     document = _without_null_provider_settings(config.model_dump(mode="json", by_alias=True))
-    for provider, group in document["chat"]["providers"].items():
-        for source_id, settings in group["sources"].items():
-            for kind, path in config.source_storage_paths(provider, source_id).items():
-                if kind != "cache":
-                    settings[kind + "_root"] = str(path)
+    for source_id, settings in document["sources"].items():
+        for kind, path in config.source_storage_paths(source_id).items():
+            if kind != "cache":
+                settings[kind + "_root"] = str(path)
     return document
 
 
@@ -945,7 +903,7 @@ def initialization_config(
 
     target = (path or global_config_path()).expanduser().absolute()
     if not target.is_file():
-        raise PipelineError(f"config not found: {target}; run `tkn-genai-chat-note config init` first")
+        raise PipelineError(f"config not found: {target}; run `tkn-codex-chat-note config init` first")
     raw: dict[str, Any] = {}
     removed: list[str] = []
     if target.is_file():

@@ -57,7 +57,7 @@ source events and explicit IDs rather than infer roles from display text. The ti
 JSON schema is unchanged.
 
 Chapter headings/order, optional-section conditions, and Last Known State field labels/order
-live in `src/tkn_genai_chat_note/profiles/default-jp/template.md` / `src/tkn_genai_chat_note/profiles/default-en/template.md`.
+live in `src/tkn_codex_chat_note/profiles/default-jp/template.md` / `src/tkn_codex_chat_note/profiles/default-en/template.md`.
 `{{?evidence}}` / `{{/evidence}}` and `{{?source_notes}}` / `{{/source_notes}}` include
 their heading and body only when the corresponding body has content. Conditional markers
 occupy their own lines and cannot nest; unclosed, unknown, or duplicate blocks fail validation.

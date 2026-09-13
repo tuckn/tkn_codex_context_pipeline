@@ -1,4 +1,4 @@
-"""Command-line interface for Tkn GenAI Chat Note Pipeline."""
+"""Command-line interface for Tkn Codex Chat Note Pipeline."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .config import (
     config_document,
     initialize_user_config,
@@ -24,7 +25,7 @@ from .session_notes import (
 )
 from .summary_resources import load_summary_profile
 
-LOGGER = logging.getLogger("tkn_genai_chat_note")
+LOGGER = logging.getLogger("tkn_codex_chat_note")
 
 
 def _utf8_console() -> None:
@@ -40,9 +41,9 @@ def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--provider",
         choices=("codex", "claude-code", "github-copilot", "ollama"),
-        help="Generation provider (generation.active_provider); chat sources use chat.providers",
+        help="Generation provider (generation.active_provider); Codex inputs use sources",
     )
-    parser.add_argument("--source", help="Select one enabled source_id from chat.providers.<provider>.sources")
+    parser.add_argument("--source", help="Select one enabled source_id from sources")
     parser.add_argument("--model")
     parser.add_argument(
         "--session-note-profile",
@@ -77,10 +78,10 @@ def _add_runtime_options(parser: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="tkn-genai-chat-note",
-        description="Preserve local AI chat evidence and generate reusable Session Notes.",
+        prog="tkn-codex-chat-note",
+        description="Preserve local Codex chat evidence and generate reusable Session Notes.",
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 0.14.0")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     _add_runtime_options(parser)
     commands = parser.add_subparsers(dest="command", required=True)
     config = commands.add_parser("config", help="Create or inspect configuration")
@@ -335,22 +336,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "storage": {
                         "layoutVersion": 5,
                         "sourceRoots": {
-                            provider: {
-                                source_id: {
-                                    **{
-                                        kind: str(path)
-                                        for kind, path in resolved.source_storage_paths(provider, source_id).items()
-                                    },
-                                    "catalog": str(
-                                        resolved.source_storage_paths(provider, source_id)["data"] / "catalog"
-                                    ),
-                                    "provenance": str(
-                                        resolved.source_storage_paths(provider, source_id)["data"] / "provenance"
-                                    ),
-                                }
-                                for source_id in group.sources
+                            source_id: {
+                                **{
+                                    kind: str(path)
+                                    for kind, path in resolved.source_storage_paths(source_id).items()
+                                },
+                                "catalog": str(resolved.source_storage_paths(source_id)["data"] / "catalog"),
+                                "provenance": str(resolved.source_storage_paths(source_id)["data"] / "provenance"),
                             }
-                            for provider, group in resolved.chat.providers.entries().items()
+                            for source_id in resolved.sources
                         },
                     },
                     "configSchema": {

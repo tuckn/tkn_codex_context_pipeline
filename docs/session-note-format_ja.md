@@ -52,7 +52,7 @@ EvidenceとSource Notesは記録項目がない場合に省略します。省略
 元イベントの構造化データと明示したID参照を使います。JSONの時系列スキーマは変更しません。
 
 章の見出し・順序・任意章の表示条件とLast Known Stateの項目名・順序は、
-`src/tkn_genai_chat_note/profiles/default-jp/template.md` / `src/tkn_genai_chat_note/profiles/default-en/template.md` で管理します。
+`src/tkn_codex_chat_note/profiles/default-jp/template.md` / `src/tkn_codex_chat_note/profiles/default-en/template.md` で管理します。
 `{{?evidence}}` / `{{/evidence}}`、`{{?source_notes}}` / `{{/source_notes}}` は、
 対応する本文がある場合だけ中の見出しと本文を表示する条件ブロックです。
 条件マーカーは単独行に置き、入れ子にはしません。閉じ忘れ・未知の名前・重複などはエラーになります。
